@@ -11,6 +11,7 @@ from krok_helper.subtitle_render.domain.paint import (
 )
 from krok_helper.subtitle_render.domain.models import (
     N3_FONT_INHERITANCE_FIELDS,
+    RUBY_DECORATION_OVERRIDE_FIELDS,
     Style,
     SubtitleStyleScheme,
 )
@@ -118,6 +119,16 @@ def style_for_role(style: Style, role_label: str | None) -> Style:
         scheme.karaoke_colors is not None or has_legacy_color_changes
     ):
         changes["ruby_karaoke_colors"] = None
+    # 方案显式「默认跟随主文字」时注音整体同步本方案主文字。方案侧的
+    # None 槽在上面会被 ``style_scheme_changes`` 过滤掉、合并后落到全局的
+    # 独立值上，必须显式清空注音覆盖槽（配色矩阵 + 装饰参数），否则全局
+    # 的独立注音外观会顶掉角色自己的跟随语义。只看方案自己的表态：全局
+    # follow=True 时全局槽位按迁移不变量本就为 None，无需在这里代劳。
+    if changes.get("ruby_colors_follow_main") is True:
+        changes["ruby_karaoke_colors"] = None
+        changes.update(
+            {field_name: None for field_name in RUBY_DECORATION_OVERRIDE_FIELDS}
+        )
     if not changes:
         return style
     return replace(style, **changes)

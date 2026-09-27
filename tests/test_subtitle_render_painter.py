@@ -9875,6 +9875,92 @@ def test_glow_concentration_payloads_are_clamped():
     assert restored.title_overlays[0].glow_concentration_level == 2
 
 
+def test_style_migration_materializes_ruby_decoration_when_independent():
+    """follow=False 的旧工程：None 装饰槽按主文字值 × 注音字号比物化冻结，
+    不再在渲染期实时跟随主文字（阴影 X/Y 的旧 BUG）。"""
+    restored = style_from_dict(
+        style_to_dict(
+            Style(
+                font_size_px=100,
+                ruby_font_size_px=50,
+                decoration_kind="shadow",
+                shadow_offset_x=10,
+                shadow_offset_y=-6,
+                glow_before_radius_px=20,
+                glow_after_radius_px=30,
+                glow_concentration_level=1,
+                ruby_colors_follow_main=False,
+            )
+        )
+    )
+    assert restored.ruby_colors_follow_main is False
+    assert restored.ruby_decoration_kind == "shadow"
+    assert restored.ruby_shadow_offset_x == 5
+    assert restored.ruby_shadow_offset_y == -3
+    assert restored.ruby_glow_before_radius_px == 10
+    assert restored.ruby_glow_after_radius_px == 15
+    assert restored.ruby_glow_concentration_level == 1
+
+    # 物化后再往返：值保持稳定。
+    again = style_from_dict(style_to_dict(restored))
+    assert again.ruby_shadow_offset_x == 5
+    assert again.ruby_glow_after_radius_px == 15
+
+
+def test_style_migration_flips_follow_only_for_decoration_overrides():
+    """follow=True + 装饰覆盖（旧渲染本就按字段优先）→ 翻转为关保外观；
+    只有矩阵副本（N3 导入映射）不参与翻转。"""
+    restored = style_from_dict(
+        style_to_dict(
+            Style(
+                font_size_px=100,
+                ruby_font_size_px=50,
+                ruby_colors_follow_main=True,
+                ruby_shadow_offset_x=7,
+            )
+        )
+    )
+    assert restored.ruby_colors_follow_main is False
+    assert restored.ruby_shadow_offset_x == 7  # 已设槽原样保留
+    assert restored.ruby_decoration_kind == "shadow"  # None 槽物化
+
+    matrix_only = style_from_dict(
+        style_to_dict(
+            Style(ruby_colors_follow_main=True, ruby_karaoke_colors=KaraokeColors())
+        )
+    )
+    assert matrix_only.ruby_colors_follow_main is True
+    assert matrix_only.ruby_karaoke_colors is not None
+
+    # 干净的跟随态：装饰槽保持 None（渲染实时回退主文字）。
+    clean = style_from_dict(style_to_dict(Style()))
+    assert clean.ruby_colors_follow_main is True
+    assert clean.ruby_decoration_kind is None
+    assert clean.ruby_shadow_offset_x is None
+    assert clean.ruby_glow_concentration_level is None
+
+
+def test_scheme_migration_flips_follow_only_for_decoration_overrides():
+    style = Style(
+        custom_style_schemes={
+            "A": SubtitleStyleScheme(
+                ruby_colors_follow_main=True,
+                ruby_shadow_offset_x=7,
+            ),
+            "B": SubtitleStyleScheme(
+                ruby_colors_follow_main=True,
+                ruby_karaoke_colors=KaraokeColors(),
+            ),
+        }
+    )
+    restored = style_from_dict(style_to_dict(style))
+
+    assert restored.custom_style_schemes["A"].ruby_colors_follow_main is False
+    assert restored.custom_style_schemes["A"].ruby_shadow_offset_x == 7
+    assert restored.custom_style_schemes["B"].ruby_colors_follow_main is True
+    assert restored.custom_style_schemes["B"].ruby_karaoke_colors is not None
+
+
 def _margin_track(text: str) -> TimingTrack:
     chars = [TimingChar(text=ch, start_ms=index * 500) for index, ch in enumerate(text)]
     return TimingTrack(lines=[TimingLine(chars=chars, end_ms=len(text) * 500)])

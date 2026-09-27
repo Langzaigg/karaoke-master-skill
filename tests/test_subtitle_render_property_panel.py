@@ -5594,7 +5594,8 @@ def test_property_panel_decoration_controls_visibility_and_emit_style(qapp):
     assert panel._glow_controls_row.isHidden()
 
 
-def test_property_panel_glow_concentration_is_shared_by_main_and_ruby(qapp):
+def test_property_panel_glow_concentration_routes_by_color_subject(qapp):
+    """主文字主体编辑浓度：跟随中注音同步清槽；注音主体编辑：独立写槽。"""
     panel = PropertyPanel()
     panel.set_style(
         Style(
@@ -5630,23 +5631,28 @@ def test_property_panel_glow_concentration_is_shared_by_main_and_ruby(qapp):
     assert emitted[-1].glow_concentration_level == 2
     assert emitted[-1].ruby_glow_concentration_level is None
 
+    # 切到注音主体：跟随中显示主文字的生效浓度。
     panel._color_subject_combo.setCurrentIndex(
         panel._color_subject_combo.findData("ruby")
     )
     assert panel._glow_concentration_combo.currentData() == 2
 
+    # 注音主体下编辑 = 退出跟随 + 写注音自己的槽位；主文字不再被改写。
     panel._glow_concentration_combo.setCurrentIndex(
         panel._glow_concentration_combo.findData(1)
     )
-    assert emitted[-1].ruby_glow_concentration_level is None
-    assert emitted[-1].glow_concentration_level == 1
+    assert emitted[-1].ruby_colors_follow_main is False
+    assert emitted[-1].ruby_glow_concentration_level == 1
+    assert emitted[-1].glow_concentration_level == 2
 
+    # 应用主文字配色只动颜色矩阵，装饰槽保持独立值。
     panel._apply_main_colors_to_ruby()
-    assert emitted[-1].ruby_glow_concentration_level is None
+    assert emitted[-1].ruby_glow_concentration_level == 1
 
     panel._decoration_type_combo.setCurrentIndex(
         panel._decoration_type_combo.findData("shadow")
     )
+    assert emitted[-1].ruby_decoration_kind == "shadow"
     assert panel._glow_concentration_field.isHidden()
 
 
@@ -6295,6 +6301,162 @@ def test_ruby_color_follow_toggle_detaches_and_restores_live_inheritance(qapp):
     assert emitted[-1].ruby_colors_follow_main is True
     assert panel._current_ruby_karaoke_colors() == emitted[-1].karaoke_colors
     assert not panel._ruby_apply_main_btn.isEnabled()
+
+
+def test_ruby_follow_off_snapshots_decoration_and_main_edits_stop_leaking(qapp):
+    """关闭跟随后装饰参数整卡独立：主文字改阴影 X 不再牵动注音（旧 BUG）。"""
+    panel = PropertyPanel()
+    panel.set_style(
+        Style(
+            font_size_px=100,
+            ruby_font_size_px=50,
+            decoration_kind="shadow",
+            shadow_offset_x=10,
+            shadow_offset_y=10,
+        )
+    )
+    panel._color_subject_combo.setCurrentIndex(
+        panel._color_subject_combo.findData("ruby")
+    )
+    emitted: list[Style] = []
+    panel.styleChanged.connect(emitted.append)
+
+    # 跟随中注音主体显示缩放后的生效值（10 × 50/100 = 5）。
+    assert panel._shadow_x_spin.value() == 5
+
+    panel._ruby_colors_follow_main_check.setChecked(False)
+    detached = emitted[-1]
+    assert detached.ruby_colors_follow_main is False
+    assert detached.ruby_karaoke_colors is not None
+    assert detached.ruby_decoration_kind == "shadow"
+    assert detached.ruby_shadow_offset_x == 5
+    assert detached.ruby_shadow_offset_y == 5
+
+    # 回主文字主体改阴影 X：注音独立值保持 5 不动。
+    panel._color_subject_combo.setCurrentIndex(
+        panel._color_subject_combo.findData("main")
+    )
+    panel._shadow_x_spin.setValue(30)
+    assert emitted[-1].shadow_offset_x == 30
+    assert emitted[-1].ruby_shadow_offset_x == 5
+
+    # 重新打开跟随：装饰槽全部清空，渲染回退主文字（30 → 15）。
+    panel._color_subject_combo.setCurrentIndex(
+        panel._color_subject_combo.findData("ruby")
+    )
+    panel._ruby_colors_follow_main_check.setChecked(True)
+    restored = emitted[-1]
+    assert restored.ruby_colors_follow_main is True
+    assert restored.ruby_shadow_offset_x is None
+    assert restored.ruby_decoration_kind is None
+    assert restored.ruby_karaoke_colors is None
+    panel._sync_color_subject_style_controls()
+    assert panel._shadow_x_spin.value() == 15
+
+
+def test_ruby_decoration_edit_exits_follow_with_full_snapshot(qapp):
+    """跟随中在注音主体下编辑装饰 = 先整卡快照退出跟随，再落独立值。"""
+    panel = PropertyPanel()
+    panel.set_style(
+        Style(
+            font_size_px=100,
+            ruby_font_size_px=50,
+            decoration_kind="shadow",
+            shadow_offset_x=10,
+        )
+    )
+    panel._color_subject_combo.setCurrentIndex(
+        panel._color_subject_combo.findData("ruby")
+    )
+    emitted: list[Style] = []
+    panel.styleChanged.connect(emitted.append)
+
+    panel._shadow_x_spin.setValue(7)
+
+    style = emitted[-1]
+    assert style.ruby_colors_follow_main is False
+    assert style.ruby_shadow_offset_x == 7
+    assert style.shadow_offset_x == 10  # 主文字槽不动
+    assert style.ruby_karaoke_colors is not None  # 矩阵同步快照
+    assert style.ruby_decoration_kind == "shadow"
+    # 勾选框立即退出勾选（宿主回流 set_style 有等值快路径，不会补同步）。
+    assert not panel._ruby_colors_follow_main_check.isChecked()
+
+
+def test_ruby_subject_displays_scaled_effective_glow_values(qapp):
+    panel = PropertyPanel()
+    panel.set_style(
+        Style(
+            font_size_px=100,
+            ruby_font_size_px=50,
+            decoration_kind="glow",
+            glow_before_radius_px=20,
+            glow_after_radius_px=24,
+            glow_concentration_level=2,
+        )
+    )
+    panel._color_subject_combo.setCurrentIndex(
+        panel._color_subject_combo.findData("ruby")
+    )
+    panel._sync_color_subject_style_controls()
+
+    assert panel._decoration_type_combo.currentData() == "glow"
+    assert panel._glow_radius_spin.value() == 10
+    assert panel._glow_after_radius_spin.value() == 12
+    assert panel._glow_concentration_combo.currentData() == 2
+
+
+def test_role_ruby_follow_on_clears_inherited_independent_overrides(qapp):
+    """角色开跟随时，从全局继承来的注音独立值不得顶掉跟随语义。"""
+    style = Style(
+        ruby_colors_follow_main=False,
+        ruby_shadow_offset_x=9,
+        custom_style_schemes={"A": SubtitleStyleScheme(ruby_colors_follow_main=True)},
+    )
+    merged = style_for_role(style, "A")
+    assert merged.ruby_colors_follow_main is True
+    assert merged.ruby_shadow_offset_x is None
+    assert merged.ruby_karaoke_colors is None
+
+
+def test_role_ruby_follow_off_keeps_own_overrides(qapp):
+    style = Style(
+        ruby_colors_follow_main=False,
+        ruby_shadow_offset_x=9,
+        custom_style_schemes={"A": SubtitleStyleScheme(ruby_shadow_offset_x=4)},
+    )
+    merged = style_for_role(style, "A")
+    assert merged.ruby_shadow_offset_x == 4
+
+
+def test_role_card_ruby_follow_toggle_materializes_scheme_slots(qapp):
+    """角色卡片关跟随：装饰按角色自己的主文字物化进方案槽。"""
+    panel = PropertyPanel()
+    panel.set_style(
+        Style(
+            font_size_px=100,
+            ruby_font_size_px=50,
+            decoration_kind="shadow",
+            shadow_offset_x=10,
+            custom_style_schemes={"A": SubtitleStyleScheme(shadow_offset_x=20)},
+        )
+    )
+    panel.set_roles(["A"])
+    panel.set_current_scheme_key("custom:A")
+    panel._color_subject_combo.setCurrentIndex(
+        panel._color_subject_combo.findData("ruby")
+    )
+    emitted: list[Style] = []
+    panel.styleChanged.connect(emitted.append)
+
+    panel._ruby_colors_follow_main_check.setChecked(False)
+
+    scheme = emitted[-1].custom_style_schemes["A"]
+    assert scheme.ruby_colors_follow_main is False
+    # 物化基于角色自己的主文字阴影 X（20 × 50/100 = 10），不是全局的 10。
+    assert scheme.ruby_shadow_offset_x == 10
+    assert scheme.ruby_decoration_kind == "shadow"
+    assert scheme.ruby_karaoke_colors is not None
 
 
 def _latin_follow_check(panel):
@@ -9405,7 +9567,8 @@ def test_ruby_font_tab_edits_write_ruby_fields(qapp):
 
 
 def test_apply_main_colors_to_ruby_preserves_font_and_decoration_parameters(qapp):
-    """应用主文字配色只复制颜色，不修改字体页描边或方案装饰参数。"""
+    """应用主文字配色只复制颜色矩阵；字体页描边不动，装饰参数保持当前
+    生效值（跟随中调用则按注音字号比例物化冻结，外观不变）。"""
     panel = PropertyPanel()
     emitted: list[Style] = []
     panel.styleChanged.connect(emitted.append)
@@ -9422,11 +9585,14 @@ def test_apply_main_colors_to_ruby_preserves_font_and_decoration_parameters(qapp
     panel._apply_main_colors_to_ruby()
 
     style = emitted[-1]
+    assert style.ruby_colors_follow_main is False
     assert style.ruby_karaoke_colors is not None
     assert style.ruby_stroke_width_px == 11
     assert style.ruby_stroke2_width_px == 4
     assert style.shadow_offset_x == 6
-    assert style.ruby_shadow_offset_x is None
+    # 装饰槽物化：主文字 6 × (45/100) = 3（int(round(2.7))），不再留 None
+    # 让渲染期继续跟随主文字。
+    assert style.ruby_shadow_offset_x == 3
 
 
 def test_role_navigation_selects_target_without_card_header(qapp):

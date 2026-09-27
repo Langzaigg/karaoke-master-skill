@@ -174,6 +174,7 @@ from krok_helper.subtitle_render.n3.font_catalog import (
 from krok_helper.subtitle_render.domain.models import (
     N3_FONT_INHERITANCE_FIELDS,
     PRESET_REFERENCE_HEIGHT,
+    RUBY_DECORATION_OVERRIDE_FIELDS,
     StylePreset,
     SubtitleStyleScheme,
     Style,
@@ -184,6 +185,7 @@ from krok_helper.subtitle_render.domain.models import (
     TRACK_TIMING_FIELDS,
     effective_karaoke_animation,
     layout_display_name,
+    materialize_ruby_decoration_changes,
     rescale_scheme_font_sizes,
     resolve_volume_appearance,
 )
@@ -218,9 +220,22 @@ from krok_helper.subtitle_render.settings.screen import (
     screen_settings_to_dict,
 )
 from krok_helper.subtitle_render.engine.timing.timecode import format_timecode_ms, parse_timecode_ms
+from krok_helper.subtitle_render.engine.style.style_semantics import style_for_role
 
 _GLOBAL_SCHEME_KEY = "global"
 _CUSTOM_SCHEME_PREFIX = "custom:"
+
+#: 主文字装饰字段 → 注音覆盖槽。注音独立模式下装饰编辑写右侧槽位；
+#: ``None`` 表示未设定（渲染时按主文字值 × 注音字号比例回退）。
+_RUBY_DECORATION_SLOTS = {
+    "decoration_kind": "ruby_decoration_kind",
+    "glow_radius_px": "ruby_glow_radius_px",
+    "glow_before_radius_px": "ruby_glow_before_radius_px",
+    "glow_after_radius_px": "ruby_glow_after_radius_px",
+    "glow_concentration_level": "ruby_glow_concentration_level",
+    "shadow_offset_x": "ruby_shadow_offset_x",
+    "shadow_offset_y": "ruby_shadow_offset_y",
+}
 EDIT_COMMIT_DEBOUNCE_MS = 200
 """数值框 / 标题文字「还在连打」的判定窗口。
 
@@ -1562,24 +1577,30 @@ class PropertyPanel(QWidget):
     def _apply_main_colors_to_ruby(self) -> None:
         if self._syncing:
             return
-        # 只复制颜色和填充。字体卡片里的描边尺寸、以及方案共用的装饰参数
-        # 都不属于这个按钮的职责。
-        self._update_style(
-            ruby_colors_follow_main=False,
-            ruby_karaoke_colors=deepcopy(self._current_karaoke_colors()),
-        )
+        # 只复制颜色和填充矩阵；装饰参数保持当前生效值（跟随中则先物化
+        # 快照），字体卡片里的描边尺寸不属于这个按钮的职责。
+        changes = self._ruby_independence_changes()
+        changes["ruby_karaoke_colors"] = deepcopy(self._current_karaoke_colors())
+        self._update_style(**changes)
 
     def _on_ruby_colors_follow_main_toggled(self, checked: bool) -> None:
         if self._syncing:
             return
-        # None 是模型层的完整继承语义：文字、描边、描边2、装饰及其填充
-        # 参数都会实时读取主文字矩阵。关闭时复制当前值，保证外观不跳变。
-        self._update_style(
-            ruby_colors_follow_main=checked,
-            ruby_karaoke_colors=(
-                None if checked else deepcopy(self._current_karaoke_colors())
+        if checked:
+            # 打开跟随：清空全部独立覆盖（配色矩阵 + 装饰参数），文字、
+            # 描边、装饰及填充全部实时同步主文字。
+            self._update_style(
+                ruby_colors_follow_main=True,
+                ruby_karaoke_colors=None,
+                **{
+                    field_name: None
+                    for field_name in RUBY_DECORATION_OVERRIDE_FIELDS
+                },
             )
-        )
+            return
+        # 关闭跟随：整卡快照当前生效值，颜色矩阵与装饰参数全部转为独立，
+        # 保证外观不跳变。
+        self._update_style(**self._ruby_independence_changes())
 
     def _sync_ruby_color_follow_controls(self) -> None:
         if not hasattr(self, "_ruby_colors_follow_main_check"):
@@ -1606,21 +1627,36 @@ class PropertyPanel(QWidget):
         return self._role_color_page_builder.make_section(parent, inline=inline)
 
     def _update_shared_decoration(self, **changes) -> None:
-        """装饰是配色方案级参数；编辑时清除旧工程遗留的 ruby 独立覆盖。"""
-        ruby_fields = {
-            "decoration_kind": "ruby_decoration_kind",
-            "glow_radius_px": "ruby_glow_radius_px",
-            "glow_before_radius_px": "ruby_glow_before_radius_px",
-            "glow_after_radius_px": "ruby_glow_after_radius_px",
-            "glow_concentration_level": "ruby_glow_concentration_level",
-            "shadow_offset_x": "ruby_shadow_offset_x",
-            "shadow_offset_y": "ruby_shadow_offset_y",
-        }
+        """装饰编辑按配色主体路由：主文字槽位是权威存储；注音在独立模式
+        下写自己的覆盖槽，跟随中编辑则先整卡快照退出跟随（与编辑注音填充
+        颜色的行为一致）。"""
+        if self._current_color_subject_key() == "ruby":
+            self._update_ruby_decoration(**changes)
+            return
         shared = dict(changes)
-        shared.update(
-            {ruby_fields[field]: None for field in changes if field in ruby_fields}
-        )
+        if bool(self._scheme_value("ruby_colors_follow_main")):
+            # 跟随中：注音装饰实时读主文字，清掉遗留独立覆盖保持同步。
+            shared.update(
+                {
+                    ruby_field: None
+                    for field, ruby_field in _RUBY_DECORATION_SLOTS.items()
+                    if field in changes
+                }
+            )
         self._update_style(**shared)
+
+    def _update_ruby_decoration(self, **changes) -> None:
+        snapshot: dict[str, object] = {}
+        if bool(self._scheme_value("ruby_colors_follow_main")):
+            snapshot.update(self._ruby_independence_changes())
+        snapshot.update(
+            {
+                _RUBY_DECORATION_SLOTS[field]: value
+                for field, value in changes.items()
+                if field in _RUBY_DECORATION_SLOTS
+            }
+        )
+        self._update_style(**snapshot)
 
     def _make_solid_fill_page(self) -> QWidget:
         return self._role_fill_pages_builder.make_solid_page()
@@ -3327,6 +3363,38 @@ class PropertyPanel(QWidget):
             return self._current_ruby_karaoke_colors()
         return self._current_karaoke_colors()
 
+    def _effective_ruby_matrix(self) -> KaraokeColors:
+        """注音当前实际渲染的配色矩阵：独立矩阵优先，否则读主文字矩阵。"""
+        value = self._scheme_value("ruby_karaoke_colors")
+        if isinstance(value, KaraokeColors):
+            return deepcopy(value)
+        return self._current_karaoke_colors()
+
+    def _ruby_independence_changes(self) -> dict[str, object]:
+        """退出「跟随主文字」的整卡快照：矩阵取当前生效矩阵，装饰参数按
+        渲染同款回退物化（只填 None 槽），外观不跳变。"""
+        merged = style_for_role(self._style, self._current_custom_scheme_name())
+        changes: dict[str, object] = {
+            "ruby_colors_follow_main": False,
+            "ruby_karaoke_colors": deepcopy(self._effective_ruby_matrix()),
+        }
+        changes.update(materialize_ruby_decoration_changes(merged))
+        return changes
+
+    def _effective_ruby_decoration(self) -> dict[str, object]:
+        """注音装饰的生效值：覆盖槽有值取槽值，否则按渲染回退物化。"""
+        merged = style_for_role(self._style, self._current_custom_scheme_name())
+        effective: dict[str, object] = dict(
+            materialize_ruby_decoration_changes(merged)
+        )
+        for field_name in RUBY_DECORATION_OVERRIDE_FIELDS:
+            if field_name == "ruby_glow_radius_px":
+                continue  # 旧字段只参与回退链，显示用 before/after 槽
+            value = getattr(merged, field_name)
+            if value is not None:
+                effective[field_name] = value
+        return effective
+
     def _current_paint_fill(self) -> PaintFill:
         colors = self._current_editing_karaoke_colors()
         state = getattr(colors, self._current_color_state_key())
@@ -3404,7 +3472,13 @@ class PropertyPanel(QWidget):
         if not hasattr(self, "_decoration_type_field"):
             return
         is_decoration = self._current_color_layer_key() == "shadow"
-        decoration_kind = str(self._scheme_value("decoration_kind"))
+        if self._current_color_subject_key() == "ruby":
+            kind = self._scheme_value("ruby_decoration_kind")
+            decoration_kind = str(
+                kind if kind is not None else self._scheme_value("decoration_kind")
+            )
+        else:
+            decoration_kind = str(self._scheme_value("decoration_kind"))
         is_shadow = decoration_kind == "shadow"
         is_glow = decoration_kind == "glow"
         self._decoration_type_field.setVisible(is_decoration)
@@ -3421,34 +3495,34 @@ class PropertyPanel(QWidget):
         was_syncing = self._syncing
         self._syncing = True
         try:
+            if self._current_color_subject_key() == "ruby":
+                values = self._effective_ruby_decoration()
+                kind = str(values["ruby_decoration_kind"])
+                shadow_x = int(values["ruby_shadow_offset_x"])
+                shadow_y = int(values["ruby_shadow_offset_y"])
+                glow_before = int(values["ruby_glow_before_radius_px"])
+                glow_after = int(values["ruby_glow_after_radius_px"])
+                concentration = int(values["ruby_glow_concentration_level"])
+            else:
+                kind = str(self._scheme_value("decoration_kind"))
+                shadow_x = int(self._scheme_value("shadow_offset_x"))
+                shadow_y = int(self._scheme_value("shadow_offset_y"))
+                glow_before = int(self._scheme_value("glow_before_radius_px"))
+                glow_after = int(self._scheme_value("glow_after_radius_px"))
+                concentration = int(self._scheme_value("glow_concentration_level"))
             self._decoration_type_combo.setCurrentIndex(
-                max(
-                    0,
-                    self._decoration_type_combo.findData(
-                        str(self._scheme_value("decoration_kind"))
-                    ),
-                )
+                max(0, self._decoration_type_combo.findData(kind))
             )
-            self._glow_radius_spin.setValue(
-                int(self._scheme_value("glow_before_radius_px"))
-            )
-            self._glow_after_radius_spin.setValue(
-                int(self._scheme_value("glow_after_radius_px"))
-            )
+            self._glow_radius_spin.setValue(glow_before)
+            self._glow_after_radius_spin.setValue(glow_after)
             self._glow_concentration_combo.setCurrentIndex(
                 max(
                     0,
-                    self._glow_concentration_combo.findData(
-                        int(self._scheme_value("glow_concentration_level"))
-                    ),
+                    self._glow_concentration_combo.findData(concentration),
                 )
             )
-            self._shadow_x_spin.setValue(
-                int(self._scheme_value("shadow_offset_x"))
-            )
-            self._shadow_y_spin.setValue(
-                int(self._scheme_value("shadow_offset_y"))
-            )
+            self._shadow_x_spin.setValue(shadow_x)
+            self._shadow_y_spin.setValue(shadow_y)
             self._sync_decoration_visibility()
         finally:
             self._syncing = was_syncing
@@ -4326,6 +4400,14 @@ class PropertyPanel(QWidget):
                 _SCHEME_FIELDS | {"singer_style_overrides", "custom_style_schemes"}
             ):
                 self._sync_subtitle_scheme_controls()
+            if set(changes).intersection(
+                {"ruby_colors_follow_main", "ruby_karaoke_colors"}
+                | set(_RUBY_DECORATION_SLOTS.values())
+            ):
+                # 跟随开关可能在编辑中被翻转（注音装饰/填充编辑自动退出跟随、
+                # 应用主文字配色），勾选框要立即跟上；宿主回流 set_style 走
+                # 等值快路径不会补这次同步。
+                self._sync_ruby_color_follow_controls()
             if set(changes).intersection(_LIT_FIELDS):
                 self._sync_lit_controls()
         finally:

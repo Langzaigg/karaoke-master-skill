@@ -1683,6 +1683,104 @@ def style_to_dict(style: Style) -> dict:
     return data
 
 
+RUBY_DECORATION_OVERRIDE_FIELDS: tuple[str, ...] = (
+    "ruby_decoration_kind",
+    "ruby_glow_radius_px",
+    "ruby_glow_before_radius_px",
+    "ruby_glow_after_radius_px",
+    "ruby_glow_concentration_level",
+    "ruby_shadow_offset_x",
+    "ruby_shadow_offset_y",
+)
+"""注音装饰的独立覆盖槽。``None`` = 未设定，渲染时回退主文字对应值。"""
+
+
+def _ruby_materialize_px(value: int, scale: float) -> int:
+    """与 :func:`krok_helper.subtitle_render.engine.ruby.scaled_px` 同式。"""
+    if value <= 0:
+        return 0
+    return max(1, int(round(value * scale)))
+
+
+def _ruby_materialize_signed_px(value: int, scale: float) -> int:
+    """与 :func:`krok_helper.subtitle_render.engine.ruby.scaled_signed_px` 同式。"""
+    if value == 0:
+        return 0
+    sign = 1 if value > 0 else -1
+    return sign * max(1, int(round(abs(value) * scale)))
+
+
+def materialize_ruby_decoration_changes(style: Style) -> dict[str, object]:
+    """把渲染器为 None 注音装饰槽推导的回退值物化成存储值。
+
+    渲染侧（Python ``engine/render/effects/metrics.py`` 与 native
+    ``gpu_scene_projection.cpp``）对未设定的注音装饰槽按主文字值 × 注音/
+    主文字字号比例回退。本函数把同一回退值填进 None 槽，只填空槽、已设
+    值原样保留，因此物化前后渲染结果不变。「关闭默认跟随主文字」的整卡
+    快照与旧工程迁移都走这里。发光半径物化时不吃浓度门控（保留主文字的
+    潜在半径，供之后切换装饰类型继续编辑）；``ruby_glow_radius_px`` 是
+    旧字段，渲染链为 before/after → 旧字段 → 主文字缩放，物化同样按该
+    链取值。
+    """
+    scale = max(int(style.ruby_font_size_px), 1) / max(int(style.font_size_px), 1)
+    changes: dict[str, object] = {}
+    if style.ruby_decoration_kind is None:
+        changes["ruby_decoration_kind"] = style.decoration_kind
+    if style.ruby_shadow_offset_x is None:
+        changes["ruby_shadow_offset_x"] = _ruby_materialize_signed_px(
+            style.shadow_offset_x, scale
+        )
+    if style.ruby_shadow_offset_y is None:
+        changes["ruby_shadow_offset_y"] = _ruby_materialize_signed_px(
+            style.shadow_offset_y, scale
+        )
+    legacy_glow = (
+        max(int(style.ruby_glow_radius_px), 0)
+        if style.ruby_glow_radius_px is not None
+        else None
+    )
+    if style.ruby_glow_before_radius_px is None:
+        changes["ruby_glow_before_radius_px"] = (
+            legacy_glow
+            if legacy_glow is not None
+            else _ruby_materialize_px(max(int(style.glow_before_radius_px), 0), scale)
+        )
+    if style.ruby_glow_after_radius_px is None:
+        changes["ruby_glow_after_radius_px"] = (
+            legacy_glow
+            if legacy_glow is not None
+            else _ruby_materialize_px(max(int(style.glow_after_radius_px), 0), scale)
+        )
+    if style.ruby_glow_concentration_level is None:
+        changes["ruby_glow_concentration_level"] = normalize_glow_concentration_level(
+            style.glow_concentration_level
+        )
+    return changes
+
+
+def _migrate_ruby_follow_independence(style: Style) -> Style:
+    """旧工程迁移到「跟随开关管全部注音装饰」的新语义（外观不变）。
+
+    - 开关为开却存有注音装饰独立覆盖 → 翻转为关：旧渲染本就按字段优先
+      绘制，翻转只是让开关诚实。配色矩阵不参与翻转：跟随中的矩阵副本
+      （如 N3 导入）走「编辑主文字颜色即清空」的既有同步路径。
+    - 开关为关且装饰槽仍有 None → 按主文字当前值物化：旧版这些槽实时
+      跟随主文字（阴影 X/Y 等 BUG），物化后冻结为独立值，画面与旧版一致。
+    """
+    has_decoration_override = any(
+        getattr(style, field_name) is not None
+        for field_name in RUBY_DECORATION_OVERRIDE_FIELDS
+    )
+    if style.ruby_colors_follow_main:
+        if not has_decoration_override:
+            return style
+        style = replace(style, ruby_colors_follow_main=False)
+    changes = materialize_ruby_decoration_changes(style)
+    if changes:
+        style = replace(style, **changes)
+    return style
+
+
 def style_from_dict(payload: object) -> Style:
     """Build ``Style`` from a dict, ignoring unknown or invalid fields."""
     if not isinstance(payload, dict):
@@ -2049,7 +2147,7 @@ def style_from_dict(payload: object) -> Style:
         changes["volume_stroke_width"] = changes.get("lit_stroke_width", 2)
         changes["volume_opacity_pct"] = changes.get("lit_opacity_pct", 100)
     _migrate_title_references(changes)
-    return ensure_page_layout_defaults(Style(**changes))
+    return _migrate_ruby_follow_independence(ensure_page_layout_defaults(Style(**changes)))
 
 
 def _migrate_title_references(changes: dict) -> None:
@@ -2602,11 +2700,22 @@ def subtitle_style_scheme_from_dict(payload: object) -> SubtitleStyleScheme:
             changes[key] = bool(value) if value is not None else None
         else:
             changes[key] = value
-    if (
-        "ruby_colors_follow_main" not in payload
-        and changes.get("ruby_karaoke_colors") is not None
+    has_ruby_override = (
+        changes.get("ruby_karaoke_colors") is not None
+        or any(
+            changes.get(field_name) is not None
+            for field_name in RUBY_DECORATION_OVERRIDE_FIELDS
+        )
+    )
+    if "ruby_colors_follow_main" not in payload and has_ruby_override:
+        # 旧角色方案保存过独立注音矩阵/装饰时，保留原行为。
+        changes["ruby_colors_follow_main"] = False
+    if changes.get("ruby_colors_follow_main") and any(
+        changes.get(field_name) is not None
+        for field_name in RUBY_DECORATION_OVERRIDE_FIELDS
     ):
-        # 旧角色方案保存过独立注音矩阵时，保留原行为。
+        # 与全局迁移同款翻转：开关为开却带装饰独立覆盖 → 关（渲染本就按
+        # 字段优先）；矩阵副本不参与翻转，跟随 N3 导入映射的既有语义。
         changes["ruby_colors_follow_main"] = False
     return SubtitleStyleScheme(**changes)
 

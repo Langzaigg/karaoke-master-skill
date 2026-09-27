@@ -267,7 +267,8 @@ class RoleColorPropertyPageBuilder:
         )
         host._ruby_colors_follow_main_check.setChecked(True)
         host._ruby_colors_follow_main_check.setToolTip(
-            "勾选后，注音的文字、描边、描边2、装饰及全部填充参数实时跟随主文字配色。"
+            "勾选后，注音的文字、描边、描边2、装饰及全部填充参数实时跟随主文字配色；"
+            "取消勾选后整卡转为独立设置（当前值自动保留）。"
         )
         host._ruby_colors_follow_main_check.toggled.connect(
             host._on_ruby_colors_follow_main_toggled
