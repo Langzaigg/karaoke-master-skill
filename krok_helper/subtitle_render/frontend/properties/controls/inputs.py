@@ -6,6 +6,7 @@ from collections.abc import Callable, Iterable
 from typing import Any, Optional
 
 from PyQt6.QtCore import (
+    QEvent,
     QPoint,
     QPropertyAnimation,
     QRegularExpression,
@@ -20,7 +21,14 @@ from PyQt6.QtGui import (
     QRegularExpressionValidator,
     QValidator,
 )
-from PyQt6.QtWidgets import QHBoxLayout, QSizePolicy, QStackedWidget, QStyle, QWidget
+from PyQt6.QtWidgets import (
+    QApplication,
+    QHBoxLayout,
+    QSizePolicy,
+    QStackedWidget,
+    QStyle,
+    QWidget,
+)
 from qfluentwidgets import (
     BodyLabel,
     ComboBox as FluentComboBox,
@@ -501,6 +509,15 @@ class WheelFocusedDoubleSpinBox(UnitProtectedSpinBoxMixin, FluentDoubleSpinBox):
         super().wheelEvent(event)
 
 
+def _widget_is_within(widget: Optional[QWidget], ancestor: QWidget) -> bool:
+    """Return True when ``widget`` is ``ancestor`` itself or one of its children."""
+    while widget is not None:
+        if widget is ancestor:
+            return True
+        widget = widget.parentWidget()
+    return False
+
+
 class _FontMenuSearchEdit(FluentLineEdit):
     """Filter box pinned above the font popup list; navigation keys go to the list."""
 
@@ -561,10 +578,62 @@ class _FilterableFontMenu(ComboBoxMenu):
         self.addWidget(self._empty_hint, selectable=False)
         self.view.item(self._EMPTY_HINT_ROW).setHidden(True)
         self._search.textChanged.connect(self._apply_filter)
+        # 聚焦定时器只在构造时建一个：菜单会跨打开缓存复用，exec 里现建
+        # 会给 search 堆一堆用完即弃的 QTimer 子对象。
+        # 定时器挂在 search 之下：菜单先关再触发时定时器随其销毁，回调不会
+        # 摸到已删除的 C++ 对象（PyQt6 没有 QPointer 可用）。
+        self._focus_timer = QTimer(self._search)
+        self._focus_timer.setSingleShot(True)
+        self._focus_timer.timeout.connect(self._focus_search)
+        # Windows 的输入法（IME）不会附加到 Qt::Popup 类窗口上，筛选框因此
+        # 只收得到直接按键（英文），中文等需要输入法组合的文字根本打不进
+        # 来。换成 Tool 类窗口换回输入法支持；失去的「点外部自动关闭」由
+        # 应用级按下监听（eventFilter）与失活关闭（event）补上。
+        self.setWindowFlags(
+            Qt.WindowType.Tool
+            | Qt.WindowType.FramelessWindowHint
+            | Qt.WindowType.NoDropShadowWindowHint
+        )
 
     def action_for_item(self, index: int) -> QAction:
         """Return the menu action bound to combo item ``index``."""
         return self.menuActions()[self._FIRST_ITEM_ROW + index]
+
+    def _hasItemIcon(self) -> bool:  # noqa: N802 - qfluentwidgets hook
+        """Font rows never carry icons; short-circuit the per-add icon scan.
+
+        上游 _adjustItemText 每加一条都全量扫描 ``_actions`` 的图标
+        （O(N²)，500+ 字体约 80ms）。若上游改名后不再调到这里，只会
+        退回慢路径，行为不变。
+        """
+        return False
+
+    def add_font_actions(self, actions: Iterable[QAction]) -> None:
+        """Populate font rows in one pass, adjusting the layout once at the end.
+
+        上游 RoundMenu.addAction 每条都做一次全列表 adjustSize 与图标扫描
+        （各是 O(N²)，500+ 字体一次填充约 210ms，即打开瞬间的卡顿）。
+        上游私有方法不可用时逐条回退到公开 addAction（慢但正确）。
+        """
+        create_item = getattr(self, "_createActionItem", None)
+        if not callable(create_item):
+            for action in actions:
+                self.addAction(action)
+            return
+        view = self.view
+        view.setUpdatesEnabled(False)
+        # view.addItem 每条末尾也会全量 adjustSize（同样是 O(N²)）：填充期间
+        # 把实例上的 adjustSize 短路掉，结束后统一调一次真实实现。若上游
+        # 不再调用它，这里的短路自然失效，只是退回慢路径。
+        real_adjust_size = view.adjustSize
+        view.adjustSize = lambda *args, **kwargs: None
+        try:
+            for action in actions:
+                view.addItem(create_item(action))
+        finally:
+            del view.adjustSize
+            view.setUpdatesEnabled(True)
+        real_adjust_size()
 
     def set_default_item(self, index: int) -> None:
         """Highlight the row bound to combo item ``index`` on open."""
@@ -604,23 +673,73 @@ class _FilterableFontMenu(ComboBoxMenu):
     ) -> None:
         self._exec_pos = QPoint(pos)
         self._ani_type = aniType
+        # 菜单实例跨打开复用：上一次的筛选文字与隐藏行必须先复位，否则
+        # 重开的列表带着旧过滤状态。clear 会经 textChanged 触发复位。
+        if self._search.text():
+            self._search.clear()
         self._fit_view(pos, aniType)
         self.aniManager = MenuAnimationManager.make(self, aniType)
-        self.aniManager.exec(pos)
+        # 不播滑动动画：仅借用方向管理器计算终点。availableViewSize 与
+        # _endPosition 都随 DROP_DOWN / PULL_UP 变化（NONE 会按全屏高度
+        # 算尺寸、按下拉语义锚定，弹层又会高又窜位），动画本身不启动、
+        # 直接就位即可。
+        self.move(self.aniManager._endPosition(pos))
         self.show()
         # 首次 show 之前 viewport 的 resize 事件是挂起的，此刻读到的几何
         # 还是布局前的旧值，show 后必须重新放置一次。
         self._place_search()
-        # 定时器挂在 search 之下：菜单先关再触发时定时器随其销毁，回调不会
-        # 摸到已删除的 C++ 对象（PyQt6 没有 QPointer 可用）。
-        focus_timer = QTimer(self._search)
-        focus_timer.setSingleShot(True)
-        focus_timer.timeout.connect(self._focus_search)
-        focus_timer.start(0)
+        # Tool 窗口没有 Qt::Popup 的系统级「点外部关闭」，挂一个应用级
+        # 按下监听补上；隐藏时（hideEvent）移除，销毁时 Qt 也会自动注销。
+        app = QApplication.instance()
+        if app is not None:
+            app.installEventFilter(self)
+        self._focus_timer.start(0)
+
+    def event(self, e) -> bool:  # noqa: N802 - Qt API
+        # 切到别的程序 / 别的窗口（Alt+Tab、点击其他应用）时收起菜单；
+        # 应用内点击由 eventFilter 的按下监听处理。
+        if e.type() == QEvent.Type.WindowDeactivate:
+            self.close()
+        return super().event(e)
+
+    def eventFilter(self, obj, event) -> bool:  # noqa: N802 - Qt API
+        if event.type() == QEvent.Type.MouseButtonPress and self.isVisible():
+            pressed = obj if isinstance(obj, QWidget) else None
+            if not _widget_is_within(pressed, self):
+                self._close_for_outside_press(pressed)
+        return super().eventFilter(obj, event)
+
+    def hideEvent(self, event) -> None:  # noqa: N802 - Qt API
+        app = QApplication.instance()
+        if app is not None:
+            app.removeEventFilter(self)
+        super().hideEvent(event)
+
+    def _close_for_outside_press(self, pressed: Optional[QWidget]) -> None:
+        """Close for a press outside the menu.
+
+        A press on the owner combo additionally arms the reopen guard: the
+        pending release would run ``_toggleComboMenu`` and instantly reopen
+        the menu otherwise.
+        """
+        combo = self.parent()
+        on_combo = isinstance(
+            combo, WheelFocusedFontComboBox
+        ) and _widget_is_within(pressed, combo)
+        self.close()
+        if on_combo:
+            # close() 的 closedSignal 在 win32 上按光标位置决定是否保留
+            # dropMenu（此时光标仍在组合框上会保留）；统一清掉并立牌，让
+            # 随后的 release toggle 不再把菜单弹回来。
+            combo.dropMenu = None
+            combo._suppress_combo_reopen = True
 
     def _focus_search(self) -> None:
         """Re-pin the filter box once layout settles, then take keyboard focus."""
         self._place_search()
+        # Tool 窗口必须先成为活动窗口，IME 才会挂到筛选框上；只 setFocus
+        # 不足以激活输入法。
+        self.activateWindow()
         self._search.setFocus()
 
     def _visible_item_rows(self) -> list[int]:
@@ -727,6 +846,11 @@ class WheelFocusedFontComboBox(WheelFocusedComboBox):
     #: 弹层条目数达到该值才启用筛选框，避免短列表出现无意义的输入框。
     filter_min_items = 12
 
+    #: 后台预热的起始延迟与相邻字体槽之间的错峰间隔（毫秒）。
+    _FONT_MENU_WARMUP_BASE_MS = 500
+    _FONT_MENU_WARMUP_STAGGER_MS = 150
+    _font_menu_warmup_index = 0
+
     def __init__(
         self,
         parent: Optional[QWidget] = None,
@@ -739,12 +863,19 @@ class WheelFocusedFontComboBox(WheelFocusedComboBox):
         super().__init__(parent)
         self._canonicalize_family = canonicalize_family
         self._inheritance_label: Optional[str] = None
+        # 菜单因「点击组合框」而关闭时置位：同一次点击的 release 会再走
+        # _showComboMenu，置位时吞掉这一次，避免菜单被立刻重新弹开。
+        self._suppress_combo_reopen = False
+        # 长目录筛选菜单跨打开复用（每次重建 500+ 条目要花约 200ms，
+        # 是打开瞬间卡顿的主因）；短目录仍走上游的一次性菜单。
+        self._cached_font_menu: Optional[_FilterableFontMenu] = None
         self.addItems(tuple(font_families_provider()))
         self.currentIndexChanged.connect(
             lambda _index: self.currentFontChanged.emit(self.currentFont())
         )
         if self.count() >= self.filter_min_items:
             self.setToolTip("展开后可在顶部输入框输入关键字筛选字体")
+            self._schedule_font_menu_warmup()
 
     def enable_inheritance(self, label: str) -> None:
         """Add an explicit N3-style zero slot before installed families."""
@@ -776,29 +907,86 @@ class WheelFocusedFontComboBox(WheelFocusedComboBox):
         self.setCurrentIndex(index)
 
     def _createComboMenu(self):  # noqa: N802 - qfluentwidgets hook
-        if self.count() >= self.filter_min_items:
-            return _FilterableFontMenu(self)
-        return super()._createComboMenu()
+        if self.count() < self.filter_min_items:
+            return super()._createComboMenu()
+        cached = self._cached_font_menu
+        # menuActions() 还包含空提示行（addWidget 也进 _actions），要多算一行
+        if (
+            cached is not None
+            and len(cached.menuActions()) == len(self.items) + cached._FIRST_ITEM_ROW
+        ):
+            return cached
+        if cached is not None:
+            # 条目数对不上（理论上构造完成后不会发生）：旧菜单整只换新
+            cached.deleteLater()
+        self._cached_font_menu = _FilterableFontMenu(self)
+        return self._cached_font_menu
 
-    def _showComboMenu(self) -> None:  # noqa: N802 - qfluentwidgets hook
-        """Open the popup, offsetting the default action past the filter rows."""
-        if not self.items:
+    def _ensure_menu_populated(self, menu) -> None:
+        """Populate ``menu`` with the catalog rows unless it already has them."""
+        row_offset = (
+            menu._FIRST_ITEM_ROW if isinstance(menu, _FilterableFontMenu) else 0
+        )
+        if len(menu.menuActions()) == len(self.items) + row_offset:
             return
-        menu = self._createComboMenu()
-        for i, item in enumerate(self.items):
-            action = QAction(
+        actions = [
+            QAction(
                 item.icon,
                 item.text,
                 triggered=lambda _checked, index=i: self._onItemClicked(index),
             )
+            for i, item in enumerate(self.items)
+        ]
+        for action, item in zip(actions, self.items):
             action.setEnabled(item.isEnabled)
-            menu.addAction(action)
+        if isinstance(menu, _FilterableFontMenu):
+            menu.add_font_actions(actions)
+        else:
+            for action in actions:
+                menu.addAction(action)
+
+    def _schedule_font_menu_warmup(self) -> None:
+        """后台预热缓存菜单，让第一次点开也不用现建 500+ 条目。
+
+        定时器挂在本控件之下（控件销毁即取消）；多个字体槽错峰预热，
+        避免同时各花几十 ms 把界面卡一下。
+        """
+        delay_ms = self._FONT_MENU_WARMUP_BASE_MS + (
+            type(self)._font_menu_warmup_index * self._FONT_MENU_WARMUP_STAGGER_MS
+        )
+        type(self)._font_menu_warmup_index += 1
+        timer = QTimer(self)
+        timer.setSingleShot(True)
+        timer.timeout.connect(self._warm_up_font_menu)
+        timer.start(delay_ms)
+
+    def _warm_up_font_menu(self) -> None:
+        if self._cached_font_menu is not None:
+            return  # 用户已抢先点开过，菜单已在缓存里
+        menu = self._createComboMenu()
+        self._ensure_menu_populated(menu)
+
+    def _showComboMenu(self) -> None:  # noqa: N802 - qfluentwidgets hook
+        """Open the popup, offsetting the default action past the filter rows."""
+        if self._suppress_combo_reopen:
+            self._suppress_combo_reopen = False
+            return
+        if not self.items:
+            return
+        menu = self._createComboMenu()
+        self._ensure_menu_populated(menu)
 
         if menu.view.width() < self.width():
             menu.view.setMinimumWidth(self.width())
             menu.adjustSize()
         menu.setMaxVisibleItems(self.maxVisibleItems())
-        menu.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
+        if not isinstance(menu, _FilterableFontMenu):
+            menu.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
+        # 缓存菜单会重复走到这里：先断开再连接，保证 closedSignal 只挂一条
+        try:
+            menu.closedSignal.disconnect(self._onDropMenuClosed)
+        except TypeError:
+            pass
         menu.closedSignal.connect(self._onDropMenuClosed)
         self.dropMenu = menu
 
@@ -816,6 +1004,8 @@ class WheelFocusedFontComboBox(WheelFocusedComboBox):
         pu = self.mapToGlobal(QPoint(x, 0))
         hu = menu.view.heightForAnimation(pu, MenuAnimationType.PULL_UP)
 
+        # 弹出方向沿用 DROP_DOWN / PULL_UP 的取舍（含尺寸与落位语义）；
+        # 长目录弹层自己不播动画（见 _FilterableFontMenu.exec）。
         if hd >= hu:
             menu.exec(pd, aniType=MenuAnimationType.DROP_DOWN)
         else:

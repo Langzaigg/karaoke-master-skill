@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-from PyQt6.QtCore import QEvent, QSize, Qt
-from PyQt6.QtGui import QFont, QKeyEvent
+from PyQt6.QtCore import QEvent, QPointF, QSize, Qt
+from PyQt6.QtGui import QFont, QKeyEvent, QMouseEvent
 from PyQt6.QtWidgets import QWidget
 
 from krok_helper.subtitle_render.frontend.properties.controls.inputs import (
@@ -279,3 +279,153 @@ def test_property_font_combo_small_catalog_keeps_plain_popup(qapp) -> None:
     assert combo.dropMenu is not None
     assert not isinstance(combo.dropMenu, _FilterableFontMenu)
     combo.dropMenu.close()
+
+
+def _mouse_press_event() -> QMouseEvent:
+    return QMouseEvent(
+        QEvent.Type.MouseButtonPress,
+        QPointF(1, 1),
+        QPointF(1, 1),
+        Qt.MouseButton.LeftButton,
+        Qt.MouseButton.LeftButton,
+        Qt.KeyboardModifier.NoModifier,
+    )
+
+
+def test_property_font_menu_uses_tool_window_for_ime_input(qapp) -> None:
+    combo = _popup_font_combo()
+    menu = combo.dropMenu
+    assert isinstance(menu, _FilterableFontMenu)
+
+    # Windows 的 IME 不附加到 Qt::Popup 窗口：筛选菜单必须用 Tool 窗口，
+    # 否则搜索框只能敲英文直接按键，打不了中文。注意 Qt::Tool 的位定义
+    # 本身就包含 Popup|Dialog 位，所以要按 windowType() 判断。
+    assert menu.windowType() == Qt.WindowType.Tool
+    assert int(menu.windowFlags()) & int(Qt.WindowType.FramelessWindowHint)
+
+    menu.close()
+
+
+def test_property_font_menu_closes_on_combo_press_without_reopen(qapp) -> None:
+    combo = _popup_font_combo()
+    menu = combo.dropMenu
+    assert isinstance(menu, _FilterableFontMenu)
+
+    menu.eventFilter(combo, _mouse_press_event())
+
+    assert menu.isVisible() is False
+    assert combo.dropMenu is None
+    assert combo._suppress_combo_reopen is True
+
+    # 同一次点击的 release 会再走 _showComboMenu：被置位牌吞掉，不重新弹开
+    combo._showComboMenu()
+    assert combo.dropMenu is None
+
+    # 下一次点击正常打开
+    combo._showComboMenu()
+    assert isinstance(combo.dropMenu, _FilterableFontMenu)
+    combo.dropMenu.close()
+
+
+def test_property_font_menu_closes_on_press_elsewhere(qapp) -> None:
+    combo = _popup_font_combo()
+    menu = combo.dropMenu
+    other = QWidget()
+
+    menu.eventFilter(other, _mouse_press_event())
+
+    assert menu.isVisible() is False
+    # 非组合框区域的按下不立牌：下一次点击应正常打开
+    assert combo._suppress_combo_reopen is False
+
+
+def test_property_font_menu_keeps_open_for_press_inside(qapp) -> None:
+    combo = _popup_font_combo()
+    menu = combo.dropMenu
+
+    menu.eventFilter(menu._search, _mouse_press_event())
+    menu.eventFilter(menu.view, _mouse_press_event())
+
+    assert menu.isVisible() is True
+    menu.close()
+
+
+def test_property_font_menu_closes_on_window_deactivate(qapp) -> None:
+    combo = _popup_font_combo()
+    menu = combo.dropMenu
+
+    menu.event(QEvent(QEvent.Type.WindowDeactivate))
+
+    assert menu.isVisible() is False
+
+
+def test_property_font_combo_reuses_cached_menu_across_opens(qapp) -> None:
+    combo = _popup_font_combo()
+    first = combo.dropMenu
+    assert isinstance(first, _FilterableFontMenu)
+
+    first.close()
+    combo._showComboMenu()
+
+    # 500+ 条目每次重建约 200ms（打开瞬间卡顿主因），重开必须复用同一实例
+    assert combo.dropMenu is first
+
+
+def test_property_font_combo_reopen_resets_stale_filter(qapp) -> None:
+    combo = _popup_font_combo()
+    menu = combo.dropMenu
+    menu._search.setText("02")
+    assert len(_visible_font_texts(menu)) == 1
+    menu.close()
+
+    combo._showComboMenu()
+
+    assert combo.dropMenu is menu
+    assert menu._search.text() == ""
+    assert len(_visible_font_texts(menu)) == 20
+
+
+def test_property_font_combo_popup_opens_without_slide_animation(qapp) -> None:
+    from PyQt6.QtCore import QPropertyAnimation
+
+    combo = _popup_font_combo()
+    menu = combo.dropMenu
+
+    # 不播滑动动画：动画从未启动，弹层直接停在方向管理器算出的终点
+    # （NONE 类型会把弹层按全屏高度算尺寸并窜位，不能用它关动画）。
+    assert menu.aniManager.ani.state() == QPropertyAnimation.State.Stopped
+    assert menu.pos() == menu.aniManager._endPosition(menu._exec_pos)
+
+
+def test_property_font_menu_reuse_does_not_stack_focus_timers(qapp) -> None:
+    from PyQt6.QtCore import QTimer
+
+    combo = _popup_font_combo()
+    menu = combo.dropMenu
+    for _ in range(3):
+        menu.close()
+        combo._showComboMenu()
+
+    assert len(menu._search.findChildren(QTimer)) == 1
+
+
+def test_property_font_combo_warmup_prebuilds_cached_menu(qapp) -> None:
+    combo = _popup_font_combo()  # 等价于用户已抢先点开过
+    menu = combo.dropMenu
+    combo._warm_up_font_menu()  # 已有缓存时应直接跳过，不得另建实例
+    assert combo._cached_font_menu is menu
+    menu.close()
+
+    fresh = WheelFocusedFontComboBox(
+        font_families_provider=lambda: tuple(f"F{i:02d}" for i in range(20))
+    )
+    fresh._warm_up_font_menu()  # 未点开过：后台建好带全套条目的缓存
+
+    assert fresh._cached_font_menu is not None
+    # menuActions 含空提示行，比字体条目多一行
+    assert len(fresh._cached_font_menu.menuActions()) == 21
+
+    fresh._showComboMenu()
+    assert fresh.dropMenu is fresh._cached_font_menu
+    assert fresh.dropMenu.isVisible()
+    fresh.dropMenu.close()
