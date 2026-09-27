@@ -85,6 +85,92 @@ def legacy_app_names_for(app_name: str) -> tuple[str, ...]:
     return tuple(f"{name}{suffix}" for name in LEGACY_APP_NAMES)
 
 
+def _known_app_dir_names() -> tuple[str, ...]:
+    """识别「本应用数据目录」用的全部历史/当前目录名。
+
+    检测旧路径时不仅认 ``LEGACY_APP_NAMES``（含 Dev 后缀档位），也认两个
+    当前名（正式 / Dev）——用户可能在两档之间搬过数据（例如 Dev 档配好的
+    环境目录后来只在正式档存在），双向都要能接住。
+    """
+
+    names: list[str] = []
+    for suffix in ("", " Dev"):
+        for name in (*LEGACY_APP_NAMES, APP_NAME):
+            candidate = f"{name}{suffix}"
+            if candidate not in names:
+                names.append(candidate)
+    effective = effective_app_name()
+    if effective not in names:
+        names.append(effective)
+    return tuple(names)
+
+
+def _repair_target_names() -> tuple[str, ...]:
+    """修复旧路径时的候选目标目录名：当前有效名优先，另一档位次之。"""
+
+    names: list[str] = []
+    for name in (effective_app_name(), APP_NAME, f"{APP_NAME} Dev"):
+        if name not in names:
+            names.append(name)
+    return tuple(names)
+
+
+def repair_legacy_appdata_path(raw: str) -> str | None:
+    """把指向旧应用名数据目录且已失效的绝对路径，改写到当前名下确实存在的那份。
+
+    更名（Karaoke Studio → Lin-K Lyrics）搬走的是**整个数据目录**，但
+    settings.json 里存的绝对路径（AI 打轴缓存根、模型根、Runtime python.exe
+    ……）不会跟着改写；而 SUG 侧「用户显式设置的路径」优先于宿主默认值，
+    于是这些设置全部解析到不存在的旧目录——用户看到的就是 AI 打轴环境
+    「丢失」。读取配置时对每个疑似路径做一次自愈：
+
+    - 原路径**仍然存在**就绝不动它（用户可能并行保留着旧版目录在用）；
+    - 路径不在任何已知应用数据目录之下也不动（那可能是用户自己的
+      ``D:\\Videos\\Karaoke Studio\\xxx.mp4``，与应用数据无关）；
+    - 把应用目录名换成候选名（当前有效名 → 另一档位，如 ``Lin-K Lyrics``
+      / ``Lin-K Lyrics Dev``）后**目标内容确实存在**才改写。
+
+    Returns:
+        修复后的路径字符串；无须 / 无法修复时返回 ``None``，调用方保留原值。
+    """
+
+    if not isinstance(raw, str) or not raw.strip():
+        return None
+    try:
+        path = Path(raw)
+    except (OSError, ValueError):
+        return None
+    if not path.is_absolute():
+        return None
+
+    normalized = os.path.normcase(str(path))
+    for source_name in _known_app_dir_names():
+        root = settings_path_for_app_name(source_name).parent
+        root_key = os.path.normcase(str(root))
+        # 必须带上分隔符：否则 "Karaoke Studio Backup" 这类兄弟目录会被误认。
+        if not normalized.startswith(root_key + os.sep):
+            continue
+        try:
+            if path.exists():
+                return None
+        except OSError:
+            return None
+        # str(path) 与 str(root) 的分隔符均已规范化且长度一致，直接按长度切片
+        # 得到保留原始大小写的尾部（normcase 会把盘符/整串小写化，不能用它拼）。
+        tail = str(path)[len(str(root)) + 1 :]
+        for target_name in _repair_target_names():
+            if target_name == source_name:
+                continue
+            repaired = settings_path_for_app_name(target_name).parent / tail
+            try:
+                if repaired.exists():
+                    return str(repaired)
+            except OSError:
+                continue
+        return None
+    return None
+
+
 # migrate_app_data_dir 跑在日志系统初始化之前，没法直接写日志。这里沿用
 # settings._LAST_CORRUPTION_BACKUP 的「先记下、日志起来后再取走」模式。
 _MIGRATION_NOTES: list[str] = []

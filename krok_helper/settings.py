@@ -4,6 +4,7 @@ import json
 import logging
 import os
 import shutil
+from collections.abc import Iterable
 from copy import deepcopy
 from dataclasses import asdict, dataclass, field
 from datetime import datetime
@@ -19,6 +20,7 @@ from krok_helper.app_paths import (  # noqa: F401
     consume_migration_notes,
     get_legacy_settings_paths,
     get_settings_path,
+    repair_legacy_appdata_path,
     settings_path_for_app_name as _settings_path_for_app_name,
 )
 from krok_helper.audio_alignment import (
@@ -196,7 +198,80 @@ def _read_app_settings() -> AppSettings:
         _backup_corrupt_settings(path, "顶层不是 JSON 对象")
         return AppSettings()
 
+    notes = _repair_stale_appdata_paths(payload)
+    if notes:
+        _persist_repaired_payload(payload, notes)
     return _settings_from_payload(payload)
+
+
+def _repair_stale_appdata_paths(payload: dict) -> list[str]:
+    """递归把 payload 里指向旧应用名数据目录的失效绝对路径自愈改写。
+
+    更名搬迁救不了 settings.json **里面**存的绝对路径（SUG AI 打轴的缓存根、
+    模型根、Runtime python.exe 都以「用户显式设置」的身份长期驻留），所以
+    读取时逐值过 :func:`krok_helper.app_paths.repair_legacy_appdata_path`：
+    原路径还在 / 候选位置没有对应内容时一律保留原值。
+
+    Returns:
+        ``"lyrics_timing.ai_timing.ai_cache_root: 旧 -> 新"`` 形式的说明列表；
+        空列表表示没有需要修的。
+    """
+
+    notes: list[str] = []
+
+    def _walk(node: object, prefix: str) -> None:
+        if isinstance(node, dict):
+            items: Iterable[tuple[object, object]] = node.items()
+        elif isinstance(node, list):
+            items = enumerate(node)
+        else:
+            return
+        for key, value in items:
+            where = f"{prefix}.{key}" if prefix else str(key)
+            if isinstance(value, str):
+                fixed = repair_legacy_appdata_path(value)
+                if fixed is not None and fixed != value:
+                    node[key] = fixed  # type: ignore[index]
+                    notes.append(f"{where}: {value} -> {fixed}")
+            else:
+                _walk(value, where)
+
+    _walk(payload, "")
+    return notes
+
+
+def _persist_repaired_payload(payload: dict, notes: list[str]) -> None:
+    """把自愈后的整份原始 payload 原子写回 settings.json。
+
+    必须在 load 阶段落盘：``load_app_settings`` 盖的基线会包含修复后的值，
+    若只在内存里修，之后任何一次整份写盘都会按「本实例没改过这一段」把
+    盘上的旧值合并回来，修复等于没发生。写的是**原始 payload** 而不是
+    ``asdict(AppSettings)``——后者会丢掉当前版本尚不认识的键（向前兼容）。
+    与 :func:`save_app_settings` 同一套 ``.tmp`` + ``os.replace`` 原子写法。
+    """
+
+    log = logging.getLogger(__name__)
+    try:
+        path = get_settings_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.parent / f"{path.name}.tmp"
+        tmp.write_text(
+            json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8"
+        )
+        os.replace(tmp, path)
+        message = (
+            f"已把 {len(notes)} 处指向旧应用名数据目录的失效路径"
+            f"修复到当前数据目录：" + "；".join(notes)
+        )
+        log.info(message)
+        try:
+            from krok_helper.startup_trace import mark
+
+            mark("appdata.path_repair", message)
+        except Exception:  # noqa: BLE001 —— 面包屑失败不影响修复本身
+            pass
+    except Exception:  # noqa: BLE001 —— 自愈写盘失败不能挡住启动
+        log.warning("旧路径自愈修复写盘失败", exc_info=True)
 
 
 def _settings_from_payload(payload: dict) -> AppSettings:
