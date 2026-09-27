@@ -262,8 +262,18 @@ def ruby_layout_draw_bounds(
 
 
 def _ruby_measure_key(style: Style) -> tuple:
+    # 覆盖 build_ruby_font_for_text 解析逐单元字体所需的全部字段：拉丁单元
+    # 的宽度随拉丁族/字号/字重/stretch 变化，漏一项就会命中过期缓存。
     return (
         style.font_family,
+        style.font_family_latin,
+        int(style.font_weight),
+        bool(style.ruby_font_follow_main),
+        style.ruby_font_family,
+        style.ruby_font_family_latin,
+        style.ruby_font_weight,
+        style.ruby_latin_font_size_px,
+        style.ruby_latin_font_weight,
         ruby_font_size(style),
         style.italic,
         style.latin_font_stretch_pct,
@@ -303,29 +313,22 @@ def ruby_unit_layouts(
             for unit in units
         ]
     measure_key = _ruby_measure_key(style)
-    metrics_signature = (
-        ruby_metrics.height(),
-        ruby_metrics.ascent(),
-        ruby_metrics.averageCharWidth(),
-        ruby_metrics.maxWidth(),
-    )
-    layout_key = (tuple(units), metrics_signature, measure_key)
+    # 宽度只依赖 (units, style 字段)：逐单元字体/度量全部由 style 派生，
+    # 调用方传入的 ruby_metrics 不再参与测量，无需进键。
+    layout_key = (tuple(units), measure_key)
     cached = _RUBY_UNIT_LAYOUT_CACHE.get(layout_key)
     if cached is not None:
         return cached
-    ruby_font, measure_style = _ruby_measure_resources(style, measure_key)
-    stretch = (
-        style.ruby_latin_font_stretch_pct
-        if style.ruby_latin_font_stretch_pct is not None
-        else style.latin_font_stretch_pct
-    )
+    _ruby_font, measure_style = _ruby_measure_resources(style, measure_key)
+    # GPU 对齐：D2D 逐读音单元按脚本选测量字体且 measureFace == drawingFace
+    # （d2d_backend_configure.cpp）。拉丁单元必须用拉丁字体测量，否则
+    # 「日文墨水 × 拉丁 advance」的混合盒子会窄于实际绘制字形，相邻字母
+    # 描边互相叠压（2026-09 英数注音挤压问题）。metrics 一律取自单元字体，
+    # 不复用调用方传入的 ruby_metrics——它与日文 ruby 字体的对应关系没有保证。
     result = []
     for unit in units:
-        unit_font = (
-            build_ruby_font_for_text(style, unit)
-            if int(stretch) != 100 else ruby_font
-        )
-        unit_metrics = QFontMetrics(unit_font) if unit_font != ruby_font else ruby_metrics
+        unit_font = build_ruby_font_for_text(style, unit)
+        unit_metrics = QFontMetrics(unit_font)
         result.append((
             unit,
             float(char_layout_width(

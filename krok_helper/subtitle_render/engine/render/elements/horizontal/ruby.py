@@ -522,7 +522,13 @@ def ruby_wipe_geometry(
         unit_layouts,
     ):
         path = QPainterPath()
-        path.addText(float(unit_x), float(baseline_y), ruby_font, unit)
+        # GPU 对齐：扫光墨水盒也用逐单元脚本字体，与绘制/测量同源。
+        path.addText(
+            float(unit_x),
+            float(baseline_y),
+            build_ruby_font_for_text(style, unit),
+            unit,
+        )
         ink = path.boundingRect()
         if ink.isEmpty():
             ink_left = float(unit_x)
@@ -651,12 +657,41 @@ def layout_rubies(
         )
         target_ruby_metrics = QFontMetrics(target_ruby_font)
         target_ruby_size = max(target_ruby_font.pixelSize(), 1)
-        baseline_y = ruby_baseline_y(
-            main_baseline_y,
-            main_box_ascent,
-            target_ruby_metrics,
-            ruby_style,
-            font_size_px=target_ruby_size,
+        # GPU 对齐：D2D 的 rubyBoxDescent 逐读音单元取各自字体 descent 的最大值
+        # 再锚定基线（d2d_backend_configure.cpp）；纯假名/纯英数读音各单元字体
+        # 相同，结果与原单字体口径一致，仅混合读音取最深单元。
+        unit_fonts = [
+            build_ruby_font_for_text(ruby_style, unit)
+            for unit in ruby_utopia_visual_units(paint_ruby.reading)
+        ]
+        baseline_candidates = [
+            ruby_baseline_y(
+                main_baseline_y,
+                main_box_ascent,
+                QFontMetrics(unit_font),
+                ruby_style,
+                font_size_px=max(unit_font.pixelSize(), 1),
+            )
+            for unit_font in unit_fonts
+        ]
+        baseline_y = min(baseline_candidates) if baseline_candidates else (
+            ruby_baseline_y(
+                main_baseline_y,
+                main_box_ascent,
+                target_ruby_metrics,
+                ruby_style,
+                font_size_px=target_ruby_size,
+            )
+        )
+        unit_font_signature = tuple(
+            (
+                unit_font.family(),
+                unit_font.pixelSize(),
+                int(unit_font.weight()),
+                unit_font.italic(),
+                unit_font.stretch(),
+            )
+            for unit_font in unit_fonts
         )
         left, right = target_range
         target_width = max(right - left, 1)
@@ -726,6 +761,7 @@ def layout_rubies(
                 wipe_left=wipe_left,
                 wipe_right=wipe_right,
                 geometry_signature=geometry_signature,
+                unit_font_signature=unit_font_signature,
                 font=target_ruby_font,
                 metrics=target_ruby_metrics,
             )
@@ -889,7 +925,11 @@ def ruby_text_path_and_rect(
         base_text=base_text,
     )
     for unit, unit_x, _unit_width in layout_units:
-        path.addText(float(unit_x), float(baseline_y), ruby_font, unit)
+        # GPU 对齐：逐单元按脚本选绘制字体（D2D measureFace == drawingFace）。
+        unit_font = (
+            build_ruby_font_for_text(style, unit) if style is not None else ruby_font
+        )
+        path.addText(float(unit_x), float(baseline_y), unit_font, unit)
     layout_width = ruby_layout_width(
         reading,
         ruby_metrics,
@@ -1135,6 +1175,7 @@ def ruby_text_layer_key(
         ),
         ruby_horizontal_gradient_rect_signature(layout),
         rtl,
+        layout.unit_font_signature,
         ruby_font.family(),
         ruby_font.pixelSize(),
         int(ruby_font.weight()),
@@ -1177,6 +1218,7 @@ def ruby_glow_layer_key(
         ),
         ruby_horizontal_gradient_rect_signature(layout),
         rtl,
+        layout.unit_font_signature,
         ruby_font.family(),
         ruby_font.pixelSize(),
         int(ruby_font.weight()),

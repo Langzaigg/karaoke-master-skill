@@ -5107,6 +5107,10 @@ def _paint_ruby_text_units_with_transition(
         else None
     )
     for (unit, unit_x, unit_width), (start_ms, end_ms) in zip(layout_units, intervals):
+        # GPU 对齐：逐单元按脚本选字体（D2D measureFace == drawingFace），
+        # 假名/英数混排读音里英数单元用拉丁字体绘制与测量。
+        unit_font = _build_ruby_font_for_text(style, unit)
+        unit_metrics = QFontMetrics(unit_font)
         opacity, dx, dy, rotation, scale_x, scale_y, skew_y = _transition_char_state(
             style,
             transition,
@@ -5127,7 +5131,11 @@ def _paint_ruby_text_units_with_transition(
                 )
                 transform = _character_transform(
                     center_x=unit_x + unit_width / 2,
-                    center_y=baseline_y - ruby_metrics.ascent() + ruby_metrics.height() / 2,
+                    center_y=(
+                        baseline_y
+                        - unit_metrics.ascent()
+                        + unit_metrics.height() / 2
+                    ),
                     dx=dx,
                     dy=dy,
                     rotation=rotation,
@@ -5140,8 +5148,8 @@ def _paint_ruby_text_units_with_transition(
                 _paint_ruby_text_fragment(
                     painter,
                     unit,
-                    ruby_font,
-                    ruby_metrics,
+                    unit_font,
+                    unit_metrics,
                     unit_x,
                     baseline_y,
                     char_fill_ratio(start_ms, end_ms, t_ms),

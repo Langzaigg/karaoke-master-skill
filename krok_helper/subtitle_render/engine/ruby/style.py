@@ -9,7 +9,6 @@ from PyQt6.QtGui import QFont
 from krok_helper.subtitle_render.engine.text import (
     clamp_weight,
     is_n3_latin_text,
-    latin_font_weight,
 )
 from krok_helper.subtitle_render.engine.text import style_for_role_in_layout
 from krok_helper.subtitle_render.domain.models import Style
@@ -74,15 +73,24 @@ def build_ruby_font(style: Style) -> QFont:
 
 
 def build_ruby_font_for_text(style: Style, reading: str) -> QFont:
-    """Build the effective Japanese or Latin ruby font for one reading."""
+    """Build the effective Japanese or Latin ruby font for one reading/unit.
+
+    Must mirror the GPU projection chain (gpu_scene_projection.cpp resolving
+    rubyLatinFontFamily/rubyLatinFontWeight + d2d_backend_configure.cpp
+    selecting the per-unit face): latin family falls back through
+    ruby-latin -> main-latin -> ruby -> main; follow-main latin inherits the
+    MAIN weight (not the main latin weight), because the sidecar resolves
+    rubyLatinFontWeight against the already-resolved ruby weight.
+    """
     if not is_n3_latin_text(reading):
         return build_ruby_font(style)
     if ruby_uses_main_font(style):
         family = style.font_family_latin or style.font_family
-        weight = latin_font_weight(style)
+        weight = int(style.font_weight)
     else:
         family = (
             style.ruby_font_family_latin
+            or style.font_family_latin
             or style.ruby_font_family
             or style.font_family
         )

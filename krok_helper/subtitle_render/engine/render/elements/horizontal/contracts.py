@@ -77,6 +77,7 @@ class RubyLayout:
     wipe_left: float = 0.0
     wipe_right: float = 0.0
     geometry_signature: tuple = ()
+    unit_font_signature: tuple = ()
     font: QFont | None = field(default=None, compare=False)
     metrics: QFontMetrics | None = field(default=None, compare=False)
 

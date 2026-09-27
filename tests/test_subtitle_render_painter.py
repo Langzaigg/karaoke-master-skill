@@ -22,6 +22,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 from PyQt6.QtCore import QPointF, QRectF  # noqa: E402
 from PyQt6.QtGui import (  # noqa: E402
     QColor,
+    QFont,
     QFontMetrics,
     QImage,
     QPainter,
@@ -5330,6 +5331,177 @@ def test_clear_before_layer_cache_clears_ruby_unit_geometry(qapp):
     clear_before_layer_cache()
 
     assert not subtitle_painter._RUBY_UNIT_LAYOUT_CACHE
+
+
+def test_ruby_unit_layouts_measures_latin_units_with_script_font(qapp, monkeypatch):
+    """拉丁注音单元必须用拉丁字体测量（GPU 对齐，2026-09 英数注音挤压修复）。
+
+    用假字体 + 不同 pixelSize 保证在 offscreen 退化字体环境下也可区分：
+    旧逻辑在 stretch==100 时用日文 ruby 字体的墨水宽 + 调用方 metrics 的
+    advance 混合测量，宽度会矮于拉丁字体自身口径。
+    """
+    def fake_font(family: str, size: int) -> QFont:
+        font = QFont(family)
+        font.setPixelSize(size)
+        return font
+
+    jp_font = fake_font("FakeRubyJP", 30)
+    latin_font = fake_font("FakeRubyLatin", 45)
+
+    def fake_build_ruby_font(style):
+        return QFont(jp_font)
+
+    def fake_build_for_text(style, text):
+        return QFont(latin_font if text.strip() == "O" else jp_font)
+
+    monkeypatch.setattr(ruby_layout, "build_ruby_font", fake_build_ruby_font)
+    monkeypatch.setattr(ruby_layout, "build_ruby_font_for_text", fake_build_for_text)
+    style = Style(font_family="FakeRubyMeasureKeyJP")
+    measure_style = replace(
+        style,
+        font_size_px=ruby_style.ruby_font_size(style),
+        stroke_width_px=ruby_style.ruby_stroke_width(style),
+        stroke2_width_px=ruby_style.ruby_stroke2_width(style),
+    )
+
+    layouts = ruby_layout.ruby_unit_layouts(
+        ["O"], QFontMetrics(jp_font), style
+    )
+
+    latin_metrics = QFontMetrics(latin_font)
+    expected = float(
+        text_metrics.char_layout_width(
+            "O", latin_font, latin_metrics, latin_metrics, None, measure_style
+        )
+    )
+    assert layouts[0][1] == expected
+
+
+def test_ruby_unit_layouts_latin_units_do_not_overlap_when_drawn(qapp):
+    """英数注音按测量盒逐单元绘制时，相邻墨迹+描边不得互相叠压。"""
+    style = Style(
+        font_family="MS Gothic",
+        font_family_latin="Comic Sans MS",
+        font_size_px=64,
+        stroke_width_px=8,
+    )
+    reading = "LOVE"
+    units = ruby_timing._ruby_utopia_visual_units(reading)
+    reading_font = ruby_style.build_ruby_font_for_text(style, reading)
+    stroke = ruby_style.ruby_stroke_width(style)
+    if QFontMetrics(reading_font).horizontalAdvance("O") == QFontMetrics(
+        ruby_style.build_ruby_font(style)
+    ).horizontalAdvance("O"):
+        pytest.skip("host resolves both families to the same font")
+
+    layout_units = ruby_layout.ruby_layout_units(
+        units, QFontMetrics(reading_font), 0, 260, style=style, base_text="愛"
+    )
+
+    prev_right = None
+    for unit, unit_x, _width in layout_units:
+        path = QPainterPath()
+        path.addText(
+            float(unit_x), 0.0, ruby_style.build_ruby_font_for_text(style, unit), unit
+        )
+        ink = path.boundingRect()
+        assert not ink.isEmpty()
+        ink_left = float(ink.left()) - stroke / 2.0
+        if prev_right is not None:
+            assert ink_left >= prev_right
+        prev_right = float(ink.right()) + stroke / 2.0
+
+
+def test_build_ruby_font_for_text_matches_gpu_latin_fallback_chain(qapp, monkeypatch):
+    monkeypatch.setattr(ruby_style, "resolve_qt_font_family", lambda name: name)
+
+    follow_main = Style(
+        font_family="JP",
+        font_family_latin="LATIN",
+        font_weight=400,
+        latin_font_weight=600,
+    )
+    font = ruby_style.build_ruby_font_for_text(follow_main, "LOVE")
+    assert font.family() == "LATIN"
+    # GPU：follow-main 拉丁注音继承主文字字重（gpu_scene_projection 的
+    # rubyLatinFontWeight 对 rubyFontWeight 取回退），不是主拉丁字重。
+    assert int(font.weight()) == 400
+    assert ruby_style.build_ruby_font_for_text(follow_main, "かな").family() == "JP"
+
+    explicit = Style(
+        font_family="JP",
+        font_family_latin="LATIN",
+        ruby_font_follow_main=False,
+        ruby_font_family="RUBY_JP",
+        ruby_font_size_px=30,
+        ruby_font_weight=400,
+    )
+    font = ruby_style.build_ruby_font_for_text(explicit, "LOVE")
+    # GPU：ruby 拉丁族未设时，主拉丁族优先于 ruby 族。
+    assert font.family() == "LATIN"
+    assert int(font.weight()) == 400
+
+    explicit_latin = replace(
+        explicit, ruby_font_family_latin="RUBY_LATIN", ruby_latin_font_weight=800
+    )
+    font = ruby_style.build_ruby_font_for_text(explicit_latin, "LOVE")
+    assert font.family() == "RUBY_LATIN"
+    assert int(font.weight()) == 800
+
+
+def test_ruby_measure_key_tracks_per_unit_font_fields():
+    base = Style(font_family="JP", font_family_latin="LATIN")
+    base_key = ruby_layout._ruby_measure_key(base)
+    for field, value in [
+        ("font_family_latin", "OTHER"),
+        ("ruby_font_family", "RUBY"),
+        ("ruby_font_family_latin", "RUBY_LATIN"),
+        ("ruby_latin_font_size_px", 20),
+        ("ruby_latin_font_weight", 700),
+        ("ruby_font_follow_main", False),
+    ]:
+        assert ruby_layout._ruby_measure_key(replace(base, **{field: value})) != (
+            base_key
+        )
+
+
+def test_ruby_baked_keys_track_unit_font_signature(qapp):
+    ruby = RubyAnnotation(
+        kanji="漢",
+        reading="abc",
+        reading_parts=["abc"],
+        pos_start_ms=1000,
+        pos_end_ms=2000,
+    )
+    style = Style(ruby_font_size_px=36)
+    font = _build_ruby_font(style)
+    common = dict(
+        ruby=ruby,
+        indices=[0],
+        style=style,
+        x=100,
+        baseline_y=200,
+        target_width=180,
+        reading_width=180,
+        gradient_rect=QRectF(100, 100, 180, 100),
+    )
+    layout_a = subtitle_painter._RubyLayout(
+        **common, unit_font_signature=(("Arial", 36, 400, False, 100),)
+    )
+    layout_b = subtitle_painter._RubyLayout(
+        **common, unit_font_signature=(("Courier New", 36, 400, False, 100),)
+    )
+
+    assert subtitle_painter._ruby_text_layer_key(
+        layout_a, font, style, False, after=False
+    ) != subtitle_painter._ruby_text_layer_key(
+        layout_b, font, style, False, after=False
+    )
+    assert subtitle_painter._ruby_glow_layer_key(
+        layout_a, font, style, False, after=False
+    ) != subtitle_painter._ruby_glow_layer_key(
+        layout_b, font, style, False, after=False
+    )
 
 
 def test_line_layout_cache_reuses_precomputed_ruby_wipe_geometry(qapp, monkeypatch):
