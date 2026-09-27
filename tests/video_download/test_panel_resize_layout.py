@@ -14,6 +14,8 @@
 from __future__ import annotations
 
 import pytest
+from PyQt6.QtCore import QEvent, QPointF, Qt
+from PyQt6.QtGui import QMouseEvent
 from PyQt6.QtWidgets import QApplication, QToolButton
 
 from krok_helper.settings import AppSettings
@@ -96,6 +98,76 @@ def test_new_users_get_compact_top_cards_by_default(page) -> None:
     assert cards[0].height() == cards[0].minimumSizeHint().height()
     assert cards[1].height() == cards[1].minimumSizeHint().height()
     assert cards[2].height() > cards[2].minimumSizeHint().height()
+
+
+def _drag_splitter_handle(page: VideoDownloadPage, handle_index: int, dy: int) -> None:
+    """对分栏把手做一次真实的「按下-移动-释放」。"""
+    app = QApplication.instance()
+    handle = page.content_splitter.handle(handle_index)
+    center = QPointF(handle.width() / 2, handle.height() / 2)
+    end = QPointF(center.x(), center.y() + dy)
+
+    QApplication.sendEvent(handle, QMouseEvent(
+        QEvent.Type.MouseButtonPress, QPointF(center),
+        QPointF(handle.mapToGlobal(center.toPoint())),
+        Qt.MouseButton.LeftButton, Qt.MouseButton.LeftButton,
+        Qt.KeyboardModifier.NoModifier))
+    QApplication.sendEvent(handle, QMouseEvent(
+        QEvent.Type.MouseMove, QPointF(end),
+        QPointF(handle.mapToGlobal(end.toPoint())),
+        Qt.MouseButton.NoButton, Qt.MouseButton.LeftButton,
+        Qt.KeyboardModifier.NoModifier))
+    app.processEvents()
+    QApplication.sendEvent(handle, QMouseEvent(
+        QEvent.Type.MouseButtonRelease, QPointF(end),
+        QPointF(handle.mapToGlobal(end.toPoint())),
+        Qt.MouseButton.LeftButton, Qt.MouseButton.NoButton,
+        Qt.KeyboardModifier.NoModifier))
+    app.processEvents()
+
+
+def test_handles_track_the_cursor_in_short_windows(page) -> None:
+    """常规矮窗口里拖分栏必须跟手且方向正确。
+
+    2026-09 线上「上下逻辑相反且完全不跟手」的病根：信息卡内容的最小高度
+    （236px 起，随字体只增不减）直接顶死了卡片 minimumSizeHint，三卡最小高
+    度之和 ≈730px。窗口可用高度低于它时 QSplitter 退化成「被拖的把手不动、
+    位移被挪给不相邻的分界线」。治本后信息卡内容可整体滚动（三卡最小和降到
+    ~550px），同样高度的窗口里拖拽应当完全跟手。
+    """
+    page.resize(1400, 760)
+    page.content_splitter.setSizes([1, 1, 1])
+    QApplication.instance().processEvents()
+
+    # 前提自检：该高度必须显著高于三卡最小和，否则拖不动是诚实的下限行为。
+    minimums = sum(card.minimumSizeHint().height() for card in _cards(page))
+    handles = 2 * page.content_splitter.handleWidth()
+    assert page.content_splitter.height() - handles - minimums >= 120
+
+    first = page.content_splitter.handle(1)
+    y0 = first.y()
+    _drag_splitter_handle(page, 1, 60)
+    assert first.y() >= y0 + 45, "向下拖把手，把手必须跟着向下走"
+
+    _drag_splitter_handle(page, 1, -60)
+    assert first.y() <= y0 + 15, "拖回来，把手必须跟着回来"
+
+    second = page.content_splitter.handle(2)
+    y1 = second.y()
+    _drag_splitter_handle(page, 2, 60)
+    assert second.y() >= y1 + 45, "向下拖第二道把手也要跟手"
+
+    input_card = _cards(page)[0]
+    assert input_card.height() >= input_card.minimumSizeHint().height()
+
+
+def test_info_card_minimum_no_longer_dominated_by_details_content(page) -> None:
+    """信息卡的最小高度由标题行兜底，而不是视频详情内容的真实高度。"""
+    info_card = _cards(page)[1]
+    assert hasattr(page, "video_details_scroll")
+    # 滚动容器本身的最小高度远小于它包住的内容（详情页最小 236px 起）。
+    assert info_card.minimumSizeHint().height() <= 180
+    assert page.video_details_stack.minimumSizeHint().height() > 180
 
 
 def test_saved_region_sizes_are_restored_after_show(monkeypatch) -> None:

@@ -36,6 +36,7 @@ from qfluentwidgets import (
     PlainTextEdit,
     PrimaryPushButton,
     PushButton,
+    ScrollArea as FluentScrollArea,
     SubtitleLabel,
     TableWidget,
     ToolButton,
@@ -901,7 +902,18 @@ class VideoDownloadPage(QWidget):
         self.video_details_stack.setStyleSheet("background: transparent; border: 0;")
         self.video_details_stack.addWidget(self._build_video_empty_state(info_card))
         self.video_details_stack.addWidget(self._build_video_details_state(info_card))
-        info_layout.addWidget(self.video_details_stack, 1)
+        # 信息卡内容整体可滚：视频详情 + 下载设置的真实最小高度（236px 起，随字体
+        # 只增不减）不再顶死卡片的 minimumSizeHint。此前三卡最小高度之和 ≈730px，
+        # 常规窗口（工作流栏 80px + 标题栏 + 页边距后剩 ~710px）装不下时，
+        # QSplitter 拖拽会退化成「被拖的把手不动、位移被挪给不相邻的分界线」——
+        # 用户观感即「上下方向反了且完全不跟手」。
+        self.video_details_scroll = FluentScrollArea(info_card)
+        self.video_details_scroll.setWidgetResizable(True)
+        self.video_details_scroll.setFrameShape(QFrame.Shape.NoFrame)
+        self.video_details_scroll.enableTransparentBackground()
+        self.video_details_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.video_details_scroll.setWidget(self.video_details_stack)
+        info_layout.addWidget(self.video_details_scroll, 1)
 
         download_card = PanelCard(panel)
         download_card.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Expanding)
@@ -993,7 +1005,8 @@ class VideoDownloadPage(QWidget):
         self._register_collapsible_panel(
             "info",
             info_card,
-            (self.video_details_stack, self.task_switch_row),
+            # 隐藏滚动容器而不是内层 stack：折叠的 64px 里不该再给滚动区留最小高度。
+            (self.video_details_scroll, self.task_switch_row),
             info_collapse_button,
         )
         self._register_collapsible_panel(

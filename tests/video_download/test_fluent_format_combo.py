@@ -102,7 +102,9 @@ def test_download_workspace_panels_use_buttons_for_safe_collapsing(monkeypatch) 
         app.processEvents()
         assert page._collapsed_panels == {"input", "info"}
         assert page.link_input.isHidden()
-        assert page.video_details_stack.isHidden()
+        # 信息卡内容套滚动区后，折叠隐藏的是滚动容器本身；stack 随之不可见。
+        assert page.video_details_scroll.isHidden()
+        assert not page.video_details_stack.isVisible()
         assert page.content_splitter.widget(0).height() == VIDEO_INFO_COLLAPSED_HEIGHT
         assert page.content_splitter.widget(1).height() == VIDEO_INFO_COLLAPSED_HEIGHT
         assert not page.download_table.isHidden()
