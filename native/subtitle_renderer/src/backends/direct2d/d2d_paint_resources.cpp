@@ -53,7 +53,8 @@ Microsoft::WRL::ComPtr<ID2D1Brush> createPaintBrush(
     ID2D1Bitmap1 *image,
     float canvasDx,
     float canvasDy,
-    std::uint64_t *brushCreated
+    std::uint64_t *brushCreated,
+    float layoutScale
 ) {
     if (paint.mode == "image" && image != nullptr) {
         Microsoft::WRL::ComPtr<ID2D1BitmapBrush1> bitmapBrush;
@@ -74,7 +75,16 @@ Microsoft::WRL::ComPtr<ID2D1Brush> createPaintBrush(
             "Create image fill bitmap brush",
             device
         );
-        const float scale = std::clamp(paint.imageScale, 0.01f, 10.0f);
+        // The bitmap must tile in logical canvas units just like the CPU
+        // painter's QBrush (whose transform is composed with the painter's
+        // DPR scale).  Geometry here is already physical (logical * dpr), so
+        // the pattern scale needs the same layoutScale factor or the sampled
+        // image region would change with the preview render target size.
+        const float scale = std::clamp(
+            paint.imageScale * std::max(layoutScale, 0.01f),
+            0.01f,
+            10.0f
+        );
         bitmapBrush->SetTransform(
             D2D1::Matrix3x2F::Scale(scale, scale)
                 * D2D1::Matrix3x2F::Translation(-canvasDx, -canvasDy)
@@ -193,7 +203,8 @@ void updatePaintBrush(
     const PaintStyle &paint,
     const D2D1_RECT_F &rect,
     float canvasDx,
-    float canvasDy
+    float canvasDy,
+    float layoutScale
 ) {
     if (brush == nullptr) {
         return;
@@ -202,7 +213,11 @@ void updatePaintBrush(
         Microsoft::WRL::ComPtr<ID2D1BitmapBrush1> bitmapBrush;
         if (SUCCEEDED(brush->QueryInterface(IID_PPV_ARGS(
                 bitmapBrush.ReleaseAndGetAddressOf())))) {
-            const float scale = std::clamp(paint.imageScale, 0.01f, 10.0f);
+            const float scale = std::clamp(
+                paint.imageScale * std::max(layoutScale, 0.01f),
+                0.01f,
+                10.0f
+            );
             bitmapBrush->SetTransform(
                 D2D1::Matrix3x2F::Scale(scale, scale)
                     * D2D1::Matrix3x2F::Translation(-canvasDx, -canvasDy)

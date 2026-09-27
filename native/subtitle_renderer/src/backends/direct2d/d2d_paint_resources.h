@@ -21,7 +21,8 @@ Microsoft::WRL::ComPtr<ID2D1Brush> createPaintBrush(
     ID2D1Bitmap1 *image = nullptr,
     float canvasDx = 0.0f,
     float canvasDy = 0.0f,
-    std::uint64_t *brushCreated = nullptr
+    std::uint64_t *brushCreated = nullptr,
+    float layoutScale = 1.0f
 );
 
 D2D1_RECT_F rubyPaintBounds(
@@ -35,7 +36,8 @@ void updatePaintBrush(
     const PaintStyle &paint,
     const D2D1_RECT_F &rect,
     float canvasDx,
-    float canvasDy
+    float canvasDy,
+    float layoutScale = 1.0f
 );
 
 Microsoft::WRL::ComPtr<ID2D1Bitmap1> loadWicBitmap(

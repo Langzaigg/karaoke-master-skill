@@ -2251,6 +2251,11 @@ ProbeResult Direct2DGpuBackend::renderFrameInternal(
             }
             return bounds;
         };
+        // Image-fill brushes tile in logical canvas units (Painter parity):
+        // physical layout already carries this factor, so the bitmap scale
+        // must multiply it in or the sampled image region would drift with
+        // the preview render-target dpr (small vs large preview windows).
+        const float layoutScale = std::max(scene.layoutReferenceScale, 0.01f);
         auto paintBrushAt = [&](const PaintStyle &paint, const D2D1_RECT_F &rect,
                                  const RgbaColor &fallback,
                                  float offsetX, float offsetY) {
@@ -2300,7 +2305,8 @@ ProbeResult Direct2DGpuBackend::renderFrameInternal(
                         canvasDx, canvasDy,
                         impl_->countersEnabled
                             ? &frameDiagnostics.brushCreated
-                            : nullptr
+                            : nullptr,
+                        layoutScale
                     );
                     if (impl_->brushes.size() >= Impl::brushCapacity) {
                         const auto oldest = std::min_element(
@@ -2332,12 +2338,14 @@ ProbeResult Direct2DGpuBackend::renderFrameInternal(
                     canvasDx, canvasDy,
                     impl_->countersEnabled
                         ? &frameDiagnostics.brushCreated
-                        : nullptr
+                        : nullptr,
+                    layoutScale
                 );
             }
             if (brush) {
                 updatePaintBrush(
-                    brush.Get(), paint, effectiveRect, canvasDx, canvasDy
+                    brush.Get(), paint, effectiveRect, canvasDx, canvasDy,
+                    layoutScale
                 );
                 brush->SetOpacity(globalOpacity);
             }

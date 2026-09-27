@@ -10481,6 +10481,165 @@ def test_gpu_g3_image_fill_wrap_scale_and_canvas_anchor_match_painter(
         assert diffs[int(len(diffs) * 0.90)] <= 70
 
 
+def _horizontal_band_fill_transitions(
+    payload: bytes, width: int, height: int, dpr: float
+) -> list[float]:
+    """Logical canvas rows where the sampled band colour changes inside ink.
+
+    Mirrors the Painter's canvas-origin image-fill anchoring: with a correct
+    bitmap-brush scale these rows depend only on the pattern, not on the
+    render target's dpr.
+    """
+    bands = (
+        (0xFF, 0x20, 0x20),
+        (0x20, 0xFF, 0x40),
+        (0x20, 0x40, 0xFF),
+        (0xFF, 0xE0, 0x20),
+    )
+
+    def band_at(row_offset: int) -> int | None:
+        for x in range(width // 4, width * 3 // 4, 3):
+            offset = row_offset + x * 4
+            alpha = payload[offset + 3]
+            if alpha < 200:
+                continue
+            r, g, b = payload[offset], payload[offset + 1], payload[offset + 2]
+            for index, (pr, pg, pb) in enumerate(bands):
+                if abs(r - pr) + abs(g - pg) + abs(b - pb) < 90:
+                    return index
+        return None
+
+    transitions: list[float] = []
+    previous: int | None = None
+    for y in range(height):
+        band = band_at(y * width * 4)
+        if band is not None:
+            if previous is not None and band != previous:
+                transitions.append(y / dpr)
+            previous = band
+    return transitions
+
+
+def _horizontal_band_fill_row_matches(
+    payload: bytes,
+    width: int,
+    height: int,
+    dpr: float,
+) -> tuple[int, int]:
+    """Return (matching rows, ink rows) against the analytic band layout.
+
+    The pattern is 128px tall with four 32px bands anchored at the canvas
+    origin at image_scale 100%: row y must sample band floor((y % 128) / 32).
+    """
+    bands = (
+        (0xFF, 0x20, 0x20),
+        (0x20, 0xFF, 0x40),
+        (0x20, 0x40, 0xFF),
+        (0xFF, 0xE0, 0x20),
+    )
+    matched = 0
+    ink_rows = 0
+    for y in range(height):
+        row_offset = y * width * 4
+        observed = None
+        for x in range(width // 4, width * 3 // 4, 3):
+            offset = row_offset + x * 4
+            alpha = payload[offset + 3]
+            if alpha < 200:
+                continue
+            r, g, b = payload[offset], payload[offset + 1], payload[offset + 2]
+            for index, (pr, pg, pb) in enumerate(bands):
+                if abs(r - pr) + abs(g - pg) + abs(b - pb) < 90:
+                    observed = index
+                    break
+            if observed is not None:
+                break
+        if observed is None:
+            continue
+        ink_rows += 1
+        logical_y = y / dpr
+        expected = int((logical_y % 128.0) // 32)
+        if observed == expected:
+            matched += 1
+    return matched, ink_rows
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Direct2D GPU backend is Windows-only")
+def test_gpu_g3_image_fill_sampling_is_dpr_invariant(monkeypatch, tmp_path) -> None:
+    """图片填充采样不得随预览渲染 dpr（窗口大小）漂移。
+
+    回归：D2D 图片画刷的 Scale 未乘 ``layoutReferenceScale``，纹理按物理像素
+    原尺寸平铺，小窗（低 dpr）预览里图片相对文字放大、截取区域与大窗/导出
+    （dpr=1）不一致，用户无法从预览判断真实导出结果。校验口径：32px 色带
+    锚定画布原点按逻辑尺度平铺，每个 ink 行采样到的色带序号 = floor((y%128)/32)。
+    """
+    monkeypatch.setenv("QT_QPA_PLATFORM", "offscreen")
+    pattern_path = tmp_path / "gpu-fill-bands.png"
+    palette = ("#FF2020", "#20FF40", "#2040FF", "#FFE020")
+    pattern = QImage(128, 128, QImage.Format.Format_RGBA8888)
+    for band, color in enumerate(palette):
+        for y in range(band * 32, (band + 1) * 32):
+            for x in range(128):
+                pattern.setPixelColor(x, y, QColor(color))
+    assert pattern.save(str(pattern_path))
+
+    fill = PaintFill(
+        mode="image",
+        color="#FFFFFF",
+        image_path=str(pattern_path),
+        image_scale_pct=100,
+    )
+    state = KaraokeColorState(text=fill)
+    style = _g1_style(
+        font_family="Meiryo",
+        font_size_px=200,
+        stroke_width_px=0,
+        stroke2_enabled=False,
+        decoration_kind="none",
+        dual_line_layout=False,
+        karaoke_colors=KaraokeColors(before=state, after=state),
+    )
+    track = _g3_fill_track()
+
+    def render(dpr: float) -> tuple[int, int]:
+        with NativeRendererProcess(_renderer_path(), response_timeout_s=15.0) as renderer:
+            renderer.configure_gpu(
+                track,
+                style,
+                width=640,
+                height=360,
+                fps=60,
+                dpr=dpr,
+                force_warp=True,
+                realization_enabled=False,
+            )
+            event = renderer.render_gpu_frame(
+                500, force_warp=True, frame_index=0
+            )
+            with SharedFrameRingReader.from_event(event) as reader:
+                image = reader.read_qimage(event).convertToFormat(
+                    QImage.Format.Format_RGBA8888
+                )
+                bits = image.constBits()
+                bits.setsize(image.sizeInBytes())
+                payload = bytes(bits)
+        matched, ink_rows = _horizontal_band_fill_row_matches(
+            payload, image.width(), image.height(), dpr
+        )
+        assert ink_rows >= 60, "字形 ink 行数异常"
+        return matched, ink_rows
+
+    # 抗锯齿边缘行允许 ±少量误差：阈值取 90%，修复前低 dpr 下周期翻倍、
+    # 约半数 ink 行错位，稳定低于该阈值。
+    for dpr in (1.0, 0.5):
+        matched, ink_rows = render(dpr)
+        assert matched / ink_rows >= 0.9, (dpr, matched, ink_rows)
+
+    painter = _render_painter_oracle(style, t_ms=500, track=track)
+    matched, ink_rows = _horizontal_band_fill_row_matches(painter, 640, 360, 1.0)
+    assert matched / ink_rows >= 0.9, (matched, ink_rows)
+
+
 @pytest.mark.skipif(os.name != "nt", reason="Direct2D GPU backend is Windows-only")
 def test_gpu_g3_alpha_image_fill_protects_body_from_primary_stroke(
     monkeypatch, tmp_path
