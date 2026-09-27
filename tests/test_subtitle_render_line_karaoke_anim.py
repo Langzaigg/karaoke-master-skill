@@ -1,7 +1,8 @@
 """逐行唱字特效覆盖。
 
 原先唱字特效只有全局一档，任何一行都改不了——次字幕只能跟着主字幕走。
-现在 ``LineAnimationOverride`` 也能带唱字动画，``inherit`` 表示仍跟全局。
+现在 ``LineAnimationOverride`` 也能带唱字动画与唱字装饰粒子，``inherit``
+表示仍跟全局。
 """
 
 from __future__ import annotations
@@ -192,6 +193,240 @@ class TestDialog:
             entry_anim="fade", exit_anim="fade", karaoke_anim="none"
         )
         assert "唱字" in _animation_summary(style, changed)
+
+
+class TestPerLineSingFx:
+    """逐行唱字装饰粒子：``sing_fx`` 覆盖，``inherit`` 跟全局。
+
+    粒子参数（尺寸/数量/颜色）仍只看全局——逐行只切档位。
+    """
+
+    @staticmethod
+    def _resolved(global_sing: str, override: LineAnimationOverride | None) -> Style:
+        style = Style(sing_fx=global_sing)
+        line = TimingLine()
+        line.animation_override = override
+        return style_with_line_animation(style, line)
+
+    def test_a_line_can_switch_the_particle_fx_on(self) -> None:
+        assert self._resolved("none", LineAnimationOverride(sing_fx="twinkle")).sing_fx == "twinkle"
+
+    def test_a_line_can_switch_it_off_while_the_global_is_on(self) -> None:
+        assert self._resolved("note", LineAnimationOverride(sing_fx="none")).sing_fx == "none"
+
+    def test_inherit_follows_the_global(self) -> None:
+        assert self._resolved("ripple", LineAnimationOverride(sing_fx="inherit")).sing_fx == "ripple"
+        assert self._resolved("ripple", None).sing_fx == "ripple"
+
+    def test_the_global_setting_is_untouched(self) -> None:
+        style = Style(sing_fx="note")
+        line = TimingLine()
+        line.animation_override = LineAnimationOverride(sing_fx="none")
+        style_with_line_animation(style, line)
+        assert style.sing_fx == "note"
+
+    def test_sing_fx_survives_an_entry_exit_only_override_path(self) -> None:
+        """with_timing 不认识 sing_fx——覆盖入退场时全局粒子档不能丢。"""
+        resolved = self._resolved(
+            "twinkle", LineAnimationOverride(entry_anim="rise", exit_anim="rise")
+        )
+        assert resolved.sing_fx == "twinkle"
+
+
+class TestSingFxPersistence:
+    def test_it_round_trips(self) -> None:
+        override = LineAnimationOverride(
+            entry_anim="fade", exit_anim="fade", sing_fx="ripple"
+        )
+        assert line_animation_override_from_dict(
+            line_animation_override_to_dict(override)
+        ) == override
+
+    def test_inherit_is_not_persisted(self) -> None:
+        data = line_animation_override_to_dict(
+            LineAnimationOverride(entry_anim="fade", exit_anim="fade")
+        )
+        assert "sing_fx" not in data
+
+    def test_a_project_without_the_key_reads_as_inherit(self) -> None:
+        legacy = {
+            "entry_anim": "fade",
+            "entry_duration_ms": 300,
+            "exit_anim": "fade",
+            "exit_duration_ms": 300,
+        }
+        assert line_animation_override_from_dict(legacy).sing_fx == "inherit"
+
+    @pytest.mark.parametrize("value", ["乱写", None, 3, "", "sparkle"])
+    def test_a_bad_value_falls_back_to_inherit(self, value) -> None:
+        # "sparkle" 是入退场粒子档，不是唱字档，同样要拦下来。
+        legacy = {
+            "entry_anim": "fade",
+            "exit_anim": "fade",
+            "sing_fx": value,
+        }
+        assert line_animation_override_from_dict(legacy).sing_fx == "inherit"
+
+
+class TestSingFxCacheKey:
+    def test_the_style_cache_distinguishes_the_particle_fx(self) -> None:
+        """缓存键是逐字段列举的；漏掉 sing_fx，只有它不同的两行会串味。"""
+        import inspect
+
+        from krok_helper.subtitle_render.engine.layout.line import style as line_style
+
+        source = inspect.getsource(line_style.style_for_line)
+        assert "override.sing_fx" in source
+
+
+class TestSingFxDialog:
+    @staticmethod
+    def _dialog(override, style=None):
+        from krok_helper.subtitle_render.frontend.editor.lyrics_list import _LineAnimationDialog
+
+        return _LineAnimationDialog(style or Style(), override)
+
+    def test_it_offers_the_global_plus_all_kinds(self) -> None:
+        dialog = self._dialog(None)
+        values = {
+            dialog._sing_combo.itemData(i)
+            for i in range(dialog._sing_combo.count())
+        }
+        assert values == {"inherit", "none", "twinkle", "note", "ripple"}
+
+    def test_it_round_trips_the_choice(self) -> None:
+        override = LineAnimationOverride(
+            entry_anim="fade", exit_anim="fade", sing_fx="note"
+        )
+        assert self._dialog(override).animation_override().sing_fx == "note"
+
+    def test_without_an_override_it_shows_the_global_value(self) -> None:
+        dialog = self._dialog(None, Style(sing_fx="ripple"))
+        assert dialog._sing_combo.currentData() == "ripple"
+        assert dialog.animation_override() is None
+
+    def test_it_follows_the_inherit_checkbox(self) -> None:
+        dialog = self._dialog(None)
+        dialog._inherit_check.setChecked(True)
+        assert not dialog._sing_combo.isEnabled()
+        dialog._inherit_check.setChecked(False)
+        assert dialog._sing_combo.isEnabled()
+
+    def test_the_summary_only_mentions_a_changed_particle_fx(self) -> None:
+        from krok_helper.subtitle_render.frontend.editor.lyrics_list import _animation_summary
+
+        style = Style()
+        plain = LineAnimationOverride(entry_anim="fade", exit_anim="fade")
+        assert "装饰粒子" not in _animation_summary(style, plain)
+        changed = LineAnimationOverride(
+            entry_anim="fade", exit_anim="fade", sing_fx="twinkle"
+        )
+        assert "装饰粒子星光闪烁" in _animation_summary(style, changed)
+
+
+class TestPresetCombos:
+    """快捷组合：新特效成对档 + 只动唱字装饰粒子的唱字系组合。"""
+
+    @staticmethod
+    def _apply(dialog, preset: str):
+        index = dialog._preset_combo.findData(preset)
+        assert index >= 0
+        dialog._preset_combo.setCurrentIndex(index)
+        dialog._apply_preset(index)
+        return dialog
+
+    def test_new_effect_pairs_are_offered(self) -> None:
+        from krok_helper.subtitle_render.frontend.editor.lyrics_list import (
+            _PRESET_COMBO_ITEMS,
+            _PRESET_ENTRY_EXIT,
+            _PRESET_SING_FX,
+        )
+
+        values = {value for value, _label in _PRESET_COMBO_ITEMS}
+        assert {
+            "sparkle", "fx_ripple", "fx_note", "assemble", "glow", "wave", "stretch",
+        } <= values
+        sing_values = {value for value in values if value.startswith("sing_")}
+        # 每个非唱字、非 custom 的组合都必须能落到一对入退场档；
+        # 唱字系组合不允许顺带入退场，且各自指向有效的唱字粒子档。
+        for value in values - {"custom"} - sing_values:
+            assert value in _PRESET_ENTRY_EXIT
+        for value in sing_values:
+            assert value not in _PRESET_ENTRY_EXIT
+        assert sing_values == set(_PRESET_SING_FX)
+
+    def test_assemble_preset_sets_the_pair(self) -> None:
+        dialog = self._dialog()
+        dialog._inherit_check.setChecked(False)
+        dialog = self._apply(dialog, "assemble")
+        assert dialog._entry_combo.currentData() == "assemble_in"
+        assert dialog._exit_combo.currentData() == "dissolve_out"
+
+    def test_sing_presets_only_touch_the_particle_combo(self) -> None:
+        dialog = self._dialog()
+        dialog._inherit_check.setChecked(False)
+        dialog = self._apply(dialog, "sing_twinkle")
+        assert dialog._sing_combo.currentData() == "twinkle"
+        # 入退场保持弹窗打开时的值，不被组合顺手改掉。
+        assert dialog._entry_combo.currentData() == "fade"
+        assert dialog._exit_combo.currentData() == "fade"
+        assert dialog.animation_override().sing_fx == "twinkle"
+
+    @staticmethod
+    def _dialog():
+        from krok_helper.subtitle_render.frontend.editor.lyrics_list import _LineAnimationDialog
+
+        return _LineAnimationDialog(Style(), None)
+
+
+class TestSingFxGpuParity:
+    """CPU 侧改了唱字粒子，GPU 侧必须拿到同样的逐行 burst——否则 GPU 静默按全局渲染。"""
+
+    @staticmethod
+    def _track():
+        from krok_helper.subtitle_render.domain.models import TimingChar, TimingTrack
+
+        def line(text: str, start: int, override=None) -> TimingLine:
+            item = TimingLine()
+            item.chars = [
+                TimingChar(text=ch, start_ms=start + i * 200)
+                for i, ch in enumerate(text)
+            ]
+            item.end_ms = start + len(text) * 200
+            item.animation_override = override
+            return item
+
+        track = TimingTrack()
+        track.lines = [
+            line("AAA", 0),
+            line("BBB", 2000, LineAnimationOverride(
+                entry_anim="fade", exit_anim="fade", sing_fx="twinkle")),
+            line("CCC", 4000, LineAnimationOverride(entry_anim="fade", exit_anim="fade")),
+        ]
+        return track
+
+    def test_the_ir_carries_the_per_line_particle_bursts(self, qapp) -> None:
+        from krok_helper.subtitle_render.engine.painter import build_track_layout_plan
+        from krok_helper.subtitle_render.native.protocol import track_to_ir
+
+        style = Style()
+        style.sing_fx = "none"
+        ir = track_to_ir(
+            self._track(),
+            style,
+            layout_plan=build_track_layout_plan(self._track(), style),
+        )
+        # 无覆盖 / 覆盖成 twinkle / inherit
+        kinds = [
+            sorted({burst["kind"] for burst in line["fx_bursts"]})
+            for line in ir["lines"]
+        ]
+        assert kinds == [[], ["twinkle"], []]
+
+    def test_it_does_not_force_a_painter_fallback(self, qapp) -> None:
+        from krok_helper.subtitle_render.native.protocol import gpu_unsupported_features
+
+        assert gpu_unsupported_features(self._track(), Style()) == ()
 
 
 class TestGpuParity:

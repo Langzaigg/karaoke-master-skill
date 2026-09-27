@@ -155,6 +155,7 @@ def style_for_line(style: Style, line: TimingLine) -> Style:
             override.exit_anim,
             int(override.exit_duration_ms),
             override.karaoke_anim,
+            override.sing_fx,
         ),
         # 反向走字可独立覆盖唱字特效；其余条件相同的正向/反向行不能共用样式缓存。
         bool(line.wipe_reverse),

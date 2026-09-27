@@ -188,9 +188,63 @@ _KARAOKE_EFFECTS = (
     ("zoom_pulse", "整字放大"),
     ("zoom_pulse_scanline", "整字放大+扫字线"),
 )
+#: 唱字装饰粒子逐行只切档位，与属性面板「动画」页同一套语义；粒子尺寸/数量/
+#: 颜色仍只看全局，避免弹窗塞满与逐行无关的参数。
+_SING_FX_EFFECTS = (
+    ("inherit", "跟随全局"),
+    ("none", "无"),
+    ("twinkle", "星光闪烁"),
+    ("note", "音符飘出"),
+    ("ripple", "涟漪光环"),
+)
 _ENTRY_LABELS = dict(_ENTRY_EFFECTS)
 _EXIT_LABELS = dict(_EXIT_EFFECTS)
 _KARAOKE_LABELS = dict(_KARAOKE_EFFECTS)
+_SING_FX_LABELS = dict(_SING_FX_EFFECTS)
+
+#: 快捷组合。入退场成对档覆盖 2026-09 上架的逐字/粒子新特效（星光、涟漪、
+#: 音符、粒子拼散、辉光、波浪、拉伸）；唱字系组合只动装饰粒子档，入退场
+#: 保持用户已选的值，方便「只给这一行加唱字星光」的定向用法。
+_PRESET_COMBO_ITEMS = (
+    ("custom", "自定义"),
+    ("none", "无特效"),
+    ("fade", "淡入淡出"),
+    ("slide", "滑入滑出"),
+    ("char_fade", "逐字淡入淡出"),
+    ("char_drip", "逐字垂落"),
+    ("utopia", "Utopia"),
+    ("sparkle", "星光闪烁"),
+    ("fx_ripple", "涟漪光环"),
+    ("fx_note", "音符飘出"),
+    ("assemble", "粒子拼散"),
+    ("glow", "辉光浮现"),
+    ("wave", "波浪上浮"),
+    ("stretch", "逐字拉伸"),
+    ("sing_twinkle", "唱字·星光闪烁"),
+    ("sing_note", "唱字·音符飘出"),
+    ("sing_ripple", "唱字·涟漪光环"),
+)
+_PRESET_ENTRY_EXIT = {
+    "none": ("none", "none"),
+    "fade": ("fade", "fade"),
+    "slide": ("slide_in", "slide_out"),
+    "char_fade": ("char_fade", "char_fade"),
+    "char_drip": ("char_drip", "char_drip"),
+    "utopia": ("utopia", "utopia"),
+    "sparkle": ("sparkle", "sparkle"),
+    "fx_ripple": ("ripple", "ripple"),
+    "fx_note": ("note", "note"),
+    "assemble": ("assemble_in", "dissolve_out"),
+    "glow": ("glow_in", "glow_out"),
+    # 波浪档只有入场侧，退场配一个最朴素的淡出收尾。
+    "wave": ("wave_in", "fade"),
+    "stretch": ("stretch_in", "stretch_out"),
+}
+_PRESET_SING_FX = {
+    "sing_twinkle": "twinkle",
+    "sing_note": "note",
+    "sing_ripple": "ripple",
+}
 
 
 def _animation_summary(
@@ -211,6 +265,8 @@ def _animation_summary(
     # 唱字只在这一行真的改了它时才标出来，免得每行都拖一截重复文字。
     if override is not None and override.karaoke_anim != "inherit":
         summary += f" · 唱字{_KARAOKE_LABELS.get(override.karaoke_anim, override.karaoke_anim)}"
+    if override is not None and override.sing_fx != "inherit":
+        summary += f" · 装饰粒子{_SING_FX_LABELS.get(override.sing_fx, override.sing_fx)}"
     if wipe_reverse:
         summary += " · 反向走字"
     return summary
@@ -239,15 +295,7 @@ class _LineAnimationDialog(ModelessDialog):
         form = QFormLayout()
         form.setSpacing(10)
         self._preset_combo = _StableFluentComboBox(self)
-        for value, label in (
-            ("custom", "自定义"),
-            ("none", "无特效"),
-            ("fade", "淡入淡出"),
-            ("slide", "滑入滑出"),
-            ("char_fade", "逐字淡入淡出"),
-            ("char_drip", "逐字垂落"),
-            ("utopia", "Utopia"),
-        ):
+        for value, label in _PRESET_COMBO_ITEMS:
             self._preset_combo.addItem(label, userData=value)
         self._entry_combo = _StableFluentComboBox(self)
         self._exit_combo = _StableFluentComboBox(self)
@@ -258,6 +306,14 @@ class _LineAnimationDialog(ModelessDialog):
         self._karaoke_combo = _StableFluentComboBox(self)
         for value, label in _KARAOKE_EFFECTS:
             self._karaoke_combo.addItem(label, userData=value)
+        self._sing_combo = _StableFluentComboBox(self)
+        for value, label in _SING_FX_EFFECTS:
+            self._sing_combo.addItem(label, userData=value)
+        self._sing_combo.setToolTip(
+            "唱字装饰粒子：唱到哪个字就在那个字上生效——星光闪烁=按伪随机"
+            "位置冒星、音符飘出=自字框升起、涟漪光环=每字两圈细环扩散；"
+            "粒子尺寸/数量/颜色仍用全局设置（属性面板·动画页）"
+        )
         self._entry_duration = FluentSpinBox(self)
         self._exit_duration = FluentSpinBox(self)
         for spin in (self._entry_duration, self._exit_duration):
@@ -270,9 +326,11 @@ class _LineAnimationDialog(ModelessDialog):
         entry_ms = style.entry_lead_ms if override is None else override.entry_duration_ms
         exit_ms = style.exit_fade_ms if override is None else override.exit_duration_ms
         karaoke = style.karaoke_anim if override is None else override.karaoke_anim
+        sing_fx = style.sing_fx if override is None else override.sing_fx
         self._set_combo_value(self._entry_combo, entry)
         self._set_combo_value(self._exit_combo, exit_)
         self._set_combo_value(self._karaoke_combo, karaoke)
+        self._set_combo_value(self._sing_combo, sing_fx)
         self._entry_duration.setValue(max(int(entry_ms), 0))
         self._exit_duration.setValue(max(int(exit_ms), 0))
         form.addRow("快捷组合", self._preset_combo)
@@ -281,6 +339,7 @@ class _LineAnimationDialog(ModelessDialog):
         form.addRow("退场", self._exit_combo)
         form.addRow("退场时长", self._exit_duration)
         form.addRow("唱字特效", self._karaoke_combo)
+        form.addRow("唱字装饰粒子", self._sing_combo)
         root.addLayout(form)
 
         buttons = QHBoxLayout()
@@ -310,24 +369,20 @@ class _LineAnimationDialog(ModelessDialog):
             self._exit_combo,
             self._exit_duration,
             self._karaoke_combo,
+            self._sing_combo,
         ):
             widget.setEnabled(not inherit)
 
     def _apply_preset(self, _index: int) -> None:
         preset = str(self._preset_combo.currentData() or "custom")
-        mapping = {
-            "none": ("none", "none"),
-            "fade": ("fade", "fade"),
-            "slide": ("slide_in", "slide_out"),
-            "char_fade": ("char_fade", "char_fade"),
-            "char_drip": ("char_drip", "char_drip"),
-            "utopia": ("utopia", "utopia"),
-        }
-        pair = mapping.get(preset)
-        if pair is None:
-            return
-        self._set_combo_value(self._entry_combo, pair[0])
-        self._set_combo_value(self._exit_combo, pair[1])
+        pair = _PRESET_ENTRY_EXIT.get(preset)
+        if pair is not None:
+            self._set_combo_value(self._entry_combo, pair[0])
+            self._set_combo_value(self._exit_combo, pair[1])
+        # 唱字系组合只动装饰粒子档，入退场保持用户已选的值。
+        sing = _PRESET_SING_FX.get(preset)
+        if sing is not None:
+            self._set_combo_value(self._sing_combo, sing)
 
     def animation_override(self) -> Optional[LineAnimationOverride]:
         if self._inherit_check.isChecked():
@@ -338,6 +393,7 @@ class _LineAnimationDialog(ModelessDialog):
             exit_anim=str(self._exit_combo.currentData() or "none"),
             exit_duration_ms=self._exit_duration.value(),
             karaoke_anim=str(self._karaoke_combo.currentData() or "inherit"),
+            sing_fx=str(self._sing_combo.currentData() or "inherit"),
         )
 
 

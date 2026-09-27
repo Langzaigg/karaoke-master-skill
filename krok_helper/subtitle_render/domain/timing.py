@@ -53,6 +53,8 @@ CHAR_TRANSITION_ANIMS: frozenset[str] = frozenset(
 EntryFx = Literal["none", "sparkle", "ripple"]
 ExitFx = Literal["none", "sparkle", "ripple"]
 SingFx = Literal["none", "twinkle", "note", "ripple"]
+# 逐行唱字装饰粒子覆盖比全局多一档「跟随全局」，语义与 KaraokeAnimation 的 inherit 对齐。
+LineSingFx = Literal["inherit", "none", "twinkle", "note", "ripple"]
 # 入退场 fx 字段保留作工程兼容（UI 已并入入退场动画档，规划器不再消费）。
 ENTRY_FX_KINDS: frozenset[str] = frozenset({"none", "sparkle", "ripple"})
 EXIT_FX_KINDS: frozenset[str] = frozenset({"none", "sparkle", "ripple"})
@@ -195,6 +197,9 @@ class LineAnimationOverride:
     karaoke_anim: KaraokeAnimation = "inherit"
     """唱字动画。``inherit`` 沿用全局推导（与 Style 同义），让次字幕这类行能单独
     关掉或打开唱字特效，而不必跟着主字幕走。"""
+    sing_fx: LineSingFx = "inherit"
+    """唱字装饰粒子（星光闪烁 / 音符飘出 / 涟漪光环）。``inherit`` 沿用全局
+    ``Style.sing_fx``；粒子参数（尺寸/数量/颜色）仍只看全局，逐行只切档位。"""
 
 
 @dataclass

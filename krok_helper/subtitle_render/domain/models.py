@@ -1333,7 +1333,12 @@ def style_with_line_animation(style: Style, line: TimingLine) -> Style:
         changes["karaoke_anim"] = override.karaoke_anim
     if line.wipe_reverse and style.reverse_karaoke_anim != "inherit":
         changes["karaoke_anim"] = style.reverse_karaoke_anim
-    return style.with_timing(**changes) if changes else style
+    merged = style.with_timing(**changes) if changes else style
+    if override is not None and override.sing_fx != "inherit":
+        # 唱字装饰粒子与唱字动画同语义：inherit 留全局档，其余档写进行样式。
+        # sing_fx 不属于 StyleTimingConfig（非时间字段），flat 字段直接替换。
+        merged = replace(merged, sing_fx=override.sing_fx)
+    return merged
 
 
 def effective_karaoke_animation(style: Style) -> Literal["none", "no_wipe", "utopia"]:

@@ -140,6 +140,8 @@ def line_animation_override_to_dict(
     # 出一个键（读回时缺键本来就按 inherit 处理）。
     if override.karaoke_anim != "inherit":
         data["karaoke_anim"] = override.karaoke_anim
+    if override.sing_fx != "inherit":
+        data["sing_fx"] = override.sing_fx
     return data
 
 
@@ -172,12 +174,16 @@ def line_animation_override_from_dict(value: object) -> Optional[LineAnimationOv
     }:
         # 旧项目没有这一项，按继承处理——渲染结果与加这个字段之前一致。
         karaoke = "inherit"
+    sing_fx = value.get("sing_fx")
+    if sing_fx not in {"inherit", "none", "twinkle", "note", "ripple"}:
+        sing_fx = "inherit"
     return LineAnimationOverride(
         entry_anim=entry,
         entry_duration_ms=duration("entry_duration_ms", 300),
         exit_anim=exit_,
         exit_duration_ms=duration("exit_duration_ms", 300),
         karaoke_anim=karaoke,
+        sing_fx=sing_fx,
     )
 
 
