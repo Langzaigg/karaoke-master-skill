@@ -338,6 +338,79 @@ def test_lyric_layout_signature_ignores_scheme_decoration_fields() -> None:
     assert base != signature_with(replace(scheme, font_size_px=64))
 
 
+def test_lyric_layout_signature_ignores_lit_volume_visual_fields() -> None:
+    """指示灯/音量柱的纯绘制参数不作废布局缓存，时序字段仍必须作废。
+
+    灯组是行首叠加层，位置/大小/闪烁/过渡/对齐只在渲染期消费
+    （render/elements/signal.py），碰撞包络只测纯主字形 path
+    （``_display_line_horizontal_ink_rect``）。参与排版的只有时序字段：
+    ``lit_enabled`` / ``volume_enabled`` 决定段首行是否有信号窗口
+    （``lit_signal_active``），duration / waiting / time_offset 决定窗口
+    提前量（``signal_lead_in_ms`` → 显示窗口与分页输入）。
+    """
+    from krok_helper.subtitle_render.engine.value_signature import (
+        lyric_layout_style_signature,
+    )
+
+    base = lyric_layout_style_signature(Style(lit_enabled=True, volume_enabled=True))
+
+    visual_only = Style(
+        lit_enabled=True,
+        volume_enabled=True,
+        lit_style="image",
+        lit_number=8,
+        lit_size=99,
+        lit_offset_x=-120,
+        lit_offset_y=40,
+        lit_tracking=6,
+        lit_stroke_width=9,
+        lit_stroke_soften=5,
+        lit_opacity_pct=42,
+        lit_edge_brightness_pct=11,
+        lit_shadow=False,
+        lit_transition_mode="slide",
+        lit_transition_ratio_pct=20,
+        lit_transition_angle_deg=45,
+        lit_transition_distance=64,
+        volume_appearance_mode="auto",
+        volume_auto_size_ratio_pct=70,
+        volume_auto_column_ratio_pct=30,
+        volume_size=120,
+        volume_offset_x=-30,
+        volume_offset_y=12,
+        volume_column_width=20,
+        volume_column_count=8,
+        volume_column_spacing=7,
+        volume_align=0,
+        volume_ratio=5.5,
+        volume_stroke_width=6,
+        volume_opacity_pct=80,
+        volume_flash_times=9,
+        volume_flash_duration_ratio=0.5,
+        volume_transition_ratio_pct=40,
+        volume_fill_color="#101010",
+        volume_stroke_color="#202020",
+        volume_overlay_fill_color="#303030",
+        volume_overlay_stroke_color="#404040",
+    )
+    assert base == lyric_layout_style_signature(visual_only)
+
+    # 时序字段改变显示窗口 / 分页输入，签名必须失效。
+    for timing_change in (
+        {"lit_enabled": False},
+        {"volume_enabled": False},
+        {"signals_duration_ms": 8000},
+        {"lit_waiting_time_ms": 500},
+        {"lit_time_offset_ms": -300},
+        {"volume_duration_ms": 9000},
+        {"volume_waiting_time_ms": 600},
+        {"volume_time_offset_ms": -400},
+    ):
+        assert base != lyric_layout_style_signature(
+            replace(Style(lit_enabled=True, volume_enabled=True), **timing_change)
+        ), timing_change
+
+
 def test_painter_keeps_horizontal_wipe_compatibility_exports() -> None:
     from krok_helper.subtitle_render.engine.render.elements.horizontal import wipe
 

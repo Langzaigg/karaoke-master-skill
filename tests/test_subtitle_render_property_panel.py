@@ -1272,6 +1272,79 @@ def test_colour_only_edit_skips_window_and_margin_recompute(qapp):
     assert win._tracks_window_refresh_timer.isActive()
 
 
+def test_lit_volume_visual_edits_skip_window_and_margin_recompute(qapp):
+    """指示灯/音量柱的纯绘制参数不该重算显示窗口和余白告警。
+
+    灯组是行首叠加层，大小/柱宽/闪烁/过渡/对齐/外观模式只在渲染期消费；
+    时序字段（enabled 开关、duration/waiting/time_offset——signal_lead_in_ms
+    的输入）仍会改显示窗口，必须照旧全量重算。
+    """
+    provider = _FontMigrationSettingsProvider({"style": style_to_dict(Style())})
+    win = mw.SubtitleRenderWindow(embedded=True, settings_provider=provider)
+    win._timing_track = TimingTrack(
+        lines=[
+            TimingLine(chars=[TimingChar("一", 0)], end_ms=500),
+            TimingLine(chars=[TimingChar("二", 500)], end_ms=1000),
+        ]
+    )
+    win._margin_check_timer.stop()
+    win._tracks_window_refresh_timer.stop()
+
+    visual_changes = {
+        "lit_style": "image",
+        "lit_number": 6,
+        "lit_size": 64,
+        "lit_tracking": 4,
+        "lit_offset_x": -40,
+        "lit_offset_y": 10,
+        "lit_stroke_width": 5,
+        "lit_stroke_soften": 3,
+        "lit_opacity_pct": 70,
+        "lit_edge_brightness_pct": 30,
+        "lit_shadow": False,
+        "lit_transition_mode": "slide",
+        "lit_transition_ratio_pct": 50,
+        "lit_transition_angle_deg": 90,
+        "lit_transition_distance": 30,
+        "volume_appearance_mode": "auto",
+        "volume_auto_size_ratio_pct": 60,
+        "volume_auto_column_ratio_pct": 30,
+        "volume_size": 96,
+        "volume_offset_x": -20,
+        "volume_offset_y": 8,
+        "volume_column_width": 18,
+        "volume_column_count": 6,
+        "volume_column_spacing": 5,
+        "volume_align": 2,
+        "volume_ratio": 4.0,
+        "volume_stroke_width": 4,
+        "volume_opacity_pct": 85,
+        "volume_flash_times": 5,
+        "volume_flash_duration_ratio": 0.5,
+        "volume_transition_ratio_pct": 45,
+    }
+    win._apply_style(replace(win._style, **visual_changes))
+    assert not win._margin_check_timer.isActive()
+    assert not win._tracks_window_refresh_timer.isActive()
+
+    # 时序字段改显示窗口提前量 / 段首行信号窗口，照旧全量重算。
+    for timing_change in (
+        {"lit_enabled": True},
+        {"volume_enabled": True},
+        {"signals_duration_ms": 8000},
+        {"lit_waiting_time_ms": 500},
+        {"lit_time_offset_ms": -300},
+        {"volume_duration_ms": 9000},
+        {"volume_waiting_time_ms": 600},
+        {"volume_time_offset_ms": -400},
+    ):
+        win._margin_check_timer.stop()
+        win._tracks_window_refresh_timer.stop()
+        win._apply_style(replace(win._style, **timing_change))
+        assert win._margin_check_timer.isActive(), timing_change
+        assert win._tracks_window_refresh_timer.isActive(), timing_change
+
+
 def test_paint_only_scheme_whitelist_matches_layout_signature_exclusions() -> None:
     """主窗口 paint-only 方案白名单与布局签名剔除清单必须逐字段一致。
 
@@ -1285,6 +1358,22 @@ def test_paint_only_scheme_whitelist_matches_layout_signature_exclusions() -> No
     )
 
     assert mw._PAINT_ONLY_SCHEME_FIELDS == _LYRIC_LAYOUT_EXCLUDED_SCHEME_FIELDS
+
+
+def test_paint_only_style_fields_subset_of_layout_signature_exclusions() -> None:
+    """顶层 paint-only 白名单必须整体落在布局签名剔除清单内。
+
+    同方案清单的一致性理由：只进 paint-only 不进签名剔除 → 主线程跳过
+    窗口/余白重算，但预览布局签名仍失配、整轨重排照旧（跳过白跑）。
+    反向不要求相等：签名剔除清单还含标题 / 渲染专属动画等字段，它们有
+    各自的局部重排 scope，不是 paint-only。
+    """
+
+    from krok_helper.subtitle_render.engine.value_signature import (
+        _LYRIC_LAYOUT_EXCLUDED_STYLE_FIELDS,
+    )
+
+    assert mw._PAINT_ONLY_STYLE_FIELDS <= _LYRIC_LAYOUT_EXCLUDED_STYLE_FIELDS
 
 
 def test_live_scheme_edits_do_not_auto_save_as_app_defaults(qapp):

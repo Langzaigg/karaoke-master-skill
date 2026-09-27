@@ -495,6 +495,23 @@ _PAINT_ONLY_STYLE_FIELDS: frozenset[str] = frozenset({
     "lit_fill_color", "lit_image_path",
     "lit_stroke_color", "volume_fill_color", "volume_stroke_color",
     "volume_overlay_fill_color", "volume_overlay_stroke_color",
+    # 指示灯/音量柱的纯绘制参数（大小/柱宽/闪烁/过渡/对齐/外观模式等）：
+    # 灯组是行首叠加层，只在渲染期消费（render/elements/signal.py），碰撞
+    # 包络也只测纯主字形 path（_display_line_horizontal_ink_rect），不反向
+    # 影响排版。参与排版的只有时序字段——lit_enabled / volume_enabled
+    # （lit_signal_active 决定段首行是否有信号窗口）与 duration /
+    # waiting_time / time_offset（signal_lead_in_ms 决定窗口提前量）——
+    # 它们刻意留在集合外，改这些仍走全量重排。
+    "lit_style", "lit_number", "lit_size", "lit_offset_x", "lit_offset_y",
+    "lit_tracking", "lit_stroke_width", "lit_stroke_soften", "lit_opacity_pct",
+    "lit_edge_brightness_pct", "lit_shadow", "lit_transition_mode",
+    "lit_transition_ratio_pct", "lit_transition_angle_deg", "lit_transition_distance",
+    "volume_appearance_mode", "volume_auto_size_ratio_pct",
+    "volume_auto_column_ratio_pct", "volume_size", "volume_offset_x",
+    "volume_offset_y", "volume_column_width", "volume_column_count",
+    "volume_column_spacing", "volume_align", "volume_ratio", "volume_stroke_width",
+    "volume_opacity_pct", "volume_flash_times", "volume_flash_duration_ratio",
+    "volume_transition_ratio_pct",
 })
 _PAINT_ONLY_SCHEME_FIELDS: frozenset[str] = frozenset({
     "base_color", "fill_color", "fill_gradient_enabled", "fill_gradient_start_color",

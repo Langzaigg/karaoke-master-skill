@@ -36,6 +36,44 @@ _LYRIC_LAYOUT_EXCLUDED_STYLE_FIELDS = _LYRIC_LAYOUT_TITLE_ONLY_EXCLUDED_STYLE_FI
     "volume_stroke_color",
     "volume_overlay_fill_color",
     "volume_overlay_stroke_color",
+    # 指示灯/音量柱的纯绘制参数（大小/柱宽/闪烁/过渡/对齐/外观模式等）：
+    # 灯组是行首叠加层，只在渲染期消费（render/elements/signal.py），碰撞
+    # 包络只测纯主字形 path（_display_line_horizontal_ink_rect），不反向
+    # 影响排版。时序字段刻意保留在签名里：lit_enabled / volume_enabled
+    # 决定段首行是否有信号窗口（lit_signal_active），duration / waiting /
+    # time_offset 决定窗口提前量（signal_lead_in_ms）——它们变了显示窗口
+    # 与分页输入就真的变了。
+    "lit_style",
+    "lit_number",
+    "lit_size",
+    "lit_offset_x",
+    "lit_offset_y",
+    "lit_tracking",
+    "lit_stroke_width",
+    "lit_stroke_soften",
+    "lit_opacity_pct",
+    "lit_edge_brightness_pct",
+    "lit_shadow",
+    "lit_transition_mode",
+    "lit_transition_ratio_pct",
+    "lit_transition_angle_deg",
+    "lit_transition_distance",
+    "volume_appearance_mode",
+    "volume_auto_size_ratio_pct",
+    "volume_auto_column_ratio_pct",
+    "volume_size",
+    "volume_offset_x",
+    "volume_offset_y",
+    "volume_column_width",
+    "volume_column_count",
+    "volume_column_spacing",
+    "volume_align",
+    "volume_ratio",
+    "volume_stroke_width",
+    "volume_opacity_pct",
+    "volume_flash_times",
+    "volume_flash_duration_ratio",
+    "volume_transition_ratio_pct",
     # 渲染专属唱字/扫字线字段：不进入显示窗口、分页、排版任何输入
     # （调度只读出入场动画与时长/保护时间，见 display/schedule.py 与
     # layout/line/style.py）。布局计划缓存命中后由 _rebind_plan_line_styles
