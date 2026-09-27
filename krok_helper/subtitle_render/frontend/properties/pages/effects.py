@@ -30,6 +30,14 @@ ENTRY_ANIMATION_OPTIONS = (
     ("文字垂下", "char_drip"),
     ("旋转翻转", "spin_flip"),
     ("utopia", "utopia"),
+    ("字距收拢", "tracking_in"),
+    ("波浪上浮", "wave_in"),
+    ("逐字拉伸入场", "stretch_in"),
+    ("辉光浮现", "glow_in"),
+    ("粒子拼接", "assemble_in"),
+    ("星光闪烁", "sparkle"),
+    ("涟漪光环", "ripple"),
+    ("音符飘出", "note"),
 )
 
 EXIT_ANIMATION_OPTIONS = (
@@ -41,6 +49,27 @@ EXIT_ANIMATION_OPTIONS = (
     ("文字垂出", "char_drip"),
     ("旋转翻转", "spin_flip"),
     ("utopia", "utopia"),
+    ("碎散爆开", "scatter_out"),
+    ("收拢消散", "converge_out"),
+    ("逐字拉伸退场", "stretch_out"),
+    ("辉光消散", "glow_out"),
+    ("粒子消散", "dissolve_out"),
+    ("星光闪烁", "sparkle"),
+    ("涟漪光环", "ripple"),
+    ("音符飘出", "note"),
+)
+
+FX_PARTICLE_OPTIONS = (
+    ("无", "none"),
+    ("星光闪烁", "sparkle"),
+    ("涟漪光环", "ripple"),
+)
+
+FX_SING_OPTIONS = (
+    ("无", "none"),
+    ("星光闪烁", "twinkle"),
+    ("音符飘出", "note"),
+    ("涟漪光环", "ripple"),
 )
 
 
@@ -440,9 +469,51 @@ class EffectsPropertyPageBuilder:
                 zoom_pulse_curve_level=host._zoom_pulse_curve_combo.currentData()
             )
         )
+        host._stroke_flash_check = CheckBox("唱字闪光", section)
+        host._stroke_flash_check.setToolTip(
+            "每个字唱到的瞬间，描边沿字形轮廓闪白脉冲约 240ms 后回落；"
+            "可与任意唱字特效叠加，仅主文字生效（注音不闪）"
+        )
+        host._stroke_flash_check.toggled.connect(
+            lambda checked: host._update_style(karaoke_stroke_flash=checked)
+        )
+
+        host._fx_sing_combo = self._combo(section, FX_SING_OPTIONS, "sing_fx")
+        host._fx_sing_combo.setToolTip(
+            "唱字装饰粒子：唱到哪个字就在那个字上生效——星光闪烁=按伪随机"
+            "位置冒星、音符飘出=自字框升起、涟漪光环=每字两圈细环扩散"
+            "（随机位置/大小/时机）"
+        )
+        host._fx_particle_row = self._fx_param_row(section, host._fx_sing_combo)
+        host._fx_size_spin = self._spin_factory(5, 200, suffix=" %")
+        host._fx_size_spin.setToolTip(
+            "唱字装饰粒子的尺寸（相对主字号的百分比）：星光/音符按此边长，"
+            "涟漪按 3.6 倍扩散；入退场动画粒子用固定默认档，不受此旋钮影响"
+        )
+        host._fx_size_spin.valueChanged.connect(
+            lambda value: host._update_style(fx_particle_size_em=value / 100.0)
+        )
+        host._fx_count_spin = self._spin_factory(2, 64, suffix=" 个")
+        host._fx_count_spin.setToolTip(
+            "唱字装饰粒子数量：闪烁/音符按比例折算为每字数量；"
+            "入退场动画粒子用固定默认档，不受此旋钮影响"
+        )
+        host._fx_count_spin.valueChanged.connect(
+            lambda value: host._update_style(fx_particle_count=value)
+        )
+        host._fx_color_btn = host._color_button(
+            "fx_particle_color", getattr(host._style, "fx_particle_color", "#FFFFFF")
+        )
+        host._fx_param_controls_row = self._fx_size_row(
+            section,
+            host._fx_size_spin,
+            host._fx_count_spin,
+            host._fx_color_btn,
+        )
         # 网格行序：第 1 行 = 入场/退场，第 2 行 = 唱字对 + 段首尾区块，
         # 第 3 行 = 扫字线整行（参数永久可编辑，颜色/亮度按模式互换启用态），
-        # 第 4 行 = 整字放大速度等级。
+        # 第 4 行 = 整字放大速度等级，第 5 行 = 描边闪光 + 装饰粒子，
+        # 第 6 行 = 粒子参数（尺寸为字号百分比）。
 
         host._section_edge_check = CheckBox("段首尾独立动画", section)
         host._section_edge_check.toggled.connect(host._on_section_edge_toggled)
@@ -482,8 +553,49 @@ class EffectsPropertyPageBuilder:
             host._scanline_row,
         )
         host._animation_grid.add_field("整字放大速度等级", host._zoom_pulse_curve_combo)
+        host._stroke_flash_row = QWidget(section)
+        stroke_flash_layout = QHBoxLayout(host._stroke_flash_row)
+        stroke_flash_layout.setContentsMargins(0, 0, 0, 0)
+        stroke_flash_layout.setSpacing(6)
+        stroke_flash_layout.addWidget(host._stroke_flash_check)
+        # 用户口径：粒子参数行与唱字闪光行互换位置（粒子参数在前）。
+        host._animation_grid.add_field("唱字装饰粒子", host._fx_particle_row)
+        host._animation_grid.add_field(
+            "粒子尺寸 · 数量 · 颜色（仅唱字装饰粒子）",
+            host._fx_param_controls_row,
+        )
+        host._animation_grid.add_field("唱字闪光", host._stroke_flash_row)
         layout.addWidget(host._animation_grid)
         return section
+
+    @staticmethod
+    def _fx_param_row(
+        parent: QWidget,
+        sing_combo: Any,
+    ) -> QWidget:
+        """唱字装饰粒子单行。"""
+        row = QWidget(parent)
+        row_layout = QHBoxLayout(row)
+        row_layout.setContentsMargins(0, 0, 0, 0)
+        row_layout.setSpacing(6)
+        row_layout.addWidget(sing_combo, 3)
+        return row
+
+    @staticmethod
+    def _fx_size_row(
+        parent: QWidget,
+        size_spin: Any,
+        count_spin: Any,
+        color_button: QWidget,
+    ) -> QWidget:
+        row = QWidget(parent)
+        row_layout = QHBoxLayout(row)
+        row_layout.setContentsMargins(0, 0, 0, 0)
+        row_layout.setSpacing(6)
+        row_layout.addWidget(size_spin, 2)
+        row_layout.addWidget(count_spin, 2)
+        row_layout.addWidget(color_button, 2)
+        return row
 
     def _animation_combo(
         self,

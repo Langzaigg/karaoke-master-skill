@@ -149,6 +149,14 @@ _ENTRY_EFFECTS = (
     ("char_drip", "文字垂下"),
     ("spin_flip", "翻转"),
     ("utopia", "Utopia"),
+    ("tracking_in", "字距收拢"),
+    ("wave_in", "波浪上浮"),
+    ("stretch_in", "逐字拉伸入场"),
+    ("glow_in", "辉光浮现"),
+    ("assemble_in", "粒子拼接"),
+    ("sparkle", "星光闪烁"),
+    ("ripple", "涟漪光环"),
+    ("note", "音符飘出"),
 )
 _EXIT_EFFECTS = (
     ("none", "无"),
@@ -159,6 +167,14 @@ _EXIT_EFFECTS = (
     ("char_drip", "文字垂出"),
     ("spin_flip", "翻转"),
     ("utopia", "Utopia"),
+    ("scatter_out", "碎散爆开"),
+    ("converge_out", "收拢消散"),
+    ("stretch_out", "逐字拉伸退场"),
+    ("glow_out", "辉光消散"),
+    ("dissolve_out", "粒子消散"),
+    ("sparkle", "星光闪烁"),
+    ("ripple", "涟漪光环"),
+    ("note", "音符飘出"),
 )
 #: 唱字特效比入退场多一档「跟随全局」——覆盖这一行的入退场时，唱字往往仍想跟着
 #: 主字幕走，不该被迫二选一。

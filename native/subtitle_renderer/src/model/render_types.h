@@ -228,6 +228,27 @@ struct DisplayWindow {
     bool operator==(const DisplayWindow &) const = default;
 };
 
+/// 2026-09 装饰粒子（星光爆散 / 涟漪光环 / 唱字闪烁·音符）：Python 侧
+/// plan_line_bursts 规划后随行 IR 下发；锚点坐标由各后端按自身布局解析，
+/// 轨迹在渲染时按 seed 确定性求值（与 Python particles.py 镜像）。
+struct ParticleBurst {
+    std::string kind;  // sparkle / ripple / twinkle / note
+    std::string anchor;  // "line" | "char"
+    int charIndex = -1;
+    int startMs = 0;
+    int endMs = 0;
+    int count = 0;
+    std::uint32_t seed = 0;
+    float sizePx = 28.0f;
+    float travelPx = 120.0f;
+    bool front = true;
+    bool reverse = false;
+    // sparkle 整句扫过方向：+1 入场（左→右）、-1 退场（右→左）、0 不扫。
+    int sweep = 0;
+    RgbaColor color{255, 255, 255, 255};
+    bool operator==(const ParticleBurst &) const = default;
+};
+
 struct PlacementWindow {
     int startMs = 0;
     int endMs = 0;
@@ -271,6 +292,10 @@ struct TextLine {
     // 整字放大（zoom_pulse）开关：本体 karaokeAnimation 仍是降维后的
     // "utopia"，靠这个行级标记切换缩放曲线并把缩放原点换成字符中心。
     bool zoomPulseEnabled = false;
+    // 唱字描边闪光：与唱字档位正交；时间锚 = 字符唱字起点，240ms 白色脉冲。
+    bool strokeFlashEnabled = false;
+    // 装饰粒子（见 ParticleBurst）；空表兼容旧 IR。
+    std::vector<ParticleBurst> bursts;
     std::vector<DisplayWindow> displayWindows;
     std::vector<PlacementWindow> placementWindows;
     bool operator==(const TextLine &) const = default;
@@ -456,6 +481,9 @@ struct RenderScene {
     std::vector<TextStyle> lineStyles;
     std::vector<TextStyle> charStyles;
     std::vector<TextLine> lines;
+    // 装饰粒子 sprite 轮廓表（scene IR ``fx_sprites``；Python 单一事实源，
+    // 常量内容、值语义参与相等性比较）。
+    std::vector<std::pair<std::string, VectorGlyph>> fxSprites;
     bool operator==(const RenderScene &) const = default;
 };
 

@@ -48,13 +48,19 @@ from krok_helper.subtitle_render.serialization.paint import (
 )
 
 from krok_helper.subtitle_render.domain.timing import (
+    ENTRY_FX_KINDS,
+    EXIT_FX_KINDS,
     EntryAnimation,
+    EntryFx,
     ExitAnimation,
+    ExitFx,
     GuideSymbol,
     KaraokeAnimation,
     LineAnimationOverride,
     LineBreakKind,
     RubyAnnotation,
+    SING_FX_KINDS,
+    SingFx,
     SubtitleLoadingSettings,
     SubtitleSource,
     TimingChar,
@@ -1057,13 +1063,15 @@ class Style:
     清屏，字幕不拖进间奏。"""
 
     entry_anim: EntryAnimation = "fade"
-    """入场动画：none / fade / slide_in / rise / char_fade / char_drip / spin_flip / utopia。"""
+    """入场动画：none / fade / slide_in / rise / char_fade / char_drip / spin_flip / utopia
+    / tracking_in（字距收拢）/ wave_in（波浪上浮）。"""
 
     entry_lead_ms: int = 300
     """入场动画时长；不改变歌词填色时间，只影响显示窗口起点后的过渡。"""
 
     exit_anim: ExitAnimation = "fade"
-    """退场动画：none / fade / slide_out / rise / char_fade / char_drip / spin_flip / utopia。"""
+    """退场动画：none / fade / slide_out / rise / char_fade / char_drip / spin_flip / utopia
+    / scatter_out（碎散爆开）/ converge_out（收拢消散）。"""
 
     exit_fade_ms: int = 300
     """退场动画时长；在显示窗口结束前开始。"""
@@ -1101,6 +1109,31 @@ class Style:
     zoom_pulse_curve_level: int = 1
     """整字放大缓动档位（0~5）：0=线性；1~5 为缓出/缓入多项式阶数，越大峰值
     停留越久（1 为默认）。纯绘制参数，不参与布局推导。"""
+
+    karaoke_stroke_flash: bool = False
+    """唱字描边闪光：每个字唱到的瞬间，描边以白色高亮短暂脉冲后回落。
+    可与任意唱字动画叠加；纯绘制参数，不参与布局推导。"""
+
+    entry_fx: EntryFx = "none"
+    """入场装饰粒子：none / sparkle（星光闪烁）/ ripple（涟漪光环）。
+    锚定行入场窗口，绘制参数见 fx_* 字段。"""
+
+    exit_fx: ExitFx = "none"
+    """退场装饰粒子：none / sparkle（星光闪烁）/ ripple（涟漪光环，向内收束）。"""
+
+    sing_fx: SingFx = "none"
+    """唱字装饰粒子：none / twinkle（星光闪烁）/ note（音符飘出）。
+    每个字的唱字窗口内发射。"""
+
+    fx_particle_size_em: float = 0.40
+    """粒子尺寸（相对主字号比例，0.40 = 40% 字号）：星光/音符 sprite 的目标
+    边长；涟漪按其 2.6 倍扩散。相对字号缩放，避免不同分辨率/字号下过小或过大。"""
+
+    fx_particle_count: int = 14
+    """粒子数量：星光闪烁一次发射的 sprite 数；闪烁/音符按比例折算为每字数量。"""
+
+    fx_particle_color: str = "#FFFFFF"
+    """粒子颜色（#RRGGBB）。"""
 
     section_edge_anim_enabled: bool = False
     """段首尾独立动画：开启后段首页/段尾页各行按下面两个动画替换入退场。"""
@@ -1867,7 +1900,8 @@ def style_from_dict(payload: object) -> Style:
             changes[key] = (
                 value
                 if value in {
-                    "none", "fade", "slide_in", "rise", "char_fade", "char_drip", "spin_flip", "utopia"
+                    "none", "fade", "slide_in", "rise", "char_fade", "char_drip", "spin_flip", "utopia",
+                    "stretch_in", "glow_in", "assemble_in", "sparkle", "ripple", "note",
                 }
                 else defaults.entry_anim
             )
@@ -1875,10 +1909,44 @@ def style_from_dict(payload: object) -> Style:
             changes[key] = (
                 value
                 if value in {
-                    "none", "fade", "slide_out", "rise", "char_fade", "char_drip", "spin_flip", "utopia"
+                    "none", "fade", "slide_out", "rise", "char_fade", "char_drip", "spin_flip", "utopia",
+                    "stretch_out", "glow_out", "dissolve_out", "sparkle", "ripple", "note",
                 }
                 else defaults.exit_anim
             )
+        elif key in {"entry_fx", "exit_fx"}:
+            allowed = ENTRY_FX_KINDS if key == "entry_fx" else EXIT_FX_KINDS
+            changes[key] = (
+                value if isinstance(value, str) and value in allowed
+                else getattr(defaults, key)
+            )
+        elif key == "sing_fx":
+            changes[key] = (
+                value if isinstance(value, str) and value in SING_FX_KINDS
+                else defaults.sing_fx
+            )
+        elif key == "fx_particle_color":
+            changes[key] = (
+                value
+                if isinstance(value, str)
+                and value.startswith("#")
+                and len(value) in {7, 9}
+                and all(
+                    character in "0123456789abcdefABCDEF"
+                    for character in value[1:]
+                )
+                else defaults.fx_particle_color
+            )
+        elif key == "fx_particle_size_em":
+            try:
+                em_value = float(value)
+            except (TypeError, ValueError):
+                em_value = 0.40
+            changes[key] = max(0.05, min(2.0, em_value))
+        elif key == "fx_particle_count":
+            changes[key] = max(2, min(64, _int_value(value, 14)))
+        elif key == "karaoke_stroke_flash":
+            changes[key] = bool(value)
         elif key in {"karaoke_anim", "reverse_karaoke_anim"}:
             changes[key] = (
                 value
@@ -1896,7 +1964,8 @@ def style_from_dict(payload: object) -> Style:
             changes[key] = (
                 value
                 if value in {
-                    "none", "fade", "slide_in", "rise", "char_fade", "char_drip", "spin_flip", "utopia"
+                    "none", "fade", "slide_in", "rise", "char_fade", "char_drip", "spin_flip", "utopia",
+                    "stretch_in", "glow_in", "assemble_in", "sparkle", "ripple", "note",
                 }
                 else defaults.section_head_anim
             )
@@ -1904,7 +1973,8 @@ def style_from_dict(payload: object) -> Style:
             changes[key] = (
                 value
                 if value in {
-                    "none", "fade", "slide_out", "rise", "char_fade", "char_drip", "spin_flip", "utopia"
+                    "none", "fade", "slide_out", "rise", "char_fade", "char_drip", "spin_flip", "utopia",
+                    "stretch_out", "glow_out", "dissolve_out", "sparkle", "ripple", "note",
                 }
                 else defaults.section_tail_anim
             )

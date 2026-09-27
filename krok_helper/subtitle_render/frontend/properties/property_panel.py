@@ -1062,6 +1062,39 @@ class PropertyPanel(QWidget):
                 min(max(int(self._style.scanline_brightness_pct), 0), 100)
             )
             self._scanline_color_btn.set_color(self._style.scanline_color)
+            self._stroke_flash_check.setChecked(
+                bool(getattr(self._style, "karaoke_stroke_flash", False))
+            )
+            self._fx_sing_combo.setCurrentIndex(
+                max(
+                    0,
+                    self._fx_sing_combo.findData(
+                        getattr(self._style, "sing_fx", "none")
+                    ),
+                )
+            )
+            self._fx_size_spin.setValue(
+                min(
+                    max(
+                        int(
+                            round(
+                                float(
+                                    getattr(self._style, "fx_particle_size_em", 0.40)
+                                )
+                                * 100.0
+                            )
+                        ),
+                        5,
+                    ),
+                    200,
+                )
+            )
+            self._fx_count_spin.setValue(
+                min(max(int(getattr(self._style, "fx_particle_count", 14)), 2), 64)
+            )
+            self._fx_color_btn.set_color(
+                getattr(self._style, "fx_particle_color", "#FFFFFF")
+            )
             self._zoom_pulse_curve_combo.setCurrentIndex(
                 max(
                     0,
@@ -4286,6 +4319,9 @@ class PropertyPanel(QWidget):
                 # 扫字线颜色不在方案/指示灯的再同步集合里：选色后按钮必须
                 # 立即回显新值（宿主回流 set_style 会走等值快路径跳过）。
                 self._scanline_color_btn.set_color(self._style.scanline_color)
+            if "fx_particle_color" in changes:
+                # 粒子颜色同上：调色板选色后立即回显可输入控件。
+                self._fx_color_btn.set_color(self._style.fx_particle_color)
             if set(changes).intersection(
                 _SCHEME_FIELDS | {"singer_style_overrides", "custom_style_schemes"}
             ):

@@ -827,6 +827,13 @@ std::optional<RenderConfig> parseRenderConfig(const QJsonObject &ir, QString *er
             );
         }
     }
+    // 装饰粒子 sprite 轮廓表（fx_sprites；Python 常量单一事实源，随场景下发）。
+    const QJsonObject fxSpriteTable = ir.value(QStringLiteral("fx_sprites")).toObject();
+    for (auto it = fxSpriteTable.constBegin(); it != fxSpriteTable.constEnd(); ++it) {
+        if (auto glyph = parseVectorGlyph(it.value())) {
+            cfg.fxSprites.insert(it.key(), std::move(*glyph));
+        }
+    }
     const auto resolveVectorGlyph = [&cfg](const QJsonObject &charObject) {
         const QString glyphId = stringValue(
             charObject, QStringLiteral("vector_glyph_id")
@@ -1262,6 +1269,65 @@ std::optional<RenderConfig> parseRenderConfig(const QJsonObject &ir, QString *er
             line.zoomPulseEnabled = lineObject.value(
                 QStringLiteral("zoom_pulse")
             ).toBool(false);
+            line.strokeFlashEnabled = lineObject.value(
+                QStringLiteral("stroke_flash")
+            ).toBool(false);
+            const QJsonArray fxBurstArray = lineObject.value(
+                QStringLiteral("fx_bursts")
+            ).toArray();
+            for (const QJsonValue &burstValue : fxBurstArray) {
+                const QJsonObject burstObject = burstValue.toObject();
+                if (burstObject.isEmpty()) {
+                    continue;
+                }
+                TimingLine::FxBurst burst;
+                burst.kind = stringValue(
+                    burstObject, QStringLiteral("kind"), QString()
+                );
+                burst.anchor = stringValue(
+                    burstObject, QStringLiteral("anchor"),
+                    QStringLiteral("line")
+                );
+                burst.charIndex = intValue(
+                    burstObject, QStringLiteral("char_index"), -1
+                );
+                burst.startMs = intValue(
+                    burstObject, QStringLiteral("start_ms"), 0
+                );
+                burst.endMs = intValue(
+                    burstObject, QStringLiteral("end_ms"), 0
+                );
+                burst.count = intValue(
+                    burstObject, QStringLiteral("count"), 0
+                );
+                burst.seed = static_cast<quint32>(burstObject.value(
+                    QStringLiteral("seed")
+                ).toDouble(0.0));
+                burst.sizePx = std::max(
+                    burstObject.value(QStringLiteral("size_px")).toDouble(28.0),
+                    1.0
+                );
+                burst.travelPx = burstObject.value(
+                    QStringLiteral("travel_px")
+                ).toDouble(0.0);
+                burst.front = burstObject.value(
+                    QStringLiteral("front")
+                ).toBool(true);
+                burst.reverse = burstObject.value(
+                    QStringLiteral("reverse")
+                ).toBool(false);
+                burst.sweep = intValue(
+                    burstObject, QStringLiteral("sweep"), 0
+                );
+                burst.color = stringValue(
+                    burstObject, QStringLiteral("color"),
+                    QStringLiteral("#FFFFFF")
+                );
+                if (!burst.kind.isEmpty() && burst.count > 0
+                    && burst.endMs > burst.startMs) {
+                    line.fxBursts.push_back(std::move(burst));
+                }
+            }
             const QJsonObject layoutObject = lineObject.value(
                 QStringLiteral("layout")
             ).toObject();

@@ -41,6 +41,7 @@ from PyQt6.QtCore import QPointF, QRectF, Qt
 from PyQt6.QtGui import (
     QBrush,
     QColor,
+    QPen,
     QFont,
     QFontMetrics,
     QImage,
@@ -605,12 +606,16 @@ from krok_helper.subtitle_render.engine.render.elements.horizontal import (
     ruby_layer_stack as _build_horizontal_ruby_layer_stack,
     text_glyph_runs as _text_glyph_runs,
     transition_char_state as _transition_char_state,
+    transition_char_glow as _transition_char_glow,
     utopia_glow_cache_enabled as _glow_cache_enabled,
     utopia_main_scope_layers as _utopia_main_scope_layers,
     utopia_following_done_time as _utopia_following_done_time,
     utopia_ruby_scope_layers as _utopia_ruby_scope_layers,
     utopia_ruby_scope_rect as _utopia_ruby_scope_rect,
     utopia_scope_id as _utopia_scope_id,
+)
+from krok_helper.subtitle_render.domain.timing import (
+    EXIT_GEO_ANIMS as _EXIT_GEO_ANIMS,
 )
 from krok_helper.subtitle_render.engine.render.elements.vertical import (
     VerticalCachePorts,
@@ -3287,6 +3292,273 @@ def _paint_main_scanline_static(
         )
 
 
+STROKE_FLASH_MS = 240
+STROKE_FLASH_ALPHA = 0.85
+STROKE_FLASH_WIDTH_BOOST = 0.6
+STROKE_FLASH_MIN_WIDTH_EM = 0.03
+
+
+def _paint_stroke_flash_overlay(
+    painter: QPainter,
+    text_layout: _TextLayout,
+    render_line: TimingLine,
+    intervals: list[tuple[int, int]],
+    baseline_y: int,
+    t_ms: int,
+    style: Style,
+) -> None:
+    """唱字描边闪光：每个字唱到后的 ``STROKE_FLASH_MS`` 内，沿字形轮廓闪白描边。
+
+    与唱字动画档位正交（任意 karaoke_anim 可叠加），逐字独立触发；时间锚
+    为字符唱字起点（与 C++ ch.startMs 同口径）。仅影响主文字，注音不闪。
+    """
+    if not style.karaoke_stroke_flash:
+        return
+    glyphs_by_index = _role_glyphs_by_index(render_line, text_layout)
+    for index, glyph in enumerate(glyphs_by_index):
+        if glyph is None or index >= len(intervals):
+            continue
+        char_text = render_line.chars[index].text if index < len(render_line.chars) else ""
+        if not char_text or char_text.isspace():
+            continue
+        char_start = intervals[index][0]
+        elapsed = t_ms - char_start
+        if not (0 <= elapsed < STROKE_FLASH_MS):
+            continue
+        flash = 1.0 - elapsed / STROKE_FLASH_MS
+        glyph_style = glyph.style
+        stroke_width = max(
+            float(glyph_style.stroke_width_px),
+            float(glyph_style.font_size_px) * STROKE_FLASH_MIN_WIDTH_EM,
+        )
+        pen = QPen(
+            QColor(255, 255, 255, int(STROKE_FLASH_ALPHA * 255 * flash)),
+            float(stroke_width * (1.0 + STROKE_FLASH_WIDTH_BOOST * flash)),
+        )
+        pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
+        pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+        painter.save()
+        try:
+            painter.setPen(pen)
+            painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+            painter.drawPath(_glyph_path(glyph, baseline_y))
+        finally:
+            painter.restore()
+
+
+_FX_SPRITE_PATH_CACHE: dict[str, QPainterPath] = {}
+
+
+def _paint_transition_glow_halo(
+    painter: QPainter,
+    path: QPainterPath,
+    font_px: float,
+    glow_alpha: float,
+    radius_em: float,
+    *,
+    bright: bool = False,
+) -> None:
+    """拉伸/辉光类特效的多级圆角描边光晕（镜像 C++ kGlow*Strokes）。
+
+    5 级描边宽度递增、强度递减，叠出近似高斯衰减的弥散晕；画在字符
+    主体之下。``bright`` 用辉光浮现/消散的高强度表（整行强辉光）。
+    """
+    if glow_alpha <= 0.0 or path.isEmpty():
+        return
+    if radius_em <= 0.0 and not bright:
+        return
+    from krok_helper.subtitle_render.engine.render.elements.horizontal.transitions import (
+        GLOW_ECHO_COPIES,
+        GLOW_ECHO_DECAY,
+        GLOW_ECHO_PITCH_EM,
+        GLOW_HALO_STROKES,
+    )
+
+    # 辉光浮现/消散（bright）：光晕即出场主体，不乘 core 透明度——出生
+    # 帧 core=0 时整行应呈现纯辉光；拉伸类的光晕仍跟随 core。
+    base_opacity = 1.0 if bright else painter.opacity()
+    painter.save()
+    try:
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        if bright:
+            # 细密横向回声：每侧 N 个字形重影副本，固定间距、亮度几何
+            # 衰减，叠出可分辨残像结构的横向光痕（参考图口径）。
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.setBrush(QBrush(QColor(255, 255, 255)))
+            decay = 1.0
+            for k in range(1, GLOW_ECHO_COPIES + 1):
+                decay *= GLOW_ECHO_DECAY
+                offset = GLOW_ECHO_PITCH_EM * radius_em * font_px * k
+                if offset < 0.5:
+                    continue
+                alpha = min(glow_alpha * decay, 1.0)
+                if alpha <= 0.008:
+                    break
+                painter.setOpacity(alpha)
+                painter.save()
+                painter.translate(offset, 0.0)
+                painter.drawPath(path)
+                painter.restore()
+                painter.save()
+                painter.translate(-offset, 0.0)
+                painter.drawPath(path)
+                painter.restore()
+        else:
+            pen = QPen()
+            pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
+            pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+            pen.setColor(QColor(255, 255, 255))
+            painter.setBrush(Qt.BrushStyle.NoBrush)
+            for width_em, strength in GLOW_HALO_STROKES:
+                width = radius_em * width_em * font_px
+                if width < 0.5:
+                    continue
+                pen.setWidthF(width)
+                painter.setOpacity(min(base_opacity * glow_alpha * strength, 1.0))
+                painter.setPen(pen)
+                painter.drawPath(path)
+    finally:
+        painter.restore()
+
+
+def _fx_sprite_path(name: str) -> QPainterPath:
+    """按名称构建（并缓存）中心原点、±500 em 空间的粒子 sprite 轮廓。"""
+    cached = _FX_SPRITE_PATH_CACHE.get(name)
+    if cached is not None:
+        return cached
+    from krok_helper.subtitle_render.engine.render.effects.particles import FX_SPRITES
+
+    commands = FX_SPRITES[name]["path_commands"]
+    path = QPainterPath()
+    current = QPointF(0.0, 0.0)
+    for command in commands:
+        kind = command[0]
+        if kind == "M":
+            current = QPointF(float(command[1]), float(command[2]))
+            path.moveTo(current)
+        elif kind == "L":
+            current = QPointF(float(command[1]), float(command[2]))
+            path.lineTo(current)
+        elif kind == "C":
+            current = QPointF(float(command[5]), float(command[6]))
+            path.cubicTo(
+                QPointF(float(command[1]), float(command[2])),
+                QPointF(float(command[3]), float(command[4])),
+                current,
+            )
+        elif kind == "Q":
+            current = QPointF(float(command[3]), float(command[4]))
+            path.quadTo(
+                QPointF(float(command[1]), float(command[2])),
+                current,
+            )
+        elif kind == "Z":
+            path.closeSubpath()
+    path.setFillRule(Qt.FillRule.OddEvenFill)
+    _FX_SPRITE_PATH_CACHE[name] = path
+    return path
+
+
+def _paint_line_fx_particles(
+    painter: QPainter,
+    layout: _LineLayout,
+    render_line: TimingLine,
+    style: Style,
+    t_ms: int,
+    line_index: int,
+    display_start_ms: int | None,
+    display_end_ms: int | None,
+    *,
+    front: bool,
+) -> None:
+    """行级装饰粒子（星光闪烁/涟漪光环/唱字闪烁·音符）。
+
+    burst 规划与渲染 IR 同源（plan_line_bursts），锚点用 painter 自身布局
+    解析；轨迹见 particles.burst_particles_at（与 C++ 镜像）。竖排暂不支持。
+    """
+    if style.vertical:
+        return
+    if (
+        style.entry_fx == "none"
+        and style.exit_fx == "none"
+        and style.sing_fx == "none"
+        and style.entry_anim != "assemble_in"
+        and style.exit_anim != "dissolve_out"
+    ):
+        return
+    from krok_helper.subtitle_render.engine.render.effects.particles import (
+        burst_particles_at,
+        plan_line_bursts,
+        sprite_for_kind,
+    )
+
+    display_start = (
+        int(display_start_ms) if display_start_ms is not None else _line_start_ms(render_line)
+    )
+    display_end = (
+        int(display_end_ms) if display_end_ms is not None else _line_end_ms(render_line)
+    )
+    bursts = plan_line_bursts(
+        style,
+        line_index,
+        display_start,
+        display_end,
+        _line_end_ms(render_line),
+        layout.intervals,
+    )
+    if not bursts:
+        return
+    char_x_ranges = layout.char_x_ranges
+    metrics = layout.metrics
+    line_left = min(ranges[0] for ranges in char_x_ranges)
+    line_right = max(ranges[1] for ranges in char_x_ranges)
+    line_center_x = (line_left + line_right) / 2.0
+    line_center_y = (
+        layout.baseline_y - metrics.ascent() + metrics.height() / 2.0
+    )
+    line_box_w = float(line_right - line_left)
+    line_box_h = float(metrics.height())
+    color = QColor(style.fx_particle_color)
+    for burst in bursts:
+        if bool(burst["front"]) != front:
+            continue
+        if burst["anchor"] == "char":
+            char_index = int(burst["char_index"])
+            if char_index >= len(char_x_ranges):
+                continue
+            char_left, char_right = char_x_ranges[char_index]
+            origin_x = (char_left + char_right) / 2.0
+            # 字符垂直中心（与 C++ pivotY 同口径；求值器再按需上移）。
+            origin_y = (
+                layout.baseline_y - metrics.ascent() + metrics.height() / 2.0
+            )
+            box_w = float(char_right - char_left)
+            box_h = float(metrics.height())
+        else:
+            origin_x = line_center_x
+            origin_y = line_center_y
+            # sparkle 需要整行盒：粒子铺满整句并按横向位置扫过。
+            box_w = line_box_w
+            box_h = line_box_h
+        sprite = _fx_sprite_path(sprite_for_kind(str(burst["kind"])))
+        for state in burst_particles_at(burst, t_ms, origin_x, origin_y, box_w, box_h):
+            if state.alpha <= 0.0 or state.size_px <= 0.0:
+                continue
+            painter.save()
+            try:
+                painter.setOpacity(painter.opacity() * state.alpha)
+                painter.translate(state.x, state.y)
+                painter.rotate(state.rotation_deg)
+                scale = state.size_px / 1000.0
+                painter.scale(scale, scale)
+                painter.setPen(Qt.PenStyle.NoPen)
+                painter.setBrush(QBrush(color))
+                painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+                painter.drawPath(sprite)
+            finally:
+                painter.restore()
+
+
 def _paint_line_static(
     painter: QPainter,
     img_w: int,
@@ -3375,6 +3647,34 @@ def _paint_line_static(
             precomputed_layouts=layout.ruby_layouts,
         )
 
+    def paint_stroke_flash() -> None:
+        # 唱字描边闪光：与静态/过渡路径正交的行内 overlay（扫字线同款挂法）。
+        _paint_stroke_flash_overlay(
+            painter,
+            layout.text_layout,
+            render_line,
+            layout.intervals,
+            layout.baseline_y,
+            t_ms,
+            style,
+        )
+
+    def paint_fx_particles(front: bool) -> None:
+        # 装饰粒子：ripple 在主文字后面，sparkle/twinkle/note 在主文字前面。
+        _paint_line_fx_particles(
+            painter,
+            layout,
+            render_line,
+            style,
+            t_ms,
+            _track_line_index(track, line),
+            display_start_ms,
+            display_end_ms,
+            front=front,
+        )
+
+    # 背层装饰粒子（涟漪光环）先画，垫在主文字后面。
+    paint_fx_particles(front=False)
     if transition is not None:
         if transition.effect in ("char_fade", "char_drip", "spin_flip"):
             # A1/A2（§9.7）：逐字入退场 → 走 LayerCompositor 烘焙缓存，不再每帧
@@ -3386,6 +3686,8 @@ def _paint_line_static(
                 LayerContext(t_ms=t_ms, logical_w=0, logical_h=0),
                 _char_transition_layer_stack(layout, t_ms, transition, max(len(render_line.chars), 1)),
             )
+            paint_stroke_flash()
+            paint_fx_particles(front=True)
             paint_rubies_on_top()
             return
         if layout.has_inline_styles:
@@ -3409,6 +3711,8 @@ def _paint_line_static(
                 fill_segments=layout.fill_segments,
                 guide_anim_anchor_ms=guide_anim_anchor_ms,
             )
+        paint_stroke_flash()
+        paint_fx_particles(front=True)
         paint_rubies_on_top()
         return
 
@@ -3419,6 +3723,8 @@ def _paint_line_static(
     else:
         _paint_line_direct(painter, layout, t_ms, guide_anim_anchor_ms)
     _paint_main_scanline_static(painter, layout, t_ms, style)
+    paint_stroke_flash()
+    paint_fx_particles(front=True)
     paint_rubies_on_top()
 
 
@@ -4006,10 +4312,20 @@ def _paint_role_line_with_character_transition(
             t_ms=t_ms,
             frame_height=painter.device().height(),
             following_done_ms=following_done_ms,
+            char_center_x=left + width / 2,
+            line_center_x=_line_ranges_center_x(char_x_ranges),
         )
         if opacity <= 0.0:
             continue
 
+        glow_state = _transition_char_glow(
+            transition, first_index, count, t_ms=t_ms,
+            configured_ms=(
+                style.exit_fade_ms
+                if transition.phase == "exit"
+                else style.entry_lead_ms
+            ),
+        )
         group_glyphs = [glyphs_by_index[i] for i in indices if glyphs_by_index[i] is not None]
         group_rect = _glyph_run_rect(group_glyphs, baseline_y)
         group_center_x = left + width / 2
@@ -4044,11 +4360,18 @@ def _paint_role_line_with_character_transition(
 
         # utopia 退场阶段整词早已唱完：强制 ratio=1.0，避免对已旋转/翻转的字形再按设备空间
         # 水平带裁切已唱层而把部分着色裁掉（详见 _paint_line_with_character_transition 同处注释）。
+        # scatter_out / converge_out 等几何退场同理。
         in_utopia_exit = (
             transition.effect == "utopia"
             and style.exit_anim == "utopia"
             and following_done_ms is not None
             and t_ms > following_done_ms
+        ) or (
+            transition.phase == "exit"
+            and (
+                transition.effect in _EXIT_GEO_ANIMS
+                or transition.effect in ("stretch_out", "glow_out")
+            )
         )
         if in_utopia_exit:
             ratio = 1.0
@@ -4096,6 +4419,15 @@ def _paint_role_line_with_character_transition(
                     )
                     clip_rect = None
                 use_glow_cache = transition.effect == "utopia" and _glow_cache_enabled()
+                if glow_state is not None:
+                    _paint_transition_glow_halo(
+                        painter,
+                        paint_path,
+                        float(role_style.font_size_px),
+                        glow_state[0],
+                        glow_state[1],
+                        bright=glow_state[2],
+                    )
                 _paint_char_karaoke_stack(
                     painter,
                     paint_path,
@@ -4251,19 +4583,38 @@ def _paint_line_with_character_transition(
             t_ms=t_ms,
             frame_height=painter.device().height(),
             following_done_ms=following_done_ms,
+            char_center_x=left + width / 2,
+            line_center_x=line_rect.center().x(),
         )
         if opacity <= 0.0:
             continue
+
+        glow_state = _transition_char_glow(
+            transition, first_index, count, t_ms=t_ms,
+            configured_ms=(
+                style.exit_fade_ms
+                if transition.phase == "exit"
+                else style.entry_lead_ms
+            ),
+        )
 
         # utopia 退场阶段整词早已唱完：强制 fill_ratio=1.0。否则 _paint_char_karaoke_stack 会按
         # 设备空间的水平带裁切「已唱(after)层」，而退场时字形已被旋转/翻转（rotation 最大 -180°、
         # x_flip），水平带与字形朝向脱钩，会把部分笔画的着色裁掉（着色被褪掉一部分的 bug）。
         # 退场时卡拉ok扫光本无意义，整词应作为「已唱」整体淡出/旋出。
+        # scatter_out / converge_out 等几何退场同理：位移/旋转后的字形与水平
+        # 走字带脱钩，整词按已唱状态淡出。
         in_utopia_exit = (
             transition.effect == "utopia"
             and style.exit_anim == "utopia"
             and following_done_ms is not None
             and t_ms > following_done_ms
+        ) or (
+            transition.phase == "exit"
+            and (
+                transition.effect in _EXIT_GEO_ANIMS
+                or transition.effect in ("stretch_out", "glow_out")
+            )
         )
         if in_utopia_exit:
             fill_ratio = 1.0
@@ -4373,6 +4724,15 @@ def _paint_line_with_character_transition(
                     scale_y=scale_y,
                     skew_y=skew_y,
                 )
+            if glow_state is not None:
+                _paint_transition_glow_halo(
+                    painter,
+                    paint_path,
+                    float(style.font_size_px),
+                    glow_state[0],
+                    glow_state[1],
+                    bright=glow_state[2],
+                )
             _paint_char_karaoke_stack(
                 painter,
                 paint_path,
@@ -4409,6 +4769,15 @@ def _paint_line_with_character_transition(
                 )
         finally:
             painter.restore()
+
+
+def _line_ranges_center_x(char_x_ranges: list[tuple[int, int]]) -> float:
+    """converge_out 收拢目标：整行字符框的水平中心（与 C++ 行布局界合同口径）。"""
+    if not char_x_ranges:
+        return 0.0
+    left = min(ranges[0] for ranges in char_x_ranges)
+    right = max(ranges[1] for ranges in char_x_ranges)
+    return (left + right) / 2.0
 
 
 def _apply_character_transform(

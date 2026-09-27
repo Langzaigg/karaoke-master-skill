@@ -8,11 +8,55 @@ from typing import Literal, Optional
 
 LineBreakKind = Literal["none", "page", "paragraph"]
 EntryAnimation = Literal[
-    "none", "fade", "slide_in", "rise", "char_fade", "char_drip", "spin_flip", "utopia"
+    "none", "fade", "slide_in", "rise", "char_fade", "char_drip", "spin_flip", "utopia",
+    "tracking_in", "wave_in", "stretch_in", "glow_in", "assemble_in",
+    "sparkle", "ripple", "note",
 ]
 ExitAnimation = Literal[
-    "none", "fade", "slide_out", "rise", "char_fade", "char_drip", "spin_flip", "utopia"
+    "none", "fade", "slide_out", "rise", "char_fade", "char_drip", "spin_flip", "utopia",
+    "scatter_out", "converge_out", "stretch_out", "glow_out", "dissolve_out",
+    "sparkle", "ripple", "note",
 ]
+
+# ---- 2026-09 新增线性特效注册表（增删特效只改这里 + transitions.py 求值器） ----
+# 逐字几何变换类入场：进入 _paint_line_with_character_transition 的通用变换分支
+# （dx/dy/rotation/scale 七元组），N3 语义之外的自研档位。
+ENTRY_GEO_ANIMS: frozenset[str] = frozenset({"tracking_in", "wave_in"})
+# 逐字几何变换类退场。
+EXIT_GEO_ANIMS: frozenset[str] = frozenset({"scatter_out", "converge_out"})
+# 逐字拉伸（横向光条凝聚/弥散，\fscx+\blur 语言）。
+ENTRY_STRETCH_ANIMS: frozenset[str] = frozenset({"stretch_in"})
+EXIT_STRETCH_ANIMS: frozenset[str] = frozenset({"stretch_out"})
+# 辉光浮现/消散：整行同步的强辉光出入场（无逐字错峰）。
+ENTRY_GLOW_ANIMS: frozenset[str] = frozenset({"glow_in"})
+EXIT_GLOW_ANIMS: frozenset[str] = frozenset({"glow_out"})
+# 粒子拼接/消散：粒子汇聚成字形 / 字形散成粒子（Trapcode Particular 语言）。
+ENTRY_ASSEMBLE_ANIMS: frozenset[str] = frozenset({"assemble_in"})
+EXIT_ASSEMBLE_ANIMS: frozenset[str] = frozenset({"dissolve_out"})
+# 粒子类出入场动画（星光闪烁 / 涟漪光环 / 音符飘出）：文字逐字显形/淡出
+#（粒子拼接同款编排）+ 固定默认档粒子叠加。
+ENTRY_PARTICLE_ANIMS: frozenset[str] = frozenset({"sparkle", "ripple", "note"})
+EXIT_PARTICLE_ANIMS: frozenset[str] = frozenset({"sparkle", "ripple", "note"})
+# 全部逐字过渡类（含 N3 既有 char_fade 家族 + utopia）：参与
+# line_char_transition_context 的入场/退场窗口判定。
+CHAR_TRANSITION_ANIMS: frozenset[str] = frozenset(
+    {"char_fade", "char_drip", "spin_flip"}
+    | ENTRY_GEO_ANIMS | EXIT_GEO_ANIMS
+    | ENTRY_STRETCH_ANIMS | EXIT_STRETCH_ANIMS
+    | ENTRY_GLOW_ANIMS | EXIT_GLOW_ANIMS
+    | ENTRY_ASSEMBLE_ANIMS | EXIT_ASSEMBLE_ANIMS
+    | ENTRY_PARTICLE_ANIMS | EXIT_PARTICLE_ANIMS
+)
+# 新增逐字特效的编排与 char_fade 完全同构：「入场/退场动画时长」旋钮仅作
+# >0 的播放门（专门的播放时间），固定 350ms 错峰 + 250ms 行程（窗口 600ms）。
+# 入场/退场装饰粒子（星光闪烁 / 涟漪光环）与唱字粒子（星光闪烁 / 音符飘出）。
+EntryFx = Literal["none", "sparkle", "ripple"]
+ExitFx = Literal["none", "sparkle", "ripple"]
+SingFx = Literal["none", "twinkle", "note", "ripple"]
+# 入退场 fx 字段保留作工程兼容（UI 已并入入退场动画档，规划器不再消费）。
+ENTRY_FX_KINDS: frozenset[str] = frozenset({"none", "sparkle", "ripple"})
+EXIT_FX_KINDS: frozenset[str] = frozenset({"none", "sparkle", "ripple"})
+SING_FX_KINDS: frozenset[str] = frozenset({"none", "twinkle", "note", "ripple"})
 KaraokeAnimation = Literal[
     "inherit", "none", "no_wipe", "utopia", "scanline", "utopia_scanline",
     "zoom_pulse", "zoom_pulse_scanline"

@@ -17,6 +17,7 @@ from krok_helper.subtitle_render.engine.style.title_semantics import (
     title_show_specs,
 )
 from krok_helper.subtitle_render.domain.timing import TimingTrack
+from krok_helper.subtitle_render.engine.render.effects.particles import FX_SPRITES
 from krok_helper.subtitle_render.domain.models import (
     TITLE_SCHEME_NAME,
     Style,
@@ -170,6 +171,8 @@ def build_render_ir(
             # auto 外观模式的音量柱大小/颜色在序列化前物化成具体数值，
             # native 端只消费数值（与 Painter 的 volume_style 投影同源）。
             "style": style_to_dict(resolve_volume_appearance(style)),
+            # 装饰粒子 sprite 轮廓常量表（Python 单一事实源，native 不内置副本）。
+            "fx_sprites": dict(FX_SPRITES),
             "track": track_to_ir(
                 track,
                 primary_style,

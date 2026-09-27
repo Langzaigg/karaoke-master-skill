@@ -1,5 +1,6 @@
 #include "d2d_backend.h"
 #include "d2d_backend_internal.h"
+#include "d2d_fx.h"
 #include "d2d_geometry_resources.h"
 #include "d2d_opacity_layer.h"
 #include "d2d_paint_resources.h"
@@ -21,9 +22,24 @@
 namespace krok::subtitle::native {
 
 using Clock = direct2d::RuntimeClock;
+using direct2d::burstParticlesAt;
 using direct2d::checkHr;
 using direct2d::createPaintBrush;
 using direct2d::elapsedMs;
+using direct2d::fxSpriteForKind;
+using direct2d::FxParticle;
+using direct2d::GlowHaloStroke;
+using direct2d::kGlowEchoCopies;
+using direct2d::kGlowEchoDecay;
+using direct2d::kGlowEchoPitchEm;
+using direct2d::kGlowHaloStrokes;
+using direct2d::GeoCharState;
+using direct2d::geoCharMatrix;
+using direct2d::geoCharState;
+using direct2d::kStrokeFlashAlpha;
+using direct2d::kStrokeFlashMinWidthEm;
+using direct2d::kStrokeFlashMs;
+using direct2d::kStrokeFlashWidthBoost;
 using direct2d::OpacityLayerScope;
 using direct2d::paintNeedsBodyProtection;
 using direct2d::rectAreaPx;
@@ -612,6 +628,30 @@ ProbeResult Direct2DGpuBackend::renderFrameInternal(
         auto withViewport = [&](const D2D1_MATRIX_3X2_F &local) {
             return local * lineViewportTransform;
         };
+        const auto entryTransitionWindowMs = [](int durationMs) {
+            return std::clamp(durationMs, 120, 3000);
+        };
+        const auto maxExitTransitionStart = [](
+            int lineEndMs, int displayEndMs, int durationMs
+        ) {
+            const int windowMs = std::clamp(durationMs, 120, 3000);
+            return std::max(lineEndMs, displayEndMs - windowMs);
+        };
+        const auto isGeoEntry = [](const std::string &animation) {
+            return animation == "tracking_in" || animation == "wave_in"
+                || animation == "glow_in" || animation == "stretch_in"
+                || animation == "assemble_in" || animation == "sparkle"
+                || animation == "ripple" || animation == "note";
+        };
+        const auto isGeoExit = [](const std::string &animation) {
+            return animation == "scatter_out" || animation == "converge_out"
+                || animation == "glow_out" || animation == "stretch_out"
+                || animation == "dissolve_out" || animation == "sparkle"
+                || animation == "ripple" || animation == "note";
+        };
+        const auto isGeoTransition = [&](const std::string &animation) {
+            return isGeoEntry(animation) || isGeoExit(animation);
+        };
         const bool hasCharacterTransition = line->entryAnimation == "char_fade"
             || line->exitAnimation == "char_fade"
             || line->entryAnimation == "char_drip"
@@ -620,7 +660,9 @@ ProbeResult Direct2DGpuBackend::renderFrameInternal(
             || line->exitAnimation == "spin_flip"
             || line->entryAnimation == "utopia"
             || line->exitAnimation == "utopia"
-            || line->karaokeAnimation == "utopia";
+            || line->karaokeAnimation == "utopia"
+            || isGeoTransition(line->entryAnimation)
+            || isGeoTransition(line->exitAnimation);
         const bool hasUtopiaTransition = line->entryAnimation == "utopia"
             || line->exitAnimation == "utopia"
             || line->karaokeAnimation == "utopia";
@@ -640,6 +682,21 @@ ProbeResult Direct2DGpuBackend::renderFrameInternal(
                     || line->entryAnimation == "spin_flip")
                 && line->entryDurationMs > 0
                 && tMs <= window.startMs + 600) {
+                activeCharacterTransition = line->entryAnimation;
+                activeCharacterDirection = -1;
+            } else if (isGeoExit(line->exitAnimation)
+                && line->exitDurationMs > 0
+                && tMs >= maxExitTransitionStart(
+                    line->endMs, window.endMs, line->exitDurationMs
+                )) {
+                // 2026-09 几何特效：与 char_fade 同款 600ms 窗口；但不受
+                // 时长旋钮 >0 门限制（对齐 utopia 选中即播的语义）。
+                activeCharacterTransition = line->exitAnimation;
+                activeCharacterDirection = 1;
+            } else if (isGeoEntry(line->entryAnimation)
+                && line->entryDurationMs > 0
+                && tMs <= window.startMs
+                    + entryTransitionWindowMs(line->entryDurationMs)) {
                 activeCharacterTransition = line->entryAnimation;
                 activeCharacterDirection = -1;
             }
@@ -740,6 +797,9 @@ ProbeResult Direct2DGpuBackend::renderFrameInternal(
             D2D1_MATRIX_3X2_F matrix = D2D1::Matrix3x2F::Identity();
             bool transformed = false;
             bool utopiaExit = false;
+            // glow_in / glow_out 的弥散光晕（多级描边；画在主文字之下）。
+            float glowAlpha = 0.0f;
+            float glowRadiusEm = 0.0f;
         };
         auto utopiaFollowingDoneAt = [&](std::size_t charIndex) {
             const int count = static_cast<int>(line->chars.size());
@@ -834,6 +894,58 @@ ProbeResult Direct2DGpuBackend::renderFrameInternal(
             }
             const Impl::CachedChar &ch = line->chars[charIndex];
             if (!useUtopiaTransition) {
+                if (!activeCharacterTransition.empty()
+                    && isGeoTransition(activeCharacterTransition)) {
+                    // 2026-09 逐字几何特效（与 transitions._geo_char_state 镜像）。
+                    // 退场相位置 utopiaExit：位移/旋转后的字形与水平走字带脱钩，
+                    // 整字按已唱状态淡出（与 painter 的 in_utopia_exit 同口径）。
+                    const DisplayWindow &window = line->displayWindows.front();
+                    const int transitionDurationMs = activeCharacterDirection > 0
+                        ? line->exitDurationMs
+                        : line->entryDurationMs;
+                    const int transitionStart = activeCharacterDirection > 0
+                        ? maxExitTransitionStart(
+                            line->endMs, window.endMs, transitionDurationMs
+                        )
+                        : window.startMs;
+                    const int count = std::max(
+                        static_cast<int>(line->chars.size()), 1
+                    );
+                    // 行中心取 fillBounds（对齐/智能水平同款行盒，与
+                    // drawFxBursts 的行锚点同源）。
+                    const float boundsLeft = line->fillBounds.left;
+                    const float boundsRight = line->fillBounds.right;
+                    const bool hasBounds =
+                        boundsRight > boundsLeft;
+                    const GeoCharState geo = geoCharState(
+                        activeCharacterTransition,
+                        line->style.fontSize,
+                        static_cast<int>(charIndex),
+                        count,
+                        tMs,
+                        transitionStart,
+                        activeCharacterDirection > 0
+                            ? line->exitDurationMs
+                            : line->entryDurationMs,
+                        activeCharacterDirection > 0,
+                        ch.pivotX,
+                        hasBounds ? (boundsLeft + boundsRight) * 0.5f : 0.0f,
+                        hasBounds
+                    );
+                    state.opacity = geo.opacity;
+                    state.utopiaExit = activeCharacterDirection > 0;
+                    state.glowAlpha = geo.glowAlpha;
+                    state.glowRadiusEm = geo.glowRadiusEm;
+                    if (geo.opacity > 0.0f) {
+                        state.matrix = geoCharMatrix(
+                            geo, ch.pivotX, ch.pivotY
+                        );
+                        state.transformed = geo.dx != 0.0f || geo.dy != 0.0f
+                            || geo.rotation != 0.0f
+                            || geo.scaleX != 1.0f || geo.scaleY != 1.0f;
+                    }
+                    return state;
+                }
                 const float progress = charFadeOpacityAt(charIndex);
                 state.opacity = dripDirection != 0
                     ? (progress > 0.0f ? 1.0f : 0.0f)
@@ -950,6 +1062,62 @@ ProbeResult Direct2DGpuBackend::renderFrameInternal(
                                        std::size_t unitIndex) {
             CharacterAnimationState state;
             if (!useUtopiaTransition) {
+                if (!activeCharacterTransition.empty()
+                    && isGeoTransition(activeCharacterTransition)) {
+                    // 注音单元跟随其基础字符的几何变换（与 painter 的
+                    // _paint_ruby_text_units... 同口径：transition 用基础字 index）。
+                    const DisplayWindow &window = line->displayWindows.front();
+                    const int transitionDurationMs = activeCharacterDirection > 0
+                        ? line->exitDurationMs
+                        : line->entryDurationMs;
+                    const int transitionStart = activeCharacterDirection > 0
+                        ? maxExitTransitionStart(
+                            line->endMs, window.endMs, transitionDurationMs
+                        )
+                        : window.startMs;
+                    const int count = std::max(
+                        static_cast<int>(line->chars.size()), 1
+                    );
+                    const int staggerIndex = std::clamp(
+                        std::max(ruby.transitionCharIndex, 0), 0, count - 1
+                    );
+                    const Impl::CachedChar &baseChar = line->chars[
+                        static_cast<std::size_t>(staggerIndex)
+                    ];
+                    // 行中心取 fillBounds（对齐/智能水平同款行盒，与
+                    // drawFxBursts 的行锚点同源）。
+                    const float boundsLeft = line->fillBounds.left;
+                    const float boundsRight = line->fillBounds.right;
+                    const bool hasBounds =
+                        boundsRight > boundsLeft;
+                    const GeoCharState geo = geoCharState(
+                        activeCharacterTransition,
+                        line->style.fontSize,
+                        staggerIndex,
+                        count,
+                        tMs,
+                        transitionStart,
+                        activeCharacterDirection > 0
+                            ? line->exitDurationMs
+                            : line->entryDurationMs,
+                        activeCharacterDirection > 0,
+                        baseChar.pivotX,
+                        hasBounds ? (boundsLeft + boundsRight) * 0.5f : 0.0f,
+                        hasBounds
+                    );
+                    state.opacity = geo.opacity;
+                    state.utopiaExit = activeCharacterDirection > 0;
+                    if (geo.opacity > 0.0f && unitIndex < ruby.chars.size()) {
+                        const Impl::CachedChar &unit = ruby.chars[unitIndex];
+                        state.matrix = geoCharMatrix(
+                            geo, unit.pivotX, unit.pivotY
+                        );
+                        state.transformed = geo.dx != 0.0f || geo.dy != 0.0f
+                            || geo.rotation != 0.0f
+                            || geo.scaleX != 1.0f || geo.scaleY != 1.0f;
+                    }
+                    return state;
+                }
                 const std::size_t transitionIndex = static_cast<std::size_t>(
                     std::max(ruby.transitionCharIndex, 0)
                 );
@@ -1088,7 +1256,18 @@ ProbeResult Direct2DGpuBackend::renderFrameInternal(
                 maxOpacity = std::max(maxOpacity, characterOpacityAt(index));
             }
             if (maxOpacity <= 0.0f) {
-                continue;
+                // 拼接/辉光类特效存在「字形未显、只有粒子/光晕」的阶段
+                //（assemble 抵达前、glow 出生时 core 透明度为 0），此时
+                // 仍需渲染整行的粒子与辉光，不能按「无可见字符」跳过。
+                const bool lineHasBursts = !line->bursts.empty();
+                const bool lineHasGlowHalo =
+                    line->entryAnimation == "glow_in"
+                    || line->entryAnimation == "stretch_in"
+                    || line->exitAnimation == "glow_out"
+                    || line->exitAnimation == "stretch_out";
+                if (!lineHasBursts && !lineHasGlowHalo) {
+                    continue;
+                }
             }
         }
         const auto geometryStart = Clock::now();
@@ -2138,13 +2317,27 @@ ProbeResult Direct2DGpuBackend::renderFrameInternal(
                 );
             }
         }
+        // 装饰粒子会超出文字内容边界（涟漪环/音符上行/拼接飞入的
+        // size+travel 量级），回读条带须按最大粒子外扩，否则大尺寸
+        // 粒子在行盒上下边缘被裁掉（2026-09 用户实测反馈的 BUG）。
+        float burstPadding = 0.0f;
+        for (const ParticleBurst &burst : line->bursts) {
+            burstPadding = std::max(
+                burstPadding,
+                burst.sizePx + std::max(burst.travelPx, 0.0f)
+            );
+        }
         int intervalTop = std::clamp(
-            static_cast<int>(std::floor(dy + contentTop - topPad)),
+            static_cast<int>(std::floor(
+                dy + contentTop - topPad - burstPadding
+            )),
             0,
             scene.height
         );
         int intervalBottom = std::clamp(
-            static_cast<int>(std::ceil(dy + contentBottom + bottomPad)),
+            static_cast<int>(std::ceil(
+                dy + contentBottom + bottomPad + burstPadding
+            )),
             0,
             scene.height
         );
@@ -4700,6 +4893,238 @@ ProbeResult Direct2DGpuBackend::renderFrameInternal(
             }
         }
 
+        // ------------------------------------------------------------------
+        // 2026-09 装饰粒子（back=涟漪光环垫底 / front=星光·音符·闪烁）与
+        // 唱字描边闪光。轨迹/时序与 Python particles.py / painter.py 镜像。
+        // ------------------------------------------------------------------
+        auto drawFxBursts = [&](bool front) {
+            if (line->bursts.empty() || style.vertical) {
+                return;
+            }
+            const float lineHeight = line->ascent + line->descent;
+            D2D1_MATRIX_3X2_F previousTransform =
+                D2D1::Matrix3x2F::Identity();
+            context->GetTransform(&previousTransform);
+            for (const ParticleBurst &burst : line->bursts) {
+                if (burst.front != front) {
+                    continue;
+                }
+                float originX = 0.0f;
+                float originY = 0.0f;
+                float boxW = 0.0f;
+                float boxH = 0.0f;
+                if (burst.anchor == "char"
+                    && burst.charIndex >= 0
+                    && static_cast<std::size_t>(burst.charIndex)
+                        < line->chars.size()) {
+                    // 与 utopia 逐字矩阵同源：pivotX/pivotY 是已验证的字形
+                    // 中心坐标系；left/right 是墨水边界（含 wipe pad）。
+                    // 唱字粒子（twinkle/note）与逐字涟漪都锚在各自字符上，
+                    // 窗口从该字开始唱时打开——天然「叠加在正在唱的字上」。
+                    const Impl::CachedChar &anchor =
+                        line->chars[static_cast<std::size_t>(burst.charIndex)];
+                    originX = anchor.pivotX;
+                    originY = anchor.pivotY;
+                    boxW = std::max(anchor.right - anchor.left, 1.0f);
+                    boxH = lineHeight;
+                } else {
+                    // 行锚点用 fillBounds（对齐/智能水平同款行盒）。
+                    originX = (line->fillBounds.left + line->fillBounds.right) * 0.5f;
+                    originY = (line->descent - line->ascent) * 0.5f;
+                    // sparkle 需要整行盒：粒子铺满整句并按横向位置扫过。
+                    boxW = std::max(
+                        line->fillBounds.right - line->fillBounds.left, 1.0f
+                    );
+                    boxH = lineHeight;
+                }
+                const auto spriteIt = impl_->fxSpriteGeometries.find(
+                    fxSpriteForKind(burst.kind)
+                );
+                if (spriteIt == impl_->fxSpriteGeometries.end()
+                    || !spriteIt->second) {
+                    continue;
+                }
+                for (const FxParticle &particle : burstParticlesAt(
+                    burst, tMs, originX, originY, boxW, boxH
+                )) {
+                    if (particle.alpha <= 0.0f || particle.sizePx <= 0.0f) {
+                        continue;
+                    }
+                    // 行向量约定：左矩阵先作用。sprite em 空间先缩放到目标
+                    // 尺寸、再旋转、再平移到 line 空间粒子位置、最后叠行级
+                    // 变换；顺序写反会把粒子位置一并缩放，全部塌回行原点。
+                    context->SetTransform(
+                        D2D1::Matrix3x2F::Scale(
+                            particle.sizePx / 1000.0f,
+                            particle.sizePx / 1000.0f
+                        )
+                            * D2D1::Matrix3x2F::Rotation(particle.rotationDeg)
+                            * D2D1::Matrix3x2F::Translation(particle.x, particle.y)
+                            * previousTransform
+                    );
+                    Microsoft::WRL::ComPtr<ID2D1SolidColorBrush> brush;
+                    const float alpha = std::clamp(
+                        particle.alpha * globalOpacity, 0.0f, 1.0f
+                    );
+                    if (SUCCEEDED(context->CreateSolidColorBrush(
+                        D2D1::ColorF(
+                            static_cast<float>(burst.color.red) / 255.0f,
+                            static_cast<float>(burst.color.green) / 255.0f,
+                            static_cast<float>(burst.color.blue) / 255.0f,
+                            alpha
+                        ),
+                        brush.ReleaseAndGetAddressOf()
+                    ))) {
+                        context->FillGeometry(
+                            spriteIt->second.Get(), brush.Get()
+                        );
+                    }
+                }
+            }
+            context->SetTransform(previousTransform);
+        };
+        auto drawGlowHalo = [&]() {
+            // 辉光浮现/消散（glow_in / glow_out）：多级圆角描边叠出近似高斯
+            // 衰减的弥散白晕（镜像 painter._paint_transition_glow_halo），画在
+            // 主文字之下。无几何变换，直接用行空间字形。
+            if (style.vertical) {
+                return;
+            }
+            if (activeCharacterTransition != "glow_in"
+                && activeCharacterTransition != "glow_out"
+                && activeCharacterTransition != "stretch_in"
+                && activeCharacterTransition != "stretch_out") {
+                return;
+            }
+            const bool bright = activeCharacterTransition == "glow_in"
+                || activeCharacterTransition == "glow_out";
+            D2D1_MATRIX_3X2_F previousTransform =
+                D2D1::Matrix3x2F::Identity();
+            context->GetTransform(&previousTransform);
+            const float font = std::max(line->style.fontSize, 1.0f);
+            for (std::size_t index = 0; index < line->chars.size(); ++index) {
+                const CharacterAnimationState animation =
+                    characterAnimationAt(index);
+                if (animation.glowAlpha <= 0.0f
+                    || animation.glowRadiusEm <= 0.0f) {
+                    continue;
+                }
+                // 用带逐字变换（横向拉伸）的本帧几何，光晕随光条一起被拉伸。
+                ID2D1Geometry *geometry = frameCharGeometries[index].Get();
+                if (geometry == nullptr) {
+                    continue;
+                }
+                if (bright) {
+                    // 辉光浮现/消散：细密横向回声——每侧 N 个字形重影
+                    // 副本、固定间距、亮度几何衰减（镜像 painter）。
+                    // 光晕独立于 core 透明度（出生帧呈现纯辉光）。
+                    float decay = 1.0f;
+                    for (int k = 1; k <= kGlowEchoCopies; ++k) {
+                        decay *= kGlowEchoDecay;
+                        const float offset = kGlowEchoPitchEm
+                            * animation.glowRadiusEm * font
+                            * static_cast<float>(k);
+                        if (offset < 0.5f) {
+                            continue;
+                        }
+                        const float alpha = std::clamp(
+                            animation.glowAlpha * decay * globalOpacity,
+                            0.0f,
+                            1.0f
+                        );
+                        if (alpha <= 0.008f) {
+                            break;
+                        }
+                        Microsoft::WRL::ComPtr<ID2D1SolidColorBrush> brush;
+                        if (SUCCEEDED(context->CreateSolidColorBrush(
+                                D2D1::ColorF(1.0f, 1.0f, 1.0f, alpha),
+                                brush.ReleaseAndGetAddressOf()
+                            ))) {
+                            context->SetTransform(
+                                previousTransform
+                                    * D2D1::Matrix3x2F::Translation(offset, 0.0f)
+                            );
+                            context->FillGeometry(geometry, brush.Get());
+                            context->SetTransform(
+                                previousTransform
+                                    * D2D1::Matrix3x2F::Translation(-offset, 0.0f)
+                            );
+                            context->FillGeometry(geometry, brush.Get());
+                        }
+                    }
+                    continue;
+                }
+                for (const GlowHaloStroke &stroke : kGlowHaloStrokes) {
+                    const float width = animation.glowRadiusEm
+                        * stroke.widthEm * font;
+                    if (width < 0.5f) {
+                        continue;
+                    }
+                    const float alpha = std::clamp(
+                        animation.opacity * animation.glowAlpha
+                            * stroke.strength * globalOpacity,
+                        0.0f,
+                        1.0f
+                    );
+                    if (alpha <= 0.0f) {
+                        continue;
+                    }
+                    Microsoft::WRL::ComPtr<ID2D1SolidColorBrush> brush;
+                    if (SUCCEEDED(context->CreateSolidColorBrush(
+                            D2D1::ColorF(1.0f, 1.0f, 1.0f, alpha),
+                            brush.ReleaseAndGetAddressOf()
+                        ))) {
+                        context->SetTransform(previousTransform);
+                        context->DrawGeometry(geometry, brush.Get(), width);
+                    }
+                }
+            }
+            context->SetTransform(previousTransform);
+        };
+        auto drawStrokeFlash = [&]() {
+            if (!line->strokeFlashEnabled || style.vertical) {
+                return;
+            }
+            D2D1_MATRIX_3X2_F previousTransform =
+                D2D1::Matrix3x2F::Identity();
+            context->GetTransform(&previousTransform);
+            for (std::size_t index = 0; index < line->chars.size(); ++index) {
+                ID2D1Geometry *geometry = charGeometryAt(index);
+                if (geometry == nullptr) {
+                    continue;
+                }
+                const Impl::CachedChar &ch = line->chars[index];
+                const int elapsed = tMs - ch.startMs;
+                if (elapsed < 0 || elapsed >= kStrokeFlashMs) {
+                    continue;
+                }
+                const TextStyle &charStyle = ch.styleIndex >= 0
+                    && ch.styleIndex < static_cast<int>(scene.charStyles.size())
+                    ? scene.charStyles[static_cast<std::size_t>(ch.styleIndex)]
+                    : style;
+                const float flash = 1.0f
+                    - static_cast<float>(elapsed)
+                        / static_cast<float>(kStrokeFlashMs);
+                float width = std::max(
+                    std::max(charStyle.strokeWidth, 0.0f),
+                    std::max(charStyle.fontSize, 1.0f) * kStrokeFlashMinWidthEm
+                );
+                width *= 1.0f + kStrokeFlashWidthBoost * flash;
+                Microsoft::WRL::ComPtr<ID2D1SolidColorBrush> brush;
+                const float alpha = std::clamp(
+                    kStrokeFlashAlpha * flash * globalOpacity, 0.0f, 1.0f
+                );
+                if (SUCCEEDED(context->CreateSolidColorBrush(
+                    D2D1::ColorF(1.0f, 1.0f, 1.0f, alpha),
+                    brush.ReleaseAndGetAddressOf()
+                ))) {
+                    context->SetTransform(previousTransform);
+                    context->DrawGeometry(geometry, brush.Get(), width);
+                }
+            }
+            context->SetTransform(previousTransform);
+        };
+
         context->SetTarget(targetBitmap);
         context->SetTransform(D2D1::Matrix3x2F::Identity());
         context->BeginDraw();
@@ -4711,6 +5136,23 @@ ProbeResult Direct2DGpuBackend::renderFrameInternal(
         if (lineOpacityLayer.prepared()) {
             count(frameDiagnostics.layerPush);
             lineOpacityLayer.push();
+        }
+        // 背层装饰粒子（涟漪光环）垫在整行内容（含发光层）之下；辉光
+        // 入退场的弥散光晕同样属于背层。
+        if (!line->bursts.empty()) {
+            context->SetTransform(
+                withViewport(D2D1::Matrix3x2F::Translation(dx, dy))
+            );
+            drawFxBursts(false);
+        }
+        if (line->entryAnimation == "glow_in"
+            || line->entryAnimation == "stretch_in"
+            || line->exitAnimation == "glow_out"
+            || line->exitAnimation == "stretch_out") {
+            context->SetTransform(
+                withViewport(D2D1::Matrix3x2F::Translation(dx, dy))
+            );
+            drawGlowHalo();
         }
         for (RubyGlowLayer &layer : rubyGlowLayers) {
             context->SetTransform(
@@ -5594,6 +6036,13 @@ ProbeResult Direct2DGpuBackend::renderFrameInternal(
                 }
             }
         };
+        // 唱字描边闪光 + 前层装饰粒子：主文字之上、注音之下（painter 同序）。
+        if (line->strokeFlashEnabled || !line->bursts.empty()) {
+            context->SetTransform(realizationBaseTransform);
+            sharedInstanceTransformActive = false;
+            drawStrokeFlash();
+            drawFxBursts(true);
+        }
         for (std::size_t rubyIndex = 0; rubyIndex < line->rubies.size(); ++rubyIndex) {
             const Impl::CachedRuby &ruby = line->rubies[rubyIndex];
             const TextStyle &rubyStyle = rubyStyleFor(ruby.styleIndex);

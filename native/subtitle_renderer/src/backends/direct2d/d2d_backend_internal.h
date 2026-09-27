@@ -32,6 +32,9 @@ struct Direct2DGpuBackend::Impl {
         bool animationChecked = false;
         std::uint64_t lastUse = 0;
     };
+    // 装饰粒子 sprite 轮廓几何（em 空间、中心原点；随场景重建，绘制期经
+    // matrix 缩放平移）。key = sprite 名（star4 / ring / note）。
+    std::map<std::string, Microsoft::WRL::ComPtr<ID2D1PathGeometry>> fxSpriteGeometries;
     struct CachedChar {
         int startMs = 0;
         int endMs = 0;
@@ -117,6 +120,11 @@ struct Direct2DGpuBackend::Impl {
         // 整字放大（zoom_pulse）开关（来自 TextLine.zoomPulseEnabled，随行缓存）：
         // 本体 karaokeAnimation 仍为 "utopia"，靠它切换缩放曲线与字符中心原点。
         bool zoomPulseEnabled = false;
+        // 唱字描边闪光 / 装饰粒子（2026-09；渲染期确定性求值，轨迹与
+        // Python particles.py 镜像）。粒子 sprite 几何缓存在 Impl 层
+        // fxSpriteGeometries，随场景失效重建。
+        bool strokeFlashEnabled = false;
+        std::vector<ParticleBurst> bursts;
         std::vector<DisplayWindow> displayWindows;
         std::vector<PlacementWindow> placementWindows;
         TextStyle style;

@@ -88,6 +88,15 @@ _LYRIC_LAYOUT_EXCLUDED_STYLE_FIELDS = _LYRIC_LAYOUT_TITLE_ONLY_EXCLUDED_STYLE_FI
     "scanline_brightness_pct",
     "scanline_glow_px",
     "zoom_pulse_curve_level",
+    # 2026-09 描边闪光与装饰粒子：纯绘制参数（IR 里随行 fx_bursts 下发），
+    # 不影响显示窗口 / 分页 / 排版任何输入。
+    "karaoke_stroke_flash",
+    "entry_fx",
+    "exit_fx",
+    "sing_fx",
+    "fx_particle_size_em",
+    "fx_particle_count",
+    "fx_particle_color",
 })
 _LYRIC_LAYOUT_EXCLUDED_SCHEME_FIELDS = frozenset({
     "base_color",

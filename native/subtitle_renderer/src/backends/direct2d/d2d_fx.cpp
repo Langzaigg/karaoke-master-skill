@@ -1,0 +1,394 @@
+#include "d2d_fx.h"
+
+#include <algorithm>
+#include <cmath>
+
+namespace krok::subtitle::native::direct2d {
+namespace {
+
+// 幅度参数（与 transitions.py 顶部常量镜像）。
+constexpr float kTrackingSpreadEm = 1.6f;
+constexpr float kWaveAmplitudeEm = 0.5f;
+constexpr float kWaveAmplitudeMinPx = 24.0f;
+constexpr float kScatterTravelEm = 2.2f;
+constexpr float kScatterShrink = 0.4f;
+constexpr float kConvergeShrink = 0.2f;
+// 编排与 Python char_fade 完全同构（镜像 transitions.CHAR_FADE_* 常量）：
+// 350ms 内逐字错峰、每字 250ms 走完行程；激活门 = entry/exitDurationMs>0
+//（专门的播放时间，窗口判定同 char_fade 的 600ms）。
+constexpr int kCharFadeIntroDelayMs = 350;
+constexpr int kCharFadeInOutTimeMs = 250;
+
+float clampedRatio(int elapsedMs, int durationMs) {
+    if (durationMs <= 0) {
+        return 1.0f;
+    }
+    const float value = static_cast<float>(elapsedMs)
+        / static_cast<float>(durationMs);
+    return std::clamp(value, 0.0f, 1.0f);
+}
+
+float centerNorm(int index, int count) {
+    if (count <= 1) {
+        return 0.0f;
+    }
+    const float half = static_cast<float>(count - 1) / 2.0f;
+    return (static_cast<float>(index) - half) / half;
+}
+
+}  // namespace
+
+float fxUnitHash(std::uint32_t index, std::uint32_t salt) {
+    std::uint32_t h = index * 0x85EBCA77u + salt * 0xC2B2AE3Du;
+    h ^= h >> 15;
+    h *= 0x2545F491u;
+    h ^= h >> 13;
+    return static_cast<float>(h & 0xFFFFFFu) / 16777216.0f;
+}
+
+GeoCharState geoCharState(
+    const std::string &effect,
+    float fontPx,
+    int index,
+    int count,
+    int tMs,
+    int startMs,
+    int durationMs,
+    bool exitPhase,
+    float charCenterX,
+    float lineCenterX,
+    bool hasCenters
+) {
+    GeoCharState state;
+    const float font = std::max(fontPx, 1.0f);
+    // 编排总时长 = 「入场/退场动画时长」旋钮（调用方门保证 >0）；
+    // 错峰:行程保持 7:5（默认 600ms 时即 350/250）。
+    const int totalMs = std::clamp(durationMs, 120, 3000);
+    const int staggerMs = totalMs * 7 / 12;
+    const int travelMs = std::max(totalMs - staggerMs, 40);
+    const auto staggerProgress = [&]() {
+        const int step = count <= 1 ? 0 : staggerMs / (count - 1);
+        return clampedRatio(tMs - startMs - step * index, travelMs);
+    }();
+    // 入场透明度 4 倍速上升 + smoothstep 运动包络：字符在行程前 1/4 即
+    // 全不透明，位移仍有 8 成以上，保证「先清晰可见、再走完行程」。
+    const auto smoothstep = [](float p) {
+        return p * p * (3.0f - 2.0f * p);
+    };
+
+    if (effect == "tracking_in") {
+        const float p = staggerProgress;
+        const float q = smoothstep(p);
+        const float spread = font * kTrackingSpreadEm;
+        state.dx = centerNorm(index, count) * spread * (1.0f - q);
+        state.opacity = std::min(p * 4.0f, 1.0f);
+        return state;
+    }
+    if (effect == "wave_in") {
+        const float p = staggerProgress;
+        const float q = smoothstep(p);
+        const float amplitude = std::max(font * kWaveAmplitudeEm, kWaveAmplitudeMinPx);
+        state.dy = amplitude * (1.0f - q);
+        state.opacity = std::min(p * 4.0f, 1.0f);
+        return state;
+    }
+    if (effect == "scatter_out") {
+        const float p = staggerProgress;
+        const double theta = static_cast<double>(
+            fxUnitHash(static_cast<std::uint32_t>(index), 1u)
+        ) * 2.0 * 3.14159265358979323846;
+        const float speed = 0.55f + 0.45f * fxUnitHash(
+            static_cast<std::uint32_t>(index), 2u
+        );
+        const float spin = (
+            fxUnitHash(static_cast<std::uint32_t>(index), 3u) - 0.5f
+        ) * 720.0f;
+        const float travel = font * kScatterTravelEm * speed
+            * (1.0f - (1.0f - p) * (1.0f - p));
+        const float scale = 1.0f - kScatterShrink * p;
+        state.opacity = (1.0f - p) * (1.0f - p);
+        state.dx = static_cast<float>(std::cos(theta)) * travel;
+        state.dy = static_cast<float>(std::sin(theta)) * travel;
+        state.rotation = spin * p;
+        state.scaleX = scale;
+        state.scaleY = scale;
+        return state;
+    }
+    if (effect == "stretch_in") {
+        // 逐字拉伸入场（光条凝聚，Aegisub \fscx+\blur+\t 同款语言）。
+        const float p = staggerProgress;
+        state.opacity = std::min(p * 4.0f, 1.0f);
+        const float q = smoothstep(p);
+        state.glowAlpha = (1.0f - q) * std::sqrt(1.0f - q);
+        state.glowRadiusEm = 1.2f - 0.5f * q;
+        state.scaleX = 1.0f + 2.2f * (1.0f - q);
+        return state;
+    }
+    if (effect == "stretch_out") {
+        // 逐字拉伸退场：反向——清晰字形横向拉伸成光条弥散，同时淡出。
+        const float p = staggerProgress;
+        const float q = smoothstep(p);
+        state.opacity = 1.0f - q;
+        constexpr float pi = 3.14159265358979323846f;
+        state.glowAlpha = std::sin(pi * q) * 0.9f;
+        state.glowRadiusEm = 0.7f + 0.8f * q;
+        state.scaleX = 1.0f + 2.2f * q;
+        return state;
+    }
+    if (effect == "glow_in" || effect == "glow_out") {
+        // 辉光浮现/消散：整行同步（无逐字错峰）横向拉伸 + 高强度
+        // 大半径光晕（逐字拉伸的整行版；曲线与 Python 镜像）。
+        const float p = clampedRatio(tMs - startMs, travelMs);
+        const float q = smoothstep(p);
+        if (effect == "glow_in") {
+            state.opacity = std::min(p * 3.0f, 1.0f);
+            state.glowAlpha = (1.0f - q) * std::sqrt(1.0f - q);
+            state.glowRadiusEm = 1.0f - 0.25f * q;
+            state.scaleX = 1.0f + 0.6f * (1.0f - q);
+        } else {
+            state.opacity = 1.0f - q;
+            constexpr float pi = 3.14159265358979323846f;
+            state.glowAlpha = std::sin(pi * q);
+            state.glowRadiusEm = 1.0f + 0.9f * q;
+            state.scaleX = 1.0f + 0.6f * q;
+        }
+        return state;
+    }
+    if (effect == "sparkle" || effect == "ripple" || effect == "note") {
+        // 粒子类出入场动画的本体：文字逐字显形（入场 4 倍速透明度，
+        // 粒子拼接同款编排），退场逐字淡出；粒子由 planner 叠加。
+        const float p = staggerProgress;
+        if (exitPhase) {
+            const float q = smoothstep(p);
+            state.opacity = 1.0f - q;
+        } else {
+            state.opacity = std::min(p * 4.0f, 1.0f);
+        }
+        return state;
+    }
+    if (effect == "assemble_in") {
+        // 粒子拼接：粒子飞入期间字形未成形，抵达后显形。
+        const float p = staggerProgress;
+        const float appear = smoothstep(p);
+        state.opacity = std::max(0.0f, (appear - 0.45f) / 0.55f);
+        return state;
+    }
+    if (effect == "dissolve_out") {
+        // 粒子消散：字形先行散去，粒子随后飞离。
+        const float p = staggerProgress;
+        const float vanish = std::clamp(p / 0.55f, 0.0f, 1.0f);
+        state.opacity = 1.0f - vanish * vanish * (3.0f - 2.0f * vanish);
+        return state;
+    }
+    // converge_out
+    const float p = staggerProgress;
+    const float eased = p * p * (3.0f - 2.0f * p);
+    if (hasCenters) {
+        state.dx = (lineCenterX - charCenterX) * eased;
+    } else {
+        const float halfWidthEm = static_cast<float>(count) * 0.5f;
+        state.dx = -centerNorm(index, count) * font * halfWidthEm * eased;
+    }
+    const float scale = 1.0f - kConvergeShrink * eased;
+    state.opacity = 1.0f - eased;
+    state.scaleX = scale;
+    state.scaleY = scale;
+    return state;
+}
+
+D2D1_MATRIX_3X2_F geoCharMatrix(
+    const GeoCharState &state,
+    float centerX,
+    float centerY
+) {
+    return D2D1::Matrix3x2F::Translation(-centerX, -centerY)
+        * D2D1::Matrix3x2F::Scale(state.scaleX, state.scaleY)
+        * D2D1::Matrix3x2F::Rotation(state.rotation)
+        * D2D1::Matrix3x2F::Translation(
+            centerX + state.dx, centerY + state.dy
+        );
+}
+
+std::vector<FxParticle> burstParticlesAt(
+    const ParticleBurst &burst,
+    int tMs,
+    float originX,
+    float originY,
+    float boxW,
+    float boxH
+) {
+    std::vector<FxParticle> out;
+    if (tMs < burst.startMs || tMs > burst.endMs) {
+        return out;
+    }
+    const int life = std::max(burst.endMs - burst.startMs, 1);
+    const float tau = static_cast<float>(tMs - burst.startMs);
+    const float size = burst.sizePx;
+    const float travel = burst.travelPx;
+
+    if (burst.kind == "ripple") {
+        // 水波纹（镜像 particles.burst_particles_at）：3 枚细描边圆环错峰
+        // 扩散（第 i 环延迟 150ms），「自小圈快速扩开 → 满径时淡出」。
+        const int rings = std::max(burst.count, 1);
+        for (int i = 0; i < rings; ++i) {
+            const float delay = static_cast<float>(i) * 150.0f;
+            const float lifeI = std::max(
+                static_cast<float>(life) - delay, 1.0f
+            );
+            const float p = std::clamp((tau - delay) / lifeI, 0.0f, 1.0f);
+            if (p <= 0.0f) {
+                continue;
+            }
+            const float eased = 1.0f - (1.0f - p) * (1.0f - p);
+            const float scale = size * (0.25f + 0.85f * eased);
+            out.push_back(FxParticle{
+                originX, originY, 0.0f, scale, (1.0f - p) * (1.0f - p),
+            });
+        }
+        return out;
+    }
+
+    const std::uint32_t seed = burst.seed;
+    out.reserve(static_cast<std::size_t>(std::max(burst.count, 0)));
+    for (int i = 0; i < burst.count; ++i) {
+        const std::uint32_t index = seed + static_cast<std::uint32_t>(i);
+        if (burst.kind == "sparkle") {
+            // 整句扫过（镜像 particles.burst_particles_at sparkle 分支）。
+            const float u1 = fxUnitHash(index, 1u);
+            const float u2 = fxUnitHash(index, 2u);
+            const float u3 = fxUnitHash(index, 3u);
+            const float u4 = fxUnitHash(index, 4u);
+            const float u5 = fxUnitHash(index, 5u);
+            float delay;
+            if (burst.sweep > 0) {
+                delay = u1 * 350.0f + u5 * 90.0f;
+            } else if (burst.sweep < 0) {
+                delay = (1.0f - u1) * 350.0f + u5 * 90.0f;
+            } else {
+                delay = u5 * 130.0f;
+            }
+            const float denom = std::max(
+                static_cast<float>(life) - delay, 1.0f
+            );
+            const float p = std::clamp((tau - delay) / denom, 0.0f, 1.0f);
+            if (p <= 0.0f) {
+                continue;
+            }
+            const float sizeI = size * (0.65f + 0.70f * u3);
+            const float sizeF = sizeI * (0.15f + 0.30f * u4);
+            const float scale = sizeI + (sizeF - sizeI) * p;
+            const float driftX = (u4 - 0.5f) * travel * 0.35f * p;
+            const float driftY = -(0.30f + 0.70f * u2) * travel * 0.45f * p;
+            out.push_back(FxParticle{
+                originX + (u1 - 0.5f) * boxW + driftX,
+                originY + (u2 - 0.5f) * boxH * 0.55f + driftY,
+                u3 * 90.0f + 60.0f * p,
+                scale,
+                1.0f - p,
+            });
+        } else if (burst.kind == "twinkle") {
+            const float u1 = fxUnitHash(index, 1u);
+            const float u2 = fxUnitHash(index, 2u);
+            const float u3 = fxUnitHash(index, 3u);
+            const float u4 = fxUnitHash(index, 4u);
+            const float lifeI = 300.0f + 150.0f * u4;
+            const float spread = std::max(
+                static_cast<float>(life) - lifeI, 0.0f
+            );
+            const float delay = u3 * spread * 0.8f;
+            const float p = std::clamp((tau - delay) / lifeI, 0.0f, 1.0f);
+            if (p <= 0.0f || p >= 1.0f) {
+                continue;
+            }
+            constexpr float pi = 3.14159265358979323846f;
+            const float envelope = std::sin(pi * p);
+            const float peak = size * (0.65f + 0.70f * u4);
+            out.push_back(FxParticle{
+                originX + (u1 - 0.5f) * boxW * 0.95f,
+                originY + (u2 - 0.5f) * boxH * 0.85f,
+                u3 * 120.0f - 30.0f,
+                peak * (0.30f + 0.70f * envelope),
+                envelope,
+            });
+        } else if (burst.kind == "assemble" || burst.kind == "dissolve") {
+            // 粒子拼接/消散（镜像 particles.burst_particles_at）：
+            // 拼接=自随机方向远端飞向字形内随机落点后缩小熄灭；
+            // 消散=自字形内随机起点飞向随机方向远端并淡出。
+            const float u1 = fxUnitHash(index, 1u);
+            const float u2 = fxUnitHash(index, 2u);
+            const float u3 = fxUnitHash(index, 3u);
+            const float u4 = fxUnitHash(index, 4u);
+            const float delay = burst.kind == "assemble"
+                ? u3 * 90.0f : u3 * 70.0f;
+            const float p = std::clamp(
+                (tau - delay) / std::max(
+                    static_cast<float>(life) - delay, 1.0f
+                ),
+                0.0f, 1.0f
+            );
+            if (p <= 0.0f) {
+                continue;
+            }
+            if (burst.kind == "assemble" && p >= 1.0f) {
+                continue;
+            }
+            const float eased = p * p * (3.0f - 2.0f * p);
+            constexpr float pi = 3.14159265358979323846f;
+            const float theta = u2 * 2.0f * pi;
+            const float speed = 0.6f + 0.5f * u4;
+            const float landX = (u1 - 0.5f) * boxW * 0.9f;
+            const float landY = (u4 - 0.5f) * boxH * 0.8f;
+            if (burst.kind == "assemble") {
+                const float startX = landX + std::cos(theta) * travel * speed;
+                const float startY = landY
+                    + std::sin(theta) * travel * speed * 0.7f;
+                out.push_back(FxParticle{
+                    originX + startX + (landX - startX) * eased,
+                    originY + startY + (landY - startY) * eased,
+                    (u3 - 0.5f) * 240.0f * (1.0f - eased),
+                    size * (0.9f - 0.35f * eased),
+                    std::min(p * 6.0f, 1.0f) * (1.0f - p * p),
+                });
+            } else {
+                out.push_back(FxParticle{
+                    originX + landX
+                        + std::cos(theta) * travel * speed * eased,
+                    originY + landY
+                        + std::sin(theta) * travel * speed * 0.7f * eased,
+                    (u3 - 0.5f) * 240.0f * eased,
+                    size * (0.75f + 0.25f * (1.0f - eased)),
+                    (1.0f - p) * (1.0f - p * 0.5f),
+                });
+            }
+        } else if (burst.kind == "note") {
+            const float u1 = fxUnitHash(index, 1u);
+            const float u2 = fxUnitHash(index, 2u);
+            const float u3 = fxUnitHash(index, 3u);
+            const float delay = u3 * static_cast<float>(life) * 0.35f;
+            const float p = std::clamp(
+                (tau - delay)
+                    / std::max(static_cast<float>(life) - delay, 1.0f),
+                0.0f,
+                1.0f
+            );
+            if (p <= 0.0f) {
+                continue;
+            }
+            constexpr float pi = 3.14159265358979323846f;
+            const float rise = travel * (1.0f - (1.0f - p) * (1.0f - p));
+            const float sway = std::sin((u2 + p * 1.5f) * 2.0f * pi)
+                * size * 0.4f;
+            out.push_back(FxParticle{
+                originX + (u1 - 0.5f) * boxW * 0.8f + sway,
+                originY - boxH * 0.35f - rise,
+                (u2 - 0.5f) * 28.0f,
+                size * (0.70f + 0.60f * u1)
+                    * (0.85f + 0.15f * std::sin(pi * p)),
+                1.0f - std::sqrt(p) * p,
+            });
+        }
+    }
+    return out;
+}
+
+}  // namespace krok::subtitle::native::direct2d

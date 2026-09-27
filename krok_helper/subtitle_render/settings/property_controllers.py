@@ -433,6 +433,14 @@ def normalize_entry_animation(value: object) -> EntryAnimation:
         "char_drip",
         "spin_flip",
         "utopia",
+        "tracking_in",
+        "wave_in",
+        "stretch_in",
+        "glow_in",
+        "assemble_in",
+        "sparkle",
+        "ripple",
+        "note",
     }:
         return value  # type: ignore[return-value]
     return "none"
@@ -448,6 +456,14 @@ def normalize_exit_animation(value: object) -> ExitAnimation:
         "char_drip",
         "spin_flip",
         "utopia",
+        "scatter_out",
+        "converge_out",
+        "stretch_out",
+        "glow_out",
+        "dissolve_out",
+        "sparkle",
+        "ripple",
+        "note",
     }:
         return value  # type: ignore[return-value]
     return "none"

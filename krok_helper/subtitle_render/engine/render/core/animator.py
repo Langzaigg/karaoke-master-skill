@@ -120,7 +120,13 @@ def max_line_animation_excursion(
     且行内混合字号使字形宽度无法约束。
     """
     anims = {style.entry_anim, style.exit_anim}
-    if anims & {"char_drip", "spin_flip"}:
+    # scatter_out 带逐字旋转飞散（纵向包络随旋转角增长，无法给出可靠上界），
+    # 与 char_drip / spin_flip 同口径：禁用条带/多带优化退回整帧。
+    if anims & {
+        "char_drip", "spin_flip", "scatter_out",
+        "glow_in", "glow_out", "stretch_in", "stretch_out",
+        "assemble_in", "dissolve_out",
+    }:
         return None
     font_px = max(
         float(getattr(style, "font_size_px", 0.0) or 0.0),
@@ -130,6 +136,8 @@ def max_line_animation_excursion(
     excursion = 0.0
     if "rise" in anims:
         excursion = max(excursion, max(font_px * 0.35, 18.0))
+    if "wave_in" in anims:
+        excursion = max(excursion, max(font_px * 0.5, 24.0))
     if "utopia" in anims or effective_karaoke_animation(style) == "utopia":
         excursion = max(
             excursion, _utopia_excursion(frame_height, font_px, glyph_span_em)

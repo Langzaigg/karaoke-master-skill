@@ -296,6 +296,13 @@ void Direct2DGpuBackend::configure(const RenderScene &scene) {
     impl_->diagnostics.realizationEnabled = impl_->realizationActive;
     impl_->lines.clear();
     impl_->lines.reserve(scene.lines.size());
+    // 装饰粒子 sprite 轮廓几何：em 空间一次构建，绘制期按 sizePx/1000 缩放。
+    impl_->fxSpriteGeometries.clear();
+    for (const auto &entry : scene.fxSprites) {
+        impl_->fxSpriteGeometries[entry.first] = vectorGlyphGeometry(
+            device_.d2dFactory(), entry.second, 1000.0f, device_
+        );
+    }
     if (!impl_->resourceCacheEnabled) {
         impl_->images.clear();
         impl_->imageUseSerial = 0;
@@ -743,6 +750,8 @@ void Direct2DGpuBackend::configure(const RenderScene &scene) {
         cached.karaokeAnimation = sourceLine.karaokeAnimation;
         cached.scanlineEnabled = sourceLine.scanlineEnabled;
         cached.zoomPulseEnabled = sourceLine.zoomPulseEnabled;
+        cached.strokeFlashEnabled = sourceLine.strokeFlashEnabled;
+        cached.bursts = sourceLine.bursts;
         cached.displayWindows = sourceLine.displayWindows;
         cached.placementWindows = sourceLine.placementWindows;
         DWRITE_FONT_METRICS laneMetrics{};

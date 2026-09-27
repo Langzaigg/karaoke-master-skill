@@ -53,10 +53,12 @@ def test_effects_animation_builder_preserves_options_and_layout(qapp) -> None:
 
     assert section.header.text() == "入退场动画"
     assert host._animation_grid._max_columns == 2
-    assert host._entry_anim_combo.count() == 8
+    assert host._entry_anim_combo.count() == 16
     assert host._entry_anim_combo.itemData(5) == "char_drip"
-    assert host._exit_anim_combo.count() == 8
+    assert host._entry_anim_combo.itemData(8) == "tracking_in"
+    assert host._exit_anim_combo.count() == 16
     assert host._exit_anim_combo.itemData(2) == "slide_out"
+    assert host._exit_anim_combo.itemData(8) == "scatter_out"
     assert host._entry_lead_spin.maximum() == 3000
     assert host._exit_fade_spin.maximum() == 3000
     assert host._entry_lead_spin.toolTip() == "入场动画时长"
@@ -128,8 +130,8 @@ def test_effects_section_edge_builder_defaults_and_order(qapp) -> None:
     assert host._section_edge_both_check.text() == "同时设置出入场"
     assert not host._section_edge_check.isChecked()
     assert not host._section_edge_both_check.isChecked()
-    assert host._section_head_anim_combo.count() == 8
-    assert host._section_tail_anim_combo.count() == 8
+    assert host._section_head_anim_combo.count() == 16
+    assert host._section_tail_anim_combo.count() == 16
     # 主开关默认关：两个下拉与子开关全部禁用；选项表含默认动画（具体显示值
     # 由 set_style 回显）。
     assert not host._section_head_anim_combo.isEnabled()

@@ -91,6 +91,25 @@ struct TimingLine {
     // "utopia"，靠这个行级标记切换缩放曲线（唱字期间缓出放大、唱字结束
     // 后 300ms 缓入缩回）并把缩放原点换成字符中心。缺省 false 兼容旧 IR。
     bool zoomPulseEnabled = false;
+    // 唱字描边闪光开关（与唱字档位正交）；缺省 false 兼容旧 IR。
+    bool strokeFlashEnabled = false;
+    // 装饰粒子（Python plan_line_bursts 规划；空表兼容旧 IR）。
+    struct FxBurst {
+        QString kind;
+        QString anchor;
+        int charIndex = -1;
+        int startMs = 0;
+        int endMs = 0;
+        int count = 0;
+        quint32 seed = 0;
+        double sizePx = 28.0;
+        double travelPx = 120.0;
+        bool front = true;
+        bool reverse = false;
+        int sweep = 0;
+        QString color = QStringLiteral("#FFFFFF");
+    };
+    std::vector<FxBurst> fxBursts;
     ResolvedLineLayout layout;
 };
 
@@ -332,6 +351,8 @@ struct RenderConfig {
     // reference entries through ``vector_glyph_id`` and share the same immutable
     // object, so a thousand inline guide glyphs pay for one outline only.
     QHash<QString, std::shared_ptr<const krok::subtitle::native::VectorGlyph>> vectorGlyphs;
+    // 装饰粒子 sprite 轮廓表（fx_sprites；值语义，投影到 RenderScene::fxSprites）。
+    QHash<QString, krok::subtitle::native::VectorGlyph> fxSprites;
     std::vector<TimingLine> lines;
     std::vector<RubyAnnotation> rubies;
     // Render IR schema: ``titles`` is an array of per-entry title payloads

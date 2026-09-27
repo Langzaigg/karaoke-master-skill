@@ -100,6 +100,7 @@ from krok_helper.subtitle_render.engine.render.elements.horizontal.transitions i
     spin_flip_char_transform,
     spin_flip_skew,
     transition_char_state,
+    transition_char_glow,
     utopia_following_done_time,
 )
 from krok_helper.subtitle_render.engine.render.elements.horizontal.wipe import (
@@ -359,6 +360,7 @@ __all__ = [
     "scanline_params_for_style",
     "text_glyph_runs",
     "transition_char_state",
+    "transition_char_glow",
     "utopia_following_done_time",
     "utopia_glow_cache_enabled",
 ]

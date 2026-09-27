@@ -11,6 +11,19 @@ from krok_helper.subtitle_render.domain.models import (
     effective_karaoke_animation,
     effective_karaoke_zoom_pulse,
 )
+from krok_helper.subtitle_render.domain.timing import (
+    CHAR_TRANSITION_ANIMS,
+    ENTRY_ASSEMBLE_ANIMS,
+    ENTRY_GEO_ANIMS,
+    ENTRY_GLOW_ANIMS,
+    ENTRY_PARTICLE_ANIMS,
+    ENTRY_STRETCH_ANIMS,
+    EXIT_ASSEMBLE_ANIMS,
+    EXIT_GEO_ANIMS,
+    EXIT_GLOW_ANIMS,
+    EXIT_PARTICLE_ANIMS,
+    EXIT_STRETCH_ANIMS,
+)
 from krok_helper.subtitle_render.domain.timing import TimingLine
 from krok_helper.subtitle_render.engine.layout.line.style import (
     line_end_ms,
@@ -42,6 +55,56 @@ ZOOM_PULSE_DEFAULT_CURVE_LEVEL = 1
 CHAR_FADE_INTRO_DELAY_MS = 350
 CHAR_FADE_IN_TIME_MS = 250
 CHAR_FADE_OUT_TIME_MS = 250
+# ---- 2026-09 逐字几何特效幅度参数（与 C++ d2d_fx.cpp 镜像，改动需双侧同步）----
+# 编排与 char_fade 完全同构：「入场/退场动画时长」旋钮仅作 >0 的播放门，
+# 窗口 600ms，逐字错峰步距 350ms//(字数-1)、每字行程 250ms（常量，不随旋钮缩放）。
+# 入场透明度 4 倍速上升（行程前 1/4 即全不透明）、运动包络 smoothstep，
+# 保证字符「先清晰可见、再走完收拢/上浮行程」。
+# 字距收拢（tracking_in）：从两侧按行中心归一化位置展开的行程（em）。
+TRACKING_SPREAD_EM = 1.6
+# 波浪上浮（wave_in）：自下方浮起的振幅（em，带最小像素下限）。
+WAVE_AMPLITUDE_EM = 0.5
+WAVE_AMPLITUDE_MIN_PX = 24.0
+# 碎散爆开（scatter_out）：随机方向飞散的行程（em）与缩水量。
+SCATTER_TRAVEL_EM = 2.2
+SCATTER_SHRINK = 0.4
+# 收拢消散（converge_out）：向行中心收拢的缩水量。
+CONVERGE_SHRINK = 0.2
+# ---- 辉光浮现/消散（glow_in / glow_out，2026-09 参考视频底部字幕）----
+# 多级圆角描边层近似高斯衰减的弥散光晕：(描边宽 em 占半径系数, 相对强度)。
+# 双端镜像：C++ d2d_fx.cpp kGlowHaloStrokes。
+GLOW_HALO_STROKES: tuple[tuple[float, float], ...] = (
+    (0.10, 0.42),
+    (0.22, 0.24),
+    (0.38, 0.14),
+    (0.58, 0.08),
+    (0.82, 0.045),
+)
+# 辉光浮现/消散 = 细密横向回声（参考图口径）：每侧 N 个字形重影副本、
+# 固定间距 pitch、亮度几何衰减，叠出可分辨残像结构的横向光痕。
+GLOW_ECHO_PITCH_EM = 0.12
+GLOW_ECHO_COPIES = 14
+GLOW_ECHO_DECAY = 0.82
+
+
+def fx_unit_hash(index: int, salt: int) -> float:
+    """Deterministic per-index hash in [0, 1)；Python/C++ 共用的整数哈希。
+
+    纯整数运算（uint32 溢出截断）保证两侧逐位一致，末尾一次除法得到
+    24bit 定点小数。碎散/粒子的随机量全部由此派生，禁用语言级随机库。
+    """
+    h = (index * 0x85EBCA77 + salt * 0xC2B2AE3D) & 0xFFFFFFFF
+    h ^= h >> 15
+    h = (h * 0x2545F491) & 0xFFFFFFFF
+    h ^= h >> 13
+    return (h & 0xFFFFFF) / 0x1000000
+
+
+def _center_norm(index: int, count: int) -> float:
+    """字符中心相对行中心的归一化横向位置（-1 左缘 .. +1 右缘）。"""
+    if count <= 1:
+        return 0.0
+    return (index - (count - 1) / 2.0) / ((count - 1) / 2.0)
 
 
 def line_char_transition_context(
@@ -62,12 +125,18 @@ def line_char_transition_context(
     end = display_end_ms if display_end_ms is not None else line_end_ms(line)
 
     if (
-        style.exit_anim in {"char_fade", "char_drip", "spin_flip"}
+        style.exit_anim in CHAR_TRANSITION_ANIMS
         and style.exit_fade_ms > 0
     ):
+        # 旧 char_fade 家族保持历史固定 600ms 窗；新档位族（几何/辉光/
+        # 粒子类）窗口 = 时长旋钮值，与编排缩放一致。
+        if style.exit_anim in {"char_fade", "char_drip", "spin_flip"}:
+            window_ms = CHAR_FADE_INTRO_DELAY_MS + CHAR_FADE_OUT_TIME_MS
+        else:
+            window_ms = min(max(style.exit_fade_ms, 120), 3000)
         exit_start = max(
             line_end_ms(line),
-            end - CHAR_FADE_INTRO_DELAY_MS - CHAR_FADE_OUT_TIME_MS,
+            end - window_ms,
         )
         if t_ms >= exit_start:
             return LineCharTransition(
@@ -79,10 +148,14 @@ def line_char_transition_context(
             )
 
     if (
-        style.entry_anim in {"char_fade", "char_drip", "spin_flip"}
+        style.entry_anim in CHAR_TRANSITION_ANIMS
         and style.entry_lead_ms > 0
     ):
-        entry_end = start + CHAR_FADE_INTRO_DELAY_MS + CHAR_FADE_IN_TIME_MS
+        if style.entry_anim in {"char_fade", "char_drip", "spin_flip"}:
+            window_ms = CHAR_FADE_INTRO_DELAY_MS + CHAR_FADE_IN_TIME_MS
+        else:
+            window_ms = min(max(style.entry_lead_ms, 120), 3000)
+        entry_end = start + window_ms
         if t_ms <= entry_end:
             return LineCharTransition(
                 phase="entry",
@@ -167,6 +240,8 @@ def transition_char_state(
     t_ms: int | None = None,
     frame_height: int | None = None,
     following_done_ms: int | None = None,
+    char_center_x: float | None = None,
+    line_center_x: float | None = None,
 ) -> tuple[float, float, float, float, float, float, float]:
     if transition.effect == "utopia" and transition.phase == "utopia":
         if (
@@ -321,6 +396,24 @@ def transition_char_state(
         )
         return 1.0, 0.0, 0.0, 0.0, scale, scale, 0.0
 
+    if (
+        transition.effect
+        in ENTRY_GEO_ANIMS | EXIT_GEO_ANIMS
+        | ENTRY_GLOW_ANIMS | EXIT_GLOW_ANIMS
+        | ENTRY_STRETCH_ANIMS | EXIT_STRETCH_ANIMS
+        | ENTRY_ASSEMBLE_ANIMS | EXIT_ASSEMBLE_ANIMS
+        | ENTRY_PARTICLE_ANIMS | EXIT_PARTICLE_ANIMS
+    ):
+        return _geo_char_state(
+            style,
+            transition,
+            index,
+            count,
+            t_ms=t_ms,
+            char_center_x=char_center_x,
+            line_center_x=line_center_x,
+        )
+
     if transition.effect in {"char_fade", "char_drip", "spin_flip"}:
         progress = char_fade_opacity(
             transition,
@@ -409,6 +502,189 @@ def character_scale_origin(
     if effective_karaoke_zoom_pulse(style):
         return None, None
     return left, baseline_y
+
+
+def _geo_char_state(
+    style: Style,
+    transition: LineCharTransition,
+    index: int,
+    count: int,
+    *,
+    t_ms: int | None,
+    char_center_x: float | None,
+    line_center_x: float | None,
+) -> tuple[float, float, float, float, float, float, float]:
+    """逐字几何特效（tracking_in / wave_in / scatter_out / converge_out）。
+
+    编排与 char_fade 完全同构：「入场/退场动画时长」仅作 >0 的播放门，
+    固定 350ms 错峰 + 250ms 行程（窗口 600ms），不随旋钮值缩放。随机量经
+    :func:`fx_unit_hash` 派生（与 C++ d2d_fx.cpp 逐位一致）。
+    ``t_ms`` 缺省（旧调用/静态探针）时退化为纯透明度插值。
+    """
+    font_px = max(float(getattr(style, "font_size_px", 0.0) or 0.0), 1.0)
+    # 编排总时长由「入场/退场动画时长」旋钮驱动（与旧的淡入/滑入/上移
+    # 同口径）：0 = 默认 600ms（保持选中即播），>0 按值缩放；错峰:行程
+    # 保持 7:5（默认 350/250ms）。
+    if transition.phase == "exit":
+        configured = int(getattr(style, "exit_fade_ms", 0) or 0)
+    else:
+        configured = int(getattr(style, "entry_lead_ms", 0) or 0)
+    # 旧语义：时长 0 = 无动画（context 门已拦，这里只做量程钳制）。
+    total = min(max(configured, 120), 3000)
+    stagger_total = total * 7 // 12
+    travel_total = max(total - stagger_total, 40)
+
+    def _stagger_progress() -> float:
+        if t_ms is None or transition.start_ms is None:
+            return transition.progress
+        step = 0 if count <= 1 else stagger_total // (count - 1)
+        return clamped_ratio(
+            t_ms - transition.start_ms - step * index, travel_total
+        )
+
+    def _line_progress() -> float:
+        # 整行同步（辉光浮现/消散）：无逐字错峰，全字共享同一时间线。
+        if t_ms is None or transition.start_ms is None:
+            return transition.progress
+        return clamped_ratio(t_ms - transition.start_ms, travel_total)
+
+    if transition.effect == "tracking_in":
+        p = _stagger_progress()
+        q = p * p * (3.0 - 2.0 * p)
+        spread = font_px * TRACKING_SPREAD_EM
+        dx = _center_norm(index, count) * spread * (1.0 - q)
+        opacity = min(p * 4.0, 1.0)
+        return opacity, dx, 0.0, 0.0, 1.0, 1.0, 0.0
+
+    if transition.effect == "wave_in":
+        p = _stagger_progress()
+        q = p * p * (3.0 - 2.0 * p)
+        amplitude = max(font_px * WAVE_AMPLITUDE_EM, WAVE_AMPLITUDE_MIN_PX)
+        dy = amplitude * (1.0 - q)
+        opacity = min(p * 4.0, 1.0)
+        return opacity, 0.0, dy, 0.0, 1.0, 1.0, 0.0
+
+    if transition.effect == "scatter_out":
+        p = _stagger_progress()
+        theta = fx_unit_hash(index, 1) * 2.0 * math.pi
+        speed = 0.55 + 0.45 * fx_unit_hash(index, 2)
+        spin = (fx_unit_hash(index, 3) - 0.5) * 720.0
+        travel = font_px * SCATTER_TRAVEL_EM * speed * (1.0 - (1.0 - p) ** 2)
+        scale = 1.0 - SCATTER_SHRINK * p
+        fade = (1.0 - p) * (1.0 - p)
+        return (
+            fade,
+            math.cos(theta) * travel,
+            math.sin(theta) * travel,
+            spin * p,
+            scale,
+            scale,
+            0.0,
+        )
+
+    if transition.effect == "stretch_in":
+        # 逐字拉伸入场（光条凝聚，Aegisub \fscx+\blur+\t 同款语言）：字符自
+        # 3.2× 横向拉伸的弥散光条横向收束成清晰字形，光晕同步熄灭。
+        p = _stagger_progress()
+        q = p * p * (3.0 - 2.0 * p)
+        return min(p * 4.0, 1.0), 0.0, 0.0, 0.0, 1.0 + 2.2 * (1.0 - q), 1.0, 0.0
+
+    if transition.effect == "stretch_out":
+        # 逐字拉伸退场：反向——清晰字形横向拉伸成光条弥散，同时淡出。
+        p = _stagger_progress()
+        q = p * p * (3.0 - 2.0 * p)
+        return 1.0 - q, 0.0, 0.0, 0.0, 1.0 + 2.2 * q, 1.0, 0.0
+
+    if transition.effect == "glow_in":
+        # 辉光浮现（整行同步，无逐字错峰）：细密横向回声自两侧收拢
+        # 熄灭，文字快速显形；本体轻度横向拉伸后回弹（1.6×→1.0）。
+        p = _line_progress()
+        q = p * p * (3.0 - 2.0 * p)
+        return min(p * 3.0, 1.0), 0.0, 0.0, 0.0, 1.0 + 0.6 * (1.0 - q), 1.0, 0.0
+
+    if transition.effect == "glow_out":
+        # 辉光消散（整行同步）：回声外扩变疏，文字本体轻度拉伸后随
+        # 光痕一同淡出（1.0→1.6×）。
+        p = _line_progress()
+        q = p * p * (3.0 - 2.0 * p)
+        return 1.0 - q, 0.0, 0.0, 0.0, 1.0 + 0.6 * q, 1.0, 0.0
+
+    if transition.effect in {"sparkle", "ripple", "note"}:
+        # 粒子类出入场动画的本体：文字逐字显形（入场 4 倍速透明度，
+        # 粒子拼接同款编排），退场逐字淡出；粒子由 planner 叠加。
+        p = _stagger_progress()
+        if transition.phase == "exit":
+            q = p * p * (3.0 - 2.0 * p)
+            return 1.0 - q, 0.0, 0.0, 0.0, 1.0, 1.0, 0.0
+        return min(p * 4.0, 1.0), 0.0, 0.0, 0.0, 1.0, 1.0, 0.0
+
+    if transition.effect == "assemble_in":
+        # 粒子拼接：粒子飞入期间字形尚未成形，抵达后字形才显形。
+        p = _stagger_progress()
+        appear = p * p * (3.0 - 2.0 * p)
+        return max(0.0, (appear - 0.45) / 0.55), 0.0, 0.0, 0.0, 1.0, 1.0, 0.0
+
+    if transition.effect == "dissolve_out":
+        # 粒子消散：字形先行散去，粒子随后飞离。
+        p = _stagger_progress()
+        vanish = min(max(p / 0.55, 0.0), 1.0)
+        return 1.0 - vanish * vanish * (3.0 - 2.0 * vanish), 0.0, 0.0, 0.0, 1.0, 1.0, 0.0
+
+    # converge_out：向行中心收拢淡出；优先用调用方传入的真实中心坐标
+    #（painter 的字形布局 / C++ 的 CachedChar），缺省回退 index 归一化估算。
+    p = _stagger_progress()
+    eased = p * p * (3.0 - 2.0 * p)
+    if char_center_x is not None and line_center_x is not None:
+        dx = (line_center_x - char_center_x) * eased
+    else:
+        half_width_em = count * 0.5
+        dx = -_center_norm(index, count) * font_px * half_width_em * eased
+    scale = 1.0 - CONVERGE_SHRINK * eased
+    return 1.0 - eased, dx, 0.0, 0.0, scale, scale, 0.0
+
+
+def transition_char_glow(
+    transition: LineCharTransition,
+    index: int,
+    count: int,
+    *,
+    t_ms: int | None,
+    configured_ms: int = 0,
+) -> tuple[float, float, bool] | None:
+    """拉伸/辉光类特效在 ``t_ms`` 的辉光状态 ``(强度, 间距/半径系数, 回声)``。
+
+    非辉光类特效返回 ``None``。编排总时长由 ``configured_ms``（时长旋钮，
+    0 = 默认 600ms）缩放；逐字拉伸沿用错峰编排与常规描边表，辉光浮现/
+    消散整行同步并用横向回声。与 C++ d2d_fx.cpp 的 glow 字段镜像。
+    """
+    effect = transition.effect
+    if (
+        effect
+        not in ENTRY_GLOW_ANIMS | EXIT_GLOW_ANIMS
+        | ENTRY_STRETCH_ANIMS | EXIT_STRETCH_ANIMS
+    ):
+        return None
+    if t_ms is None or transition.start_ms is None:
+        return None
+    # 旧语义：时长 0 = 无辉光（调用方仅在门内到达）；量程钳制。
+    total = min(max(int(configured_ms), 120), 3000)
+    travel_total = max(total - total * 7 // 12, 40)
+    step = 0 if count <= 1 else (total * 7 // 12) // (count - 1)
+    if effect in ENTRY_GLOW_ANIMS | EXIT_GLOW_ANIMS:
+        step = 0
+    p = clamped_ratio(
+        t_ms - transition.start_ms - step * index, travel_total
+    )
+    q = p * p * (3.0 - 2.0 * p)
+    if effect == "stretch_in":
+        return (1.0 - q) ** 1.5, 1.2 - 0.5 * q, False
+    if effect == "stretch_out":
+        return math.sin(math.pi * q) * 0.9, 0.7 + 0.8 * q, False
+    if effect == "glow_in":
+        # 整行辉光（横向回声）：出生即满强度，收束时间距略收紧后熄灭。
+        return (1.0 - q) * math.sqrt(1.0 - q), 1.0 - 0.25 * q, True
+    # 辉光消散：正弦包络，回声间距随消散外扩变疏。
+    return math.sin(math.pi * q), 1.0 + 0.9 * q, True
 
 
 def utopia_intro_delay_step(count: int) -> int:

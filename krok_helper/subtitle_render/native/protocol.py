@@ -14,7 +14,8 @@ import json
 from pathlib import Path
 from typing import Any
 
-from krok_helper.subtitle_render.engine.layout.line.style import line_start_ms
+from krok_helper.subtitle_render.engine.layout.line.style import line_end_ms, line_start_ms
+from krok_helper.subtitle_render.engine.render.effects.particles import plan_line_bursts
 from krok_helper.subtitle_render.engine.layout.plan.model import TrackLayoutPlan
 from krok_helper.subtitle_render.engine.layout.page.plan import section_head_line_indices
 from krok_helper.subtitle_render.domain.timing import (
@@ -154,11 +155,18 @@ def gpu_unsupported_features(
     """Return project features that require whole-frame Painter fallback."""
     reasons: list[str] = []
     sources = [track, *(extra_tracks or ())]
+    # 2026-09 新增逐字几何特效（tracking_in / wave_in / scatter_out /
+    # converge_out）与粒子/描边闪光由 GPU sidecar 原生渲染（C++ 镜像实现），
+    # 不触发整帧 Painter 回退。
     if style.entry_anim not in {
-        "none", "fade", "slide_in", "rise", "char_fade", "char_drip", "spin_flip", "utopia"
+        "none", "fade", "slide_in", "rise", "char_fade", "char_drip", "spin_flip", "utopia",
+        "tracking_in", "wave_in", "stretch_in", "glow_in", "assemble_in",
+        "sparkle", "ripple", "note",
     } or (
         style.exit_anim not in {
-            "none", "fade", "slide_out", "rise", "char_fade", "char_drip", "spin_flip", "utopia"
+            "none", "fade", "slide_out", "rise", "char_fade", "char_drip", "spin_flip", "utopia",
+            "scatter_out", "converge_out", "stretch_out", "glow_out", "dissolve_out",
+            "sparkle", "ripple", "note",
         }
     ):
         reasons.append("line_animation")
@@ -188,6 +196,11 @@ def gpu_unsupported_features(
                     "char_drip",
                     "spin_flip",
                     "utopia",
+                    "tracking_in",
+                    "wave_in",
+                    "glow_in",
+                    "stretch_in",
+                    "assemble_in",
                 } or line.animation_override.exit_anim not in {
                     "none",
                     "fade",
@@ -197,6 +210,14 @@ def gpu_unsupported_features(
                     "char_drip",
                     "spin_flip",
                     "utopia",
+                    "scatter_out",
+                    "converge_out",
+                    "glow_out",
+                    "stretch_out",
+                    "dissolve_out",
+                    "sparkle",
+                    "ripple",
+                    "note",
                 }:
                     reasons.append("line_animation_override")
     return tuple(dict.fromkeys(reasons))
@@ -291,6 +312,8 @@ def timing_line_to_ir(
     karaoke_anim: str = "none",
     scanline: bool = False,
     zoom_pulse: bool = False,
+    stroke_flash: bool = False,
+    fx_bursts: list[dict[str, object]] | None = None,
     layout_offset_x: float = 0.0,
     layout_offset_y: float = 0.0,
     layout_offset_windows: list[tuple[int, int, float, float]] | None = None,
@@ -348,6 +371,11 @@ def timing_line_to_ir(
         # 整字放大开关：本体 karaoke_anim 仍发降维后的 "utopia"，C++ 侧靠这个
         # 行级标记切换缩放曲线与原点（字符中心）。
         "zoom_pulse": bool(zoom_pulse),
+        # 唱字描边闪光开关（与唱字档位正交）；参数走 style IR。
+        "stroke_flash": bool(stroke_flash),
+        # 装饰粒子（入场/退场/唱字）：Python 侧规划（与 painter 同一
+        # plan_line_bursts），锚点坐标由 native 按自身布局解析。
+        "fx_bursts": list(fx_bursts or []),
         "layout_offset_x": float(layout_offset_x),
         "layout_offset_y": float(layout_offset_y),
         "layout_offset_windows": [
@@ -544,6 +572,27 @@ def track_to_ir(
                     effective_karaoke_zoom_pulse(animation_styles[index])
                     if style is not None
                     else False
+                ),
+                stroke_flash=(
+                    bool(animation_styles[index].karaoke_stroke_flash)
+                    if style is not None
+                    else False
+                ),
+                fx_bursts=(
+                    plan_line_bursts(
+                        animation_styles[index],
+                        index,
+                        schedule[index][1] if index in schedule else None,
+                        schedule[index][2] if index in schedule else None,
+                        (
+                            line_end_ms(render_lines[index])
+                            if style is not None
+                            else None
+                        ),
+                        resolved_intervals[index],
+                    )
+                    if style is not None
+                    else []
                 ),
                 layout_offset_windows=list(page_offset_windows.get(index, ())),
                 glyph_table=glyph_table,

@@ -540,6 +540,19 @@ krok::subtitle::native::RenderScene gpuSceneFromConfig(const RenderConfig &confi
                 || animation == QStringLiteral("char_drip")
                 || animation == QStringLiteral("spin_flip")
                 || animation == QStringLiteral("utopia")
+                || animation == QStringLiteral("tracking_in")
+                || animation == QStringLiteral("wave_in")
+                || animation == QStringLiteral("scatter_out")
+                || animation == QStringLiteral("converge_out")
+                || animation == QStringLiteral("glow_in")
+                || animation == QStringLiteral("glow_out")
+                || animation == QStringLiteral("stretch_in")
+                || animation == QStringLiteral("stretch_out")
+                || animation == QStringLiteral("assemble_in")
+                || animation == QStringLiteral("dissolve_out")
+                || animation == QStringLiteral("sparkle")
+                || animation == QStringLiteral("ripple")
+                || animation == QStringLiteral("note")
             );
         };
         line.entryAnimation = verticalCharacterAnimation(sourceLine.entryAnimation)
@@ -562,6 +575,28 @@ krok::subtitle::native::RenderScene gpuSceneFromConfig(const RenderConfig &confi
         // 基础 Wipe 语义，不叠加高亮带。整字放大同为横排逐字变换，竖排一并关闭。
         line.scanlineEnabled = !config.vertical && sourceLine.scanlineEnabled;
         line.zoomPulseEnabled = !config.vertical && sourceLine.zoomPulseEnabled;
+        // 唱字描边闪光 / 装饰粒子同为横排专属（与 Painter 同口径）。
+        line.strokeFlashEnabled = !config.vertical && sourceLine.strokeFlashEnabled;
+        if (!config.vertical) {
+            line.bursts.reserve(sourceLine.fxBursts.size());
+            for (const TimingLine::FxBurst &source : sourceLine.fxBursts) {
+                krok::subtitle::native::ParticleBurst burst;
+                burst.kind = source.kind.toStdString();
+                burst.anchor = source.anchor.toStdString();
+                burst.charIndex = source.charIndex;
+                burst.startMs = source.startMs + sourceTimingOffset;
+                burst.endMs = source.endMs + sourceTimingOffset;
+                burst.count = source.count;
+                burst.seed = source.seed;
+                burst.sizePx = static_cast<float>(source.sizePx * scale);
+                burst.travelPx = static_cast<float>(source.travelPx * scale);
+                burst.front = source.front;
+                burst.reverse = source.reverse;
+                burst.sweep = source.sweep;
+                burst.color = gpuColor(source.color, QStringLiteral("#FFFFFF"));
+                line.bursts.push_back(std::move(burst));
+            }
+        }
         if (sourceLine.displayStartMs.has_value()
             && sourceLine.displayEndMs.has_value()) {
             line.displayWindows.push_back(krok::subtitle::native::DisplayWindow{
@@ -924,6 +959,18 @@ krok::subtitle::native::RenderScene gpuSceneFromConfig(const RenderConfig &confi
             scene.lineStyles.push_back(std::move(rowStyle));
             scene.lines.push_back(std::move(titleLine));
         }
+    }
+    // 装饰粒子 sprite 轮廓表（值语义投影；QHash 无序，按键排序保证相等性
+    // 比较与缓存签名稳定）。
+    if (!config.fxSprites.isEmpty()) {
+        scene.fxSprites.reserve(static_cast<std::size_t>(config.fxSprites.size()));
+        for (auto it = config.fxSprites.constBegin(); it != config.fxSprites.constEnd(); ++it) {
+            scene.fxSprites.emplace_back(it.key().toStdString(), it.value());
+        }
+        std::sort(
+            scene.fxSprites.begin(), scene.fxSprites.end(),
+            [](const auto &a, const auto &b) { return a.first < b.first; }
+        );
     }
     return scene;
 }
