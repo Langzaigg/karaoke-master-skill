@@ -110,9 +110,10 @@ def test_timing_overlap_builder_groups_switch_and_fallback_capsule(qapp) -> None
     assert "「出场动画保护时间」" in tooltip
     # tooltip 指明编辑对象为当前选中的字幕轴。
     assert "编辑对象为顶部选中的字幕轴" in tooltip
-    # 胶囊（WorkspaceSwitcher）默认旧方案，两档与模型枚举一致，初始可用。
+    # 胶囊（WorkspaceSwitcher）初始即默认方案（吃掉走字时长），两档与模型
+    # 枚举一致，初始可用。
     capsule = host._overlap_fallback_switch
-    assert capsule.currentRouteKey() == "lift"
+    assert capsule.currentRouteKey() == "displace"
     assert set(capsule._items) == {"lift", "displace"}
     assert capsule.isEnabled() is True
     capsule_tooltip = capsule.toolTip()
@@ -139,11 +140,11 @@ def test_timing_overlap_builder_routes_switch_and_fallback_mode(qapp) -> None:
     builder.make_section()
     builder.make_overlap_section()
 
-    host._overlap_fallback_switch._items["displace"].click()
+    host._overlap_fallback_switch._items["lift"].click()
     host._allow_inter_page_line_overlap_check.setChecked(True)
 
     assert host.updates == [
-        {"overlap_fallback_mode": "displace"},
+        {"overlap_fallback_mode": "lift"},
         {"allow_inter_page_line_overlap": True},
     ]
     # 勾选「启用行间重叠」后不存在跨页避让，收尾策略胶囊随之失效。

@@ -2795,7 +2795,7 @@ def test_build_render_ir_carries_shared_cross_page_layout_offset_windows():
     )
 
     ir_lines = build_render_ir(
-        track, Style(), width=1280, height=720, fps=60
+        track, Style(overlap_fallback_mode="lift"), width=1280, height=720, fps=60
     )["track"]["lines"]
 
     assert ir_lines[0]["layout_offset_y"] == ir_lines[1]["layout_offset_y"] == 0
@@ -3301,6 +3301,7 @@ def test_build_render_ir_preserves_animation_windows_around_stable_compression()
         entry_lead_ms=900,
         exit_anim="slide_out",
         exit_fade_ms=800,
+        overlap_fallback_mode="lift",
     )
 
     lines = build_render_ir(track, style, width=640, height=360, fps=60)["track"][

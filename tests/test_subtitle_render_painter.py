@@ -11219,7 +11219,7 @@ def test_per_track_overlap_overrides_reach_page_placement(qapp):
             ),
         )
 
-    style = Style()
+    style = Style(overlap_fallback_mode="lift")
     main = overlap_placement_track()
     following = overlap_placement_track()
     allow_overlap = overlap_placement_track()
@@ -11263,7 +11263,7 @@ def test_cross_page_placement_is_rigid_and_does_not_rewrite_time(qapp):
             [TrackSection([TrackPage(2, "default"), TrackPage(2, "default")])]
         ),
     )
-    normal = Style()
+    normal = Style(overlap_fallback_mode="lift")
     legacy = replace(normal, allow_inter_page_line_overlap=True)
     animated = replace(
         normal,
@@ -11336,7 +11336,10 @@ def test_protect_time_residual_overlap_still_triggers_page_placement(qapp):
             [TrackSection([TrackPage(2, "default"), TrackPage(2, "default")])]
         ),
     )
-    style = replace(Style(), line_protect_ms=500)
+    style = replace(
+        Style(overlap_fallback_mode="lift"),
+        line_protect_ms=500,
+    )
 
     windows = subtitle_painter.display_windows_for_style(track, style)
     # 前置：② 确实留下了下行走字的跨页显示窗重叠（第 4 句早于第 2 句消失）。
@@ -11812,7 +11815,10 @@ def test_row_shrink_keeps_uncollided_lower_row_exit(qapp):
         ),
     )
     style = _shrinking_page_style(
-        sync_entry=False, sync_ending=False, sync_each_page=False
+        sync_entry=False,
+        sync_ending=False,
+        sync_each_page=False,
+        overlap_fallback_mode="lift",
     )
 
     windows = subtitle_painter.display_windows_for_style(
@@ -12460,7 +12466,7 @@ def test_secondary_displacement_pairs_only_report_new_cascade(monkeypatch):
     )
 
     assert subtitle_painter._secondary_displacement_squeeze_pairs(
-        1920, 1080, TimingTrack(lines=lines), Style(), display
+        1920, 1080, TimingTrack(lines=lines), Style(overlap_fallback_mode="lift"), display
     ) == ((0, 1),)
 
     # If the bands already collided at their authored positions, the primary
@@ -12472,7 +12478,7 @@ def test_secondary_displacement_pairs_only_report_new_cascade(monkeypatch):
         0.0,
     )
     assert subtitle_painter._secondary_displacement_squeeze_pairs(
-        1920, 1080, TimingTrack(lines=lines), Style(), display
+        1920, 1080, TimingTrack(lines=lines), Style(overlap_fallback_mode="lift"), display
     ) == ()
 
 
@@ -12541,7 +12547,7 @@ def test_animation_only_cross_page_overlap_does_not_move_incoming_page(qapp):
         ),
     )
     style = replace(
-        Style(),
+        Style(overlap_fallback_mode="lift"),
         line_lead_in_ms=1_800,
         line_tail_ms=1_000,
         line_lane_gap_ms=300,
@@ -12765,7 +12771,7 @@ def test_changed_page_layout_does_not_make_entry_animation_collidable(qapp):
 
     style = ensure_page_layout_defaults(
         replace(
-            Style(),
+            Style(overlap_fallback_mode="lift"),
             line_lead_in_ms=1_800,
             line_tail_ms=1_000,
             line_lane_gap_ms=300,
@@ -13383,7 +13389,12 @@ def test_page_sync_entry_never_shortens_previous_page_exit(qapp):
         1920,
         1080,
         track,
-        replace(base_style, sync_entry=True, sync_each_page=True),
+        replace(
+            base_style,
+            sync_entry=True,
+            sync_each_page=True,
+            overlap_fallback_mode="lift",
+        ),
     )
     assert offsets == {index: (0.0, 0.0) for index in range(4)}
 
@@ -13939,8 +13950,8 @@ def _tight_handoff_display_lines(lines):
     ]
 
 
-def test_animation_guard_lift_default_leaves_residual_conflict(qapp):
-    """默认「抬升避让」：压缩到走字两侧底线后残余冲突留给空间避让。"""
+def test_animation_guard_lift_leaves_residual_conflict(qapp):
+    """「抬升避让」（旧行为）：压缩到走字两侧底线后残余冲突留给空间避让。"""
 
     lines = _tight_handoff_lines()
     track = TimingTrack(lines=lines)
@@ -13948,6 +13959,7 @@ def test_animation_guard_lift_default_leaves_residual_conflict(qapp):
         Style(font_family="Arial", font_family_latin="Arial"),
         entry_anim="none",
         exit_anim="none",
+        overlap_fallback_mode="lift",
     )
 
     guarded = _apply_painter_animation_time_guard(
@@ -13966,7 +13978,7 @@ def test_animation_guard_lift_default_leaves_residual_conflict(qapp):
 
 
 def test_animation_guard_displace_eats_previous_sweep_for_residual(qapp):
-    """「吃掉走字时长」：残余由下一句顶掉，退场动画恰好在下一句上屏结束。"""
+    """「吃掉走字时长」（默认）：残余由下一句顶掉，退场动画恰好在下一句上屏结束。"""
 
     lines = _tight_handoff_lines()
     track = TimingTrack(lines=lines)
@@ -14146,13 +14158,13 @@ def test_display_schedule_clamps_takeover_but_windows_keep_manual_end():
 
 
 def test_overlap_fallback_mode_roundtrip_and_validation():
-    style = Style(overlap_fallback_mode="displace")
+    style = Style(overlap_fallback_mode="lift")
 
     restored = style_from_dict(style_to_dict(style))
 
-    assert restored.overlap_fallback_mode == "displace"
-    assert Style().overlap_fallback_mode == "lift"
-    assert style_from_dict({"overlap_fallback_mode": "bogus"}).overlap_fallback_mode == "lift"
+    assert restored.overlap_fallback_mode == "lift"
+    assert Style().overlap_fallback_mode == "displace"
+    assert style_from_dict({"overlap_fallback_mode": "bogus"}).overlap_fallback_mode == "displace"
 
 
 def test_force_bottom_waits_for_automatic_time_avoidance(qapp, monkeypatch):
@@ -14264,6 +14276,7 @@ def test_manual_cross_lane_extension_does_not_raise_incoming_page(
         entry_lead_ms=250,
         exit_anim="char_fade",
         exit_fade_ms=250,
+        overlap_fallback_mode="lift",
     )
 
     display = subtitle_painter.display_lines_for_style(

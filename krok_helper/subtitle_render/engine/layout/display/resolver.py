@@ -809,7 +809,7 @@ def apply_animation_time_guard(
                 #   动画按窗口加速播放、不截断。手工覆盖的一侧两个阶段
                 #   容量均为 0。
                 # 两侧都到底后的残余冲突按 ``overlap_fallback_mode`` 处理：
-                #   lift（默认）留给空间避让；displace 由下一句顶掉上一句。
+                #   lift 留给空间避让；displace（默认）由下一句顶掉上一句。
                 exit_stop = max(
                     exit_floors[previous_index],
                     exit_durations[previous_index]

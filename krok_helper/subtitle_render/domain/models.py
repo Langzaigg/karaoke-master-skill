@@ -146,7 +146,8 @@ OverlapFallbackMode = Literal["lift", "displace"]
 """跨页冲突在时间压缩到底仍无法消除时的处理方式。
 
 ``lift`` = 抬升避让（移动后进入的整页字幕，旧行为）；``displace`` = 由将要
-演唱的下一句直接顶掉还在走字的上一句（截短其显示窗，允许吃掉走字时长）。
+演唱的下一句直接顶掉还在走字的上一句（截短其显示窗，允许吃掉走字时长，
+默认值）。
 """
 LitStyle = Literal["volume", "circle", "square", "rounded", "image"]
 VolumeAppearanceMode = Literal["custom", "auto"]
@@ -799,15 +800,15 @@ class Style:
     也不随分页布局预设切换。
     """
 
-    overlap_fallback_mode: OverlapFallbackMode = "lift"
+    overlap_fallback_mode: OverlapFallbackMode = "displace"
     """「重叠设置」：时间压缩消耗完两侧底线仍无法消除跨页冲突时的策略。
 
-    ``lift`` 抬升后进入的整页字幕（空间避让）；``displace`` 由将要演唱的
-    下一句直接顶掉还在走字的上一句（允许吃掉走字时长）。被顶掉的句子不是
-    瞬间消失：按其「出场动画保护时间」播放退场动画，动画恰好在下一句上屏
-    时刻结束（走字显示到退场开始为止，退场动画充当交接过渡）。手工拖过
-    消失时间的句子不参与自动压缩，时间数据保持原值，顶掉只发生在渲染层。
-    该模式不做页面平移避让（抬升画面）；ForceBottom 行位上移照常保留。
+    ``displace``（默认）由将要演唱的下一句直接顶掉还在走字的上一句（允许
+    吃掉走字时长）。被顶掉的句子不是瞬间消失：按其「出场动画保护时间」播放
+    退场动画，动画恰好在下一句上屏时刻结束（走字显示到退场开始为止，退场
+    动画充当交接过渡）。手工拖过消失时间的句子不参与自动压缩，时间数据保持
+    原值，顶掉只发生在渲染层。该模式不做页面平移避让（抬升画面）；ForceBottom
+    行位上移照常保留。``lift`` 为旧行为：抬升后进入的整页字幕（空间避让）。
     仅在 ``allow_inter_page_line_overlap`` 关闭时参与解算。主轨取本字段
     全局值，副字幕源可在时间卡片按轴覆盖（``TRACK_TIMING_FIELDS``）。
     """

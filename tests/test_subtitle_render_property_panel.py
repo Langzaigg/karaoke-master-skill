@@ -507,9 +507,9 @@ def test_property_panel_uses_fluent_checkboxes(qapp):
     assert "允许出入场动画重叠" in overlap_tip
     assert "不因页面排版变化而扩大碰撞时间" in overlap_tip
     assert "开启后不执行跨页时间压缩或空间避让" in overlap_tip
-    # 「重叠设置」卡片：残余冲突胶囊（WorkspaceSwitcher）默认旧方案且可用，
-    # 抬升细节在胶囊 tooltip。
-    assert panel._overlap_fallback_switch.currentRouteKey() == "lift"
+    # 「重叠设置」卡片：残余冲突胶囊（WorkspaceSwitcher）默认吃掉走字时长
+    # 且可用，两档细节在胶囊 tooltip。
+    assert panel._overlap_fallback_switch.currentRouteKey() == "displace"
     assert panel._overlap_fallback_switch.isEnabled() is True
     fallback_tip = panel._overlap_fallback_switch.toolTip()
     assert "抬升避让" in fallback_tip
@@ -608,13 +608,13 @@ def test_timing_scope_routes_overlap_settings_per_track(qapp):
     global_emitted: list[Style] = []
     panel.styleChanged.connect(global_emitted.append)
 
-    # 跟随副轴（默认）：重叠控件只读、显示主轴值（关 + lift）。
+    # 跟随副轴（默认）：重叠控件只读、显示主轴值（关 + 吃掉走字时长）。
     panel.set_timing_context(["主字幕", "和声"], [True, True], [None, None])
     panel._timing_scope_combo.setCurrentIndex(1)
     assert not panel._allow_inter_page_line_overlap_check.isEnabled()
     assert not panel._overlap_fallback_switch.isEnabled()
     assert panel._allow_inter_page_line_overlap_check.isChecked() is False
-    assert panel._overlap_fallback_switch.currentRouteKey() == "lift"
+    assert panel._overlap_fallback_switch.currentRouteKey() == "displace"
 
     # 非跟随副轴带覆盖值：开关回显轴值，勾选重叠后胶囊联动禁用。
     panel.set_timing_context(
@@ -628,7 +628,7 @@ def test_timing_scope_routes_overlap_settings_per_track(qapp):
     assert not panel._overlap_fallback_switch.isEnabled()
     # 全局样式保持主轴值：副轴覆盖不泄漏回全局。
     assert panel._style.allow_inter_page_line_overlap is False
-    assert panel._style.overlap_fallback_mode == "lift"
+    assert panel._style.overlap_fallback_mode == "displace"
 
     # 副轴编辑改道 trackTimingChanged；取消重叠后胶囊恢复可用。
     panel._allow_inter_page_line_overlap_check.setChecked(False)
@@ -641,7 +641,7 @@ def test_timing_scope_routes_overlap_settings_per_track(qapp):
     # 切回主轴：显示全局值，编辑走全局样式流。
     panel._timing_scope_combo.setCurrentIndex(0)
     assert panel._allow_inter_page_line_overlap_check.isChecked() is False
-    assert panel._overlap_fallback_switch.currentRouteKey() == "lift"
+    assert panel._overlap_fallback_switch.currentRouteKey() == "displace"
     panel._allow_inter_page_line_overlap_check.setChecked(True)
     assert panel._style.allow_inter_page_line_overlap is True
     assert len(global_emitted) == 1
