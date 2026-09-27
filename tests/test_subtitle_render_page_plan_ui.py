@@ -174,14 +174,19 @@ def test_loading_settings_card_is_isolated_and_fully_described(qapp):
     assert dialog._blank_enabled.text() == "空行识别为分段"
     assert dialog._blank_page_enabled.text() == "空行识别为分页"
     assert dialog._blank_page_enabled.toolTip()
+    # 新默认：空行识别为分页开、分段关；两个方向都验证互斥联动。
+    assert dialog._blank_page_enabled.isChecked()
+    assert not dialog._blank_enabled.isChecked()
+    dialog._blank_enabled.setChecked(True)
     assert not dialog._blank_page_enabled.isChecked()
+    dialog._blank_enabled.setChecked(False)
+    assert not dialog._blank_enabled.isChecked()
     dialog._blank_page_enabled.setChecked(True)
     assert dialog._blank_page_enabled.isChecked()
     assert not dialog._blank_enabled.isChecked()
-    dialog._blank_page_enabled.setChecked(False)
-    assert not dialog._blank_page_enabled.isChecked()
-    assert not dialog._blank_enabled.isChecked()
     dialog._blank_enabled.setChecked(True)
+    assert not dialog._blank_page_enabled.isChecked()
+    dialog._blank_page_enabled.setChecked(True)
     assert "也使用 3 行默认布局" in dialog._rows_spin.toolTip()
     assert dialog._actual_rows_layout.text() == "根据实际行数分配布局"
     assert dialog._actual_rows_layout.toolTip()

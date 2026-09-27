@@ -970,9 +970,9 @@ class SubtitleRenderWindow(QWidget):
         self._auto_chorus_role = ""
         self._auto_chorus_begin_chars = DEFAULT_CHORUS_BEGIN_CHARS
         self._auto_chorus_end_chars = DEFAULT_CHORUS_END_CHARS
-        self._auto_chorus_overwrite = True
+        self._auto_chorus_overwrite = False
         #: 新歌词源落位后是否按上面的记忆参数自动识别括号和声（不弹窗）。
-        self._auto_chorus_auto_apply = False
+        self._auto_chorus_auto_apply = True
         self._screen_settings: ScreenSettings = ScreenSettings()
         self._selected_scheme_key = "global"
         self._layout_assignment_preference: Optional[dict[str, object]] = None

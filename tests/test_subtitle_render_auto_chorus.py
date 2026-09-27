@@ -336,8 +336,8 @@ def test_apply_timing_track_skips_auto_chorus_while_loading_project(
 # ── 偏好读写（auto_chorus.auto_apply） ───────────────────────
 
 
-def test_runtime_preferences_default_auto_apply_to_disabled() -> None:
-    """出厂语义：自动应用默认关（导入静默改角色是进阶行为）。"""
+def test_runtime_preferences_factory_defaults() -> None:
+    """出厂语义：自动应用默认开，覆盖已有角色默认关（保留打轴歌手分配）。"""
     from krok_helper.subtitle_render.settings.preferences import (
         load_app_runtime_preferences,
     )
@@ -346,8 +346,8 @@ def test_runtime_preferences_default_auto_apply_to_disabled() -> None:
         {}, chorus_begin_default="（(", chorus_end_default="）)"
     )
 
-    assert loaded.auto_chorus_auto_apply is False
-    assert loaded.auto_chorus_overwrite is True
+    assert loaded.auto_chorus_auto_apply is True
+    assert loaded.auto_chorus_overwrite is False
 
 
 @pytest.mark.parametrize(
@@ -355,7 +355,7 @@ def test_runtime_preferences_default_auto_apply_to_disabled() -> None:
     [(False, False), (True, True), ("", False), ("yes", True)],
 )
 def test_runtime_preferences_parse_auto_apply(raw, expected) -> None:
-    """bool 强转（代码库同惯例）；只有键缺失才回落出厂默认 False。"""
+    """bool 强转（代码库同惯例）；出厂默认只在键缺失时回落。"""
     from krok_helper.subtitle_render.settings.preferences import (
         load_app_runtime_preferences,
     )
@@ -410,16 +410,16 @@ def test_auto_chorus_dialog_auto_apply_checkbox_roundtrips(window) -> None:
         dialog.deleteLater()
 
 
-def test_auto_chorus_dialog_defaults_are_overwrite_on_auto_apply_off(window) -> None:
-    """出厂默认：覆盖打开（整段替换，对齐 N3），自动应用关闭。"""
+def test_auto_chorus_dialog_factory_defaults(window) -> None:
+    """出厂默认：覆盖关闭（保留打轴歌手分配），自动应用打开。"""
     from krok_helper.subtitle_render.frontend.dialogs.auto_chorus_dialog import (
         AutoChorusDialog,
     )
 
     dialog = AutoChorusDialog(role_options=["主唱"], parent=window)
     try:
-        assert dialog.overwrite() is True
-        assert dialog.auto_apply() is False
+        assert dialog.overwrite() is False
+        assert dialog.auto_apply() is True
     finally:
         dialog.close()
         dialog.deleteLater()

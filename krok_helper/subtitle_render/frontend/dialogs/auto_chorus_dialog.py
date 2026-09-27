@@ -46,8 +46,8 @@ class AutoChorusDialog(ModelessDialog):
         selected_role: str = "",
         begin_chars: str = DEFAULT_CHORUS_BEGIN_CHARS,
         end_chars: str = DEFAULT_CHORUS_END_CHARS,
-        overwrite: bool = True,
-        auto_apply: bool = False,
+        overwrite: bool = False,
+        auto_apply: bool = True,
         parent: Optional[QWidget] = None,
     ) -> None:
         super().__init__(parent.window() if parent is not None else None)
@@ -109,8 +109,8 @@ class AutoChorusDialog(ModelessDialog):
         self.overwrite_check = CheckBox("覆盖已经分配过角色的字符", self)
         self.overwrite_check.setChecked(bool(overwrite))
         self.overwrite_check.setToolTip(
-            "默认勾选：括号里的字符全部改成和声角色（与 N3 自动分色一致）。\n"
-            "取消勾选则只填还没有角色的字符，保留在歌词打轴里逐字点出来的"
+            "勾选后括号里的字符全部改成和声角色（与 N3 自动分色一致）。\n"
+            "默认不勾选：只填还没有角色的字符，保留在歌词打轴里逐字点出来的"
             "歌手分配。"
         )
         layout.addWidget(self.overwrite_check)
@@ -118,9 +118,9 @@ class AutoChorusDialog(ModelessDialog):
         self.auto_apply_check = CheckBox("加载歌词源时自动应用（使用本次设置，不弹窗）", self)
         self.auto_apply_check.setChecked(bool(auto_apply))
         self.auto_apply_check.setToolTip(
-            "默认不勾选。启用后，导入或新载入歌词源时按这里的设置自动识别"
-            "括号和声；打开 .yurika / .n3proj 工程不会自动执行。也可以在歌词列表"
-            "「加载字幕设置」里打开本对话框。"
+            "默认勾选：导入或新载入歌词源时按这里的设置自动识别括号和声；"
+            "打开 .yurika / .n3proj 工程不会自动执行。也可以在歌词列表"
+            "「加载字幕设置」里打开本对话框。取消勾选则导入时不自动识别。"
         )
         layout.addWidget(self.auto_apply_check)
 

@@ -215,8 +215,9 @@ class SubtitleLoadingSettings:
 
     time_gap_section_enabled: bool = True
     section_gap_ms: int = 3100
-    blank_line_section_enabled: bool = True
-    blank_line_page_enabled: bool = False
+    blank_line_section_enabled: bool = False
+    """空行默认只翻页、不切段（与「空行识别为分页」二选一，也可都不开）。"""
+    blank_line_page_enabled: bool = True
     rows_per_page: int = 2
     allocate_layout_by_actual_rows: bool = False
     apply_sug_export_compensation: bool = True

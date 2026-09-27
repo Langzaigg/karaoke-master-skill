@@ -716,7 +716,7 @@ def test_subtitle_loading_settings_round_trips_blank_line_page_flag() -> None:
     assert subtitle_loading_settings_from_dict(payload) == settings
 
     payload.pop("blank_line_page_enabled")
-    assert subtitle_loading_settings_from_dict(payload).blank_line_page_enabled is False
+    assert subtitle_loading_settings_from_dict(payload).blank_line_page_enabled is True
 
 
 def test_insert_section_at_page_head_splits_before_whole_page():
