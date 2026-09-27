@@ -68,6 +68,13 @@ APP_EXE_NAME = "Lin-K Lyrics.exe"
 # 并在更新后按同一个名字重启。删掉它等于让所有旧版用户断更。
 # 详见 docs/auto_update.md §8 发布不变量。
 LEGACY_APP_EXE_NAME = "Karaoke Studio.exe"
+# 旧名主程序副本随包分发的截止版本（含）。自其后第一个版本起（含 4 段第 4 位，
+# 如 4.3.0.1）发布包只含新名 ``Lin-K Lyrics.exe``：改名迁移机制自 4.2.8.9
+# （2026-09-14）起持续为最新版，活跃安装已收敛到新名会话；仍以旧名会话停留在
+# ≤4.2.8.8 的存量将无法自动更新，只能手动重下完整包——release body 头部的
+# 手动更新提示由 ``scripts/release.py`` 按同一截止版本追加。判定口径只有这一处，
+# ``build_windows.bat`` 的复制步骤也通过 ``SHIP_LEGACY_APP_EXE`` 查询它。
+LAST_LEGACY_APP_VERSION = (4, 3, 0)
 UPDATER_EXE_NAME = "Updater.exe"
 NATIVE_RENDERER_EXE_NAME = "krok_subtitle_renderer.exe"
 # 资产名刻意保持改名前的 "KaraokeStudio-" 前缀：存量 Updater 硬编码全量 zip 名，
@@ -94,11 +101,36 @@ INTERNAL_NON_RUNTIME_NAMES = {
     LOCAL_MANIFEST_FILENAME,
 }
 
+
+def read_app_version() -> str:
+    text = (ROOT / "krok_helper" / "config.py").read_text(encoding="utf-8")
+    m = re.search(r'APP_VERSION\s*=\s*"([^"]+)"', text)
+    if not m:
+        raise SystemExit("无法从 krok_helper/config.py 解析 APP_VERSION")
+    return m.group(1)
+
+
+def _version_tuple(version: str) -> tuple[int, ...]:
+    """KS 的四段版本比较语义：逐段比整数，``3.1.7.4`` 大于 ``3.1.7``。"""
+    return tuple(int(part) for part in version.split("."))
+
+
+def ship_legacy_app_exe(version: str | None = None) -> bool:
+    """旧名副本是否随该版本分发：仅截止版本及之前分发，之后一律停发。"""
+    if version is None:
+        version = read_app_version()
+    return _version_tuple(version) <= LAST_LEGACY_APP_VERSION
+
+
+#: 当前仓库版本（``krok_helper/config.py`` 的 ``APP_VERSION``）是否仍处迁移期。
+#: bump 过截止版本后自动翻转，APP_TARGETS / main() 护栏 / bat 复制步骤共用。
+SHIP_LEGACY_APP_EXE = ship_legacy_app_exe()
+
 APP_TARGETS = [
     APP_EXE_NAME,
     # 兼容副本必须在 targets 里：增量更新的 orphan cleanup 会删掉「本地 manifest 有、
     # 新 manifest 没有」的文件，漏了它旧客户端更新完就重启不起来。
-    LEGACY_APP_EXE_NAME,
+    *([LEGACY_APP_EXE_NAME] if SHIP_LEGACY_APP_EXE else []),
     UPDATER_EXE_NAME,
     NATIVE_RENDERER_EXE_NAME,
     "_internal/krok_helper",
@@ -116,14 +148,6 @@ FREEZE_EXCLUDES = {
     "altgraph",
     "pefile",
 }
-
-
-def read_app_version() -> str:
-    text = (ROOT / "krok_helper" / "config.py").read_text(encoding="utf-8")
-    m = re.search(r'APP_VERSION\s*=\s*"([^"]+)"', text)
-    if not m:
-        raise SystemExit("无法从 krok_helper/config.py 解析 APP_VERSION")
-    return m.group(1)
 
 
 # ───────────────────────── 哈希 ─────────────────────────
@@ -452,11 +476,18 @@ def main(argv: Optional[List[str]] = None) -> int:
     app_dir = dist_root / APP_DIR_NAME
     if not (app_dir / APP_EXE_NAME).exists():
         raise SystemExit(f"找不到 {app_dir / APP_EXE_NAME}，请先运行 build_windows.bat")
-    if not (app_dir / LEGACY_APP_EXE_NAME).exists():
+    if SHIP_LEGACY_APP_EXE and not (app_dir / LEGACY_APP_EXE_NAME).exists():
         # 缺了它，存量客户端的更新会整包失败（apply_update 找不到 --app-exe）。
         raise SystemExit(
             f"找不到兼容副本 {app_dir / LEGACY_APP_EXE_NAME}。"
             "build_windows.bat 必须在改名后复制一份旧名 EXE，否则旧版用户无法自动更新。"
+        )
+    if not SHIP_LEGACY_APP_EXE and (app_dir / LEGACY_APP_EXE_NAME).exists():
+        # 停发期全量 zip 打包整个 app 目录，旧名文件若混进来会与 manifest 口径分叉
+        # （增量用户会在下次更新时被 orphan cleanup 删掉它，全量安装用户却留着）。
+        raise SystemExit(
+            f"{app_dir / LEGACY_APP_EXE_NAME} 不应存在：本版本起停发旧名副本，"
+            "请确认 build_windows.bat 的版本闸判定与 dist 目录为干净重建。"
         )
     if not (app_dir / UPDATER_EXE_NAME).exists():
         raise SystemExit(f"找不到 {app_dir / UPDATER_EXE_NAME}")

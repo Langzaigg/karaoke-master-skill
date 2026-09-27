@@ -144,6 +144,45 @@ def _with_announcement_banner(body: str) -> str:
     return f"{ANNOUNCEMENT_BANNER}\n\n{text}"
 
 
+#: 旧名主程序副本（``Karaoke Studio.exe``）随包分发的截止版本（含），其后所有
+#: 版本只打 ``Lin-K Lyrics.exe``。与 ``scripts/build_parts.py`` 的
+#: ``LAST_LEGACY_APP_VERSION`` 同源，护栏测试保证两处一致。改这个名字必须连同
+#: build_parts 的版本闸一起改。
+LEGACY_APP_EXE_LAST_VERSION = "4.3.0"
+
+#: 旧版手动更新提示：改名前安装、长期未更新而错过迁移版（4.2.8.9+）的用户，
+#: 自动更新到无旧名包会失败（全量被拒）或更新后无法启动（增量删了旧名 EXE），
+#: 提示他们手动下载完整包。渲染口径与 ANNOUNCEMENT_BANNER 相同：HTML span 在
+#: 更新弹窗里是真红字，GitHub 网页降级为黑色粗体。
+MANUAL_UPDATE_NOTICE = (
+    '<span style="color:#d64545"><b>老版本用户请注意：若自动更新失败或更新后无法'
+    '启动，请手动下载下方完整包重新解压使用（新版安装包已不再包含旧主程序名 '
+    'Karaoke Studio.exe）。</b></span>'
+)
+
+
+def _needs_manual_update_notice(version: str) -> bool:
+    """首个无旧名副本的版本起（4 段语义，4.3.0.1 > 4.3.0），正文头部加手动更新提示。"""
+    cutoff = tuple(int(part) for part in LEGACY_APP_EXE_LAST_VERSION.split("."))
+    return tuple(int(part) for part in version.split(".")) > cutoff
+
+
+def _with_manual_update_notice(body: str) -> str:
+    """Insert the manual-update notice right below the standing banner.
+
+    与横幅一样在唯一出口生成（本地 ``notes`` 与 CI 的 release body 都经过这里），
+    重复调用不叠加。
+    """
+
+    if MANUAL_UPDATE_NOTICE in body:
+        return body
+    text = body.lstrip("\n")
+    if text.startswith(ANNOUNCEMENT_BANNER):
+        rest = text[len(ANNOUNCEMENT_BANNER) :].lstrip("\n")
+        return f"{ANNOUNCEMENT_BANNER}\n\n{MANUAL_UPDATE_NOTICE}\n\n{rest}"
+    return f"{MANUAL_UPDATE_NOTICE}\n\n{text}"
+
+
 def _extract_section(version: str) -> str:
     content = CHANGELOG.read_text(encoding="utf-8")
     match = re.search(
@@ -187,6 +226,8 @@ def cmd_prepare(version: str) -> int:
 def cmd_notes(version: str, output: Path | None = None) -> int:
     version = _check_version_format(version)
     notes = _with_announcement_banner(_extract_section(version))
+    if _needs_manual_update_notice(version):
+        notes = _with_manual_update_notice(notes)
     path = output or RELEASE_DIST / f"release-notes-v{version}.md"
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(notes, encoding="utf-8")
@@ -200,19 +241,47 @@ def cmd_notes(version: str, output: Path | None = None) -> int:
     return 0
 
 
+def cmd_check_notes(version: str, path: Path) -> int:
+    """校验 release body 与旧名停发口径一致，CI 发布前运行。
+
+    无旧名版本（> ``LEGACY_APP_EXE_LAST_VERSION``）的正文必须带手动更新提示，
+    仍在分发旧名副本的版本不得带（提示与包内容错位会误导用户）。用
+    ``MANUAL_UPDATE_NOTICE`` 原文匹配而非关键词，改提示措辞不需要同步改这里。
+    """
+    _check_version_format(version)
+    body = path.read_text(encoding="utf-8")
+    needs = _needs_manual_update_notice(version)
+    has = MANUAL_UPDATE_NOTICE in body
+    if needs != has:
+        raise SystemExit(
+            f"{path} 与停发口径不一致：v{version} "
+            f"{'必须携带' if needs else '不得携带'}手动更新提示"
+            "（docs/auto_update.md §8.1，判定与 scripts/build_parts.py 同源）。"
+        )
+    print(f"release body 提示校验通过：v{version} {'携带' if has else '不带'}手动更新提示")
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description=__doc__)
+    parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     subparsers = parser.add_subparsers(dest="command", required=True)
     prepare = subparsers.add_parser("prepare", help="同步版本号并创建 CHANGELOG 占位段")
     prepare.add_argument("version", help="目标版本号 X.Y.Z 或 X.Y.Z.N")
     notes = subparsers.add_parser("notes", help="从 CHANGELOG 生成中文 release notes")
     notes.add_argument("version", help="目标版本号 X.Y.Z 或 X.Y.Z.N")
     notes.add_argument("-o", "--output", type=Path, help="自定义输出文件")
+    check = subparsers.add_parser(
+        "check-notes", help="校验 release body 的手动更新提示与停发口径一致"
+    )
+    check.add_argument("version", help="目标版本号 X.Y.Z 或 X.Y.Z.N")
+    check.add_argument("file", type=Path, help="待校验的 release body 文件")
     args = parser.parse_args(argv)
     if args.command == "prepare":
         return cmd_prepare(args.version)
     if args.command == "notes":
         return cmd_notes(args.version, args.output)
+    if args.command == "check-notes":
+        return cmd_check_notes(args.version, args.file)
     return 1
 
 

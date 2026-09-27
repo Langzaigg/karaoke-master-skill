@@ -685,6 +685,78 @@ def test_full_update_removes_stale_backups_before_generic_apply(
     assert (app_dir / "krok_subtitle_renderer.exe").read_bytes() == b"new"
 
 
+def test_full_update_accepts_package_without_legacy_copy(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """4.3.1 起发布包不再携带旧名副本；4.3.0 起发出的 Updater 必须放行这种包。
+
+    放宽必须先于首个无旧名包发布（执行 4.3.0 → 4.3.1 全量回退的正是 4.3.0 的
+    Updater）。本地旧名副本不动——删除属于成功拉起后的启动挂钩，不在全量回写里。
+    """
+
+    app_dir = tmp_path / "app"
+    new_root = tmp_path / "new"
+    (app_dir / "_internal").mkdir(parents=True)
+    (app_dir / "Lin-K Lyrics.exe").write_bytes(b"old")
+    (app_dir / "Karaoke Studio.exe").write_bytes(b"old")
+    (new_root / "_internal").mkdir(parents=True)
+    (new_root / "Lin-K Lyrics.exe").write_bytes(b"new")
+    (new_root / "krok_subtitle_renderer.exe").write_bytes(b"new")
+
+    def generic_apply(app_dir, app_exe, _internal_name, new_root, _log):
+        workbench_updater.shutil.copy2(
+            str(new_root / app_exe), str(app_dir / app_exe)
+        )
+        return True, ""
+
+    monkeypatch.setattr(workbench_updater, "_original_apply_update", generic_apply)
+
+    ok, err = workbench_updater._apply_workbench_update(
+        app_dir,
+        "Lin-K Lyrics.exe",
+        "_internal",
+        new_root,
+        logging.getLogger("sug.updater"),
+    )
+
+    assert ok is True and err == ""
+    assert (app_dir / "Lin-K Lyrics.exe").read_bytes() == b"new"
+    assert (app_dir / "krok_subtitle_renderer.exe").read_bytes() == b"new"
+    # 本地旧名副本留给启动后的 _cleanup_legacy_main_exe 统一清理。
+    assert (app_dir / "Karaoke Studio.exe").read_bytes() == b"old"
+
+
+def test_full_update_rejects_legacy_session_when_package_lacks_legacy(
+    tmp_path: Path,
+) -> None:
+    """旧名会话（≤4.2.8.8 存量客户端传旧名 --app-exe）遇无旧名包：通用校验兜底拒绝。
+
+    这是 docs/auto_update.md §8.1 记录的已接受残余风险：安装不受损，但该用户
+    无法自动更新，只能手动重下完整包（release body 头部的手动更新提示）。
+    """
+
+    app_dir = tmp_path / "app"
+    new_root = tmp_path / "new"
+    (app_dir / "_internal").mkdir(parents=True)
+    (app_dir / "Karaoke Studio.exe").write_bytes(b"old")
+    (new_root / "_internal").mkdir(parents=True)
+    (new_root / "Lin-K Lyrics.exe").write_bytes(b"new")
+    (new_root / "krok_subtitle_renderer.exe").write_bytes(b"new")
+
+    ok, err = workbench_updater._apply_workbench_update(
+        app_dir,
+        "Karaoke Studio.exe",
+        "_internal",
+        new_root,
+        logging.getLogger("sug.updater"),
+    )
+
+    assert ok is False
+    assert "更新包中找不到 Karaoke Studio.exe" in err
+    # 安装不受影响。
+    assert (app_dir / "Karaoke Studio.exe").read_bytes() == b"old"
+
+
 def test_full_update_uses_neutral_rename_error_wording(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -918,12 +990,16 @@ def test_full_update_replaces_sidecar_and_dual_named_exes(
 
 @pytest.mark.parametrize(
     "missing_name",
-    ["Karaoke Studio.exe", "krok_subtitle_renderer.exe"],
+    # 旧名 Karaoke Studio.exe 不在列：4.3.1 起发布包不再携带它，新名会话必须
+    # 放行（test_full_update_accepts_package_without_legacy_copy）；旧名会话遇
+    # 无旧名包由 test_full_update_rejects_legacy_session_when_package_lacks_legacy
+    # 覆盖。
+    ["Lin-K Lyrics.exe", "krok_subtitle_renderer.exe"],
 )
 def test_full_update_rejects_package_missing_required_root_exe(
     tmp_path: Path, missing_name: str
 ) -> None:
-    """缺必备根目录 EXE（主程序双名之一 / GPU sidecar）的全量包按损坏包处理。
+    """缺必备根目录 EXE（新名主程序 / GPU sidecar）的全量包按损坏包处理。
 
     sidecar 与主程序名同样走前置校验：缺失即拒绝，不允许「更新成功却保留
     旧 sidecar」——那正是 2026-09 混合安装事故的形态。

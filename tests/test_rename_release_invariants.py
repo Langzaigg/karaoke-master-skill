@@ -27,19 +27,58 @@ def test_release_asset_names_keep_the_pre_rename_prefix() -> None:
     }
 
 
-def test_legacy_named_exe_ships_alongside_the_new_one() -> None:
-    """兼容副本必须随包分发，且必须在 app part 的 targets 里。
+def test_legacy_exe_shipping_cuts_off_after_4_3_0() -> None:
+    """旧名副本只随 ≤4.3.0 的版本分发，其后（含 4 段 4.3.0.1）仅打 Lin-K Lyrics.exe。
 
-    - 少了文件本身：旧 Updater 的 ``apply_update`` 找不到 ``--app-exe``，整包失败。
-    - 少了 targets 条目：增量更新的 orphan cleanup 会把用户安装目录里的旧名 EXE
-      删掉，更新虽然装上了但 ``launch_main_app`` 再也拉不起来。
+    迁移机制（固定传新名 + 启动后清理）自 4.2.8.9（2026-09-14）起持续为最新版，
+    活跃安装已收敛到新名会话；仍以旧名会话停留在 ≤4.2.8.8 的存量会断更，只能
+    手动重下——release body 头部的手动更新提示（scripts/release.py）就是给这批
+    人看的。详见 docs/auto_update.md §8.1。
     """
 
     assert LEGACY_APP_EXE_NAME == "Karaoke Studio.exe"
     assert DEFAULT_APP_EXE_NAME != LEGACY_APP_EXE_NAME
     assert build_parts.LEGACY_APP_EXE_NAME == LEGACY_APP_EXE_NAME
+    assert build_parts.LAST_LEGACY_APP_VERSION == (4, 3, 0)
+    for version in ("4.2.8.8", "4.2.8.12", "4.2.9", "4.2.9.1", "4.3.0"):
+        assert build_parts.ship_legacy_app_exe(version) is True, version
+    for version in ("4.3.0.1", "4.3.1", "4.4.0"):
+        assert build_parts.ship_legacy_app_exe(version) is False, version
+
+
+def test_app_targets_follow_the_legacy_gate_for_the_current_version() -> None:
+    """当前仓库版本打出的 APP_TARGETS 必须与版本闸一致，bump 过 4.3.0 后自动翻转。
+
+    迁移期还要求旧名副本进 app part targets：增量更新的 orphan cleanup 会删掉
+    「本地 manifest 有、新 manifest 没有」的文件，漏了它旧客户端更新完就重启
+    不起来；停发后则必须不在（manifest targets 有而本地缺文件会让 part 校验失败）。
+    """
+
     assert build_parts.APP_EXE_NAME in build_parts.APP_TARGETS
-    assert build_parts.LEGACY_APP_EXE_NAME in build_parts.APP_TARGETS
+    assert build_parts.SHIP_LEGACY_APP_EXE == build_parts.ship_legacy_app_exe()
+    assert (build_parts.LEGACY_APP_EXE_NAME in build_parts.APP_TARGETS) is (
+        build_parts.SHIP_LEGACY_APP_EXE
+    )
+
+
+def test_release_notes_cutoff_matches_the_packaging_gate() -> None:
+    """手动更新提示的截止版本必须与打包停发闸一致，改一处漏一处会让提示与包内容错位。"""
+
+    import importlib.util
+    from pathlib import Path
+
+    script = Path(__file__).resolve().parents[1] / "scripts" / "release.py"
+    spec = importlib.util.spec_from_file_location("ks_release_cutoff", script)
+    module = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    spec.loader.exec_module(module)
+
+    cutoff = tuple(int(part) for part in module.LEGACY_APP_EXE_LAST_VERSION.split("."))
+    assert cutoff == build_parts.LAST_LEGACY_APP_VERSION
+    # 提示从首个无旧名版本起生效，与打包闸互补（4.3.0 仍带旧名副本 → 不提示）。
+    assert module._needs_manual_update_notice("4.3.0") is False
+    assert module._needs_manual_update_notice("4.3.0.1") is True
+    assert module._needs_manual_update_notice("4.3.1") is True
 
 
 def test_onedir_layout_names_are_unchanged() -> None:

@@ -7,8 +7,10 @@ cd /d "%~dp0\.."
 set "PYTHON_BIN=python"
 set "BUILD_NAME=LinKLyrics"
 set "APP_NAME=Lin-K Lyrics"
-rem 改名前的 EXE 名。打包末尾会复制一份同内容副本，供存量客户端的 Updater
-rem 校验更新包并在更新后重启（见 docs/auto_update.md §8）。不要删。
+rem 改名前的 EXE 名。仅在 build_parts 判定仍处迁移期（APP_VERSION <= 4.3.0）时
+rem 复制一份同内容副本，供存量客户端的 Updater 校验更新包并在更新后重启
+rem （见 docs/auto_update.md §8）。停发判定与 APP_TARGETS / SystemExit 护栏
+rem 同源（scripts/build_parts.py 的 SHIP_LEGACY_APP_EXE），两端口径不会分叉。
 set "LEGACY_APP_NAME=Karaoke Studio"
 set "DIST_PATH=dist\windows"
 set "WORK_PATH=build\pyinstaller-windows"
@@ -293,6 +295,12 @@ if errorlevel 1 (
     exit /b 1
 )
 
+rem 与 build_parts 的停发判定同一事实源：迁移期（<= 4.3.0）复制旧名副本，
+rem 之后只打 Lin-K Lyrics.exe。探测失败（非零退出码）按「停发」处理——
+rem 若判定与实际不符，后续 build_parts 的 SystemExit 护栏会让构建响亮失败。
+%PYTHON_BIN% -c "import sys; import scripts.build_parts as bp; sys.exit(0 if bp.SHIP_LEGACY_APP_EXE else 1)"
+if errorlevel 1 goto SkipLegacyCopy
+
 echo Creating legacy-name EXE copy for existing installs...
 powershell -NoProfile -ExecutionPolicy Bypass -Command ^
     "$targetDir = Resolve-Path '%APP_DIST%';" ^
@@ -307,6 +315,12 @@ if errorlevel 1 (
     if not defined IS_CI pause
     exit /b 1
 )
+goto AfterLegacyCopy
+
+:SkipLegacyCopy
+echo Skipping legacy-name EXE copy - versions after 4.3.0 ship Lin-K Lyrics.exe only.
+
+:AfterLegacyCopy
 
 echo Copying Updater.exe...
 powershell -NoProfile -ExecutionPolicy Bypass -Command ^

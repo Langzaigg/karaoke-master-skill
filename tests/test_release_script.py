@@ -115,3 +115,72 @@ def test_adding_the_banner_twice_does_not_duplicate_it(release_mod):
 
     assert once == twice
     assert twice.count("1108437280") == 1
+
+
+def _prepare_filled_section(release_mod, version: str) -> None:
+    release_mod.cmd_prepare(version)
+    content = release_mod.CHANGELOG.read_text(encoding="utf-8").replace(
+        "*（请用一句中文概述本次发布的用户可见变化。）*",
+        "停发旧名主程序副本。",
+    )
+    release_mod.CHANGELOG.write_text(content, encoding="utf-8")
+
+
+def test_notes_after_the_cutoff_add_the_manual_update_notice(release_mod, tmp_path):
+    """首个无旧名副本版本起（含 4.3.0.1），正文头部在横幅下方插入手动更新提示。"""
+
+    _prepare_filled_section(release_mod, "4.3.1")
+    out = tmp_path / "notes.md"
+    assert release_mod.cmd_notes("4.3.1", out) == 0
+    lines = out.read_text(encoding="utf-8").splitlines()
+
+    assert lines[0] == release_mod.ANNOUNCEMENT_BANNER
+    assert lines[2] == release_mod.MANUAL_UPDATE_NOTICE
+    assert "手动下载" in lines[2]
+    assert "停发旧名主程序副本" in "\n".join(lines)
+
+
+def test_notes_at_and_before_the_cutoff_keep_the_body_unchanged(release_mod, tmp_path):
+    """4.3.0 仍随包携带旧名副本，正文不得出现手动更新提示（提示与包内容错位会误导用户）。"""
+
+    _prepare_filled_section(release_mod, "4.3.0")
+    out = tmp_path / "notes.md"
+    assert release_mod.cmd_notes("4.3.0", out) == 0
+    text = out.read_text(encoding="utf-8")
+
+    assert release_mod.MANUAL_UPDATE_NOTICE not in text
+    assert text.startswith(release_mod.ANNOUNCEMENT_BANNER)
+
+
+def test_adding_the_manual_update_notice_twice_does_not_duplicate_it(release_mod):
+    bannered = release_mod._with_announcement_banner("## 更新\n- 条目\n")
+    once = release_mod._with_manual_update_notice(bannered)
+    twice = release_mod._with_manual_update_notice(once)
+
+    assert once == twice
+    assert once.count("手动下载") == 1
+    # 提示必须位于横幅之下、正文之上。
+    assert once.index("1108437280") < once.index("手动下载") < once.index("## 更新")
+
+
+def test_check_notes_enforces_the_notice_policy(release_mod, tmp_path):
+    """CI 发布前的护栏：无旧名版本的 body 必须带提示，双名版本不得带。"""
+
+    with_notice = (
+        f"{release_mod.ANNOUNCEMENT_BANNER}\n\n"
+        f"{release_mod.MANUAL_UPDATE_NOTICE}\n\n## 更新\n- 条目\n"
+    )
+    without_notice = f"{release_mod.ANNOUNCEMENT_BANNER}\n\n## 更新\n- 条目\n"
+    noticed = tmp_path / "noticed.md"
+    plain = tmp_path / "plain.md"
+    noticed.write_text(with_notice, encoding="utf-8")
+    plain.write_text(without_notice, encoding="utf-8")
+
+    # 4.3.1：无旧名副本，必须带提示。
+    assert release_mod.cmd_check_notes("4.3.1", noticed) == 0
+    with pytest.raises(SystemExit):
+        release_mod.cmd_check_notes("4.3.1", plain)
+    # 4.3.0：仍双名分发，不得带提示（提示与包内容错位会误导用户）。
+    assert release_mod.cmd_check_notes("4.3.0", plain) == 0
+    with pytest.raises(SystemExit):
+        release_mod.cmd_check_notes("4.3.0", noticed)
