@@ -12,6 +12,7 @@ from krok_helper.subtitle_render.engine.style.style_semantics import style_for_r
 from krok_helper.subtitle_render.engine.text.metrics import (
     build_font,
     build_latin_font,
+    char_glyph_ink_box,
     char_layout_width,
     char_path_left_offset,
     is_n3_latin_text,
@@ -38,6 +39,13 @@ class GlyphLayout:
     path_offset_x: float = 0.0
     brush_style: Style | None = None
     vector_glyph: object | None = None
+    ink_box: tuple[float, float, float, float] | None = None
+    """文本墨迹盒 ``(left, top, right, bottom)``，相对 (0, 0) 基线。
+
+    与 ``QPainterPath.addText(...).boundingRect()`` 同口径（控制点多边
+    形），构建时按字体签名进程级缓存一次，行级墨迹包络（碰撞带、走字
+    分段 ink）据此平移合成，免逐字符重付 path 构造。矢量导唱符与空墨迹
+    字符为 ``None``——消费者按各自契约回落。"""
 
 
 @dataclass(frozen=True)
@@ -278,6 +286,15 @@ def build_text_layout(
                     glyph_style,
                 ),
                 char.vector_glyph,
+                None
+                if is_guide
+                else char_glyph_ink_box(
+                    char.text,
+                    glyph_font,
+                    metrics,
+                    latin_metrics,
+                    font_for,
+                ),
             )
         )
         advance = width + spacing_after
@@ -317,6 +334,7 @@ def build_text_layout(
                 spacing_after,
                 path_offset_x,
                 vector_glyph,
+                ink_box,
             ) = item
             cursor -= width
             glyphs.append(
@@ -332,6 +350,7 @@ def build_text_layout(
                     path_offset_x=path_offset_x,
                     brush_style=brush_style,
                     vector_glyph=vector_glyph,
+                    ink_box=ink_box,
                 )
             )
             advance = width + spacing_after
@@ -355,6 +374,7 @@ def build_text_layout(
                 spacing_after,
                 path_offset_x,
                 vector_glyph,
+                ink_box,
             ) = item
             if char_gaps is not None and index < len(char_gaps):
                 cursor += char_gaps[index]
@@ -371,6 +391,7 @@ def build_text_layout(
                     path_offset_x=path_offset_x,
                     brush_style=brush_style,
                     vector_glyph=vector_glyph,
+                    ink_box=ink_box,
                 )
             )
             advance = width + spacing_after

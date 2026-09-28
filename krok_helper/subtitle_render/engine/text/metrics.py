@@ -248,12 +248,14 @@ def _char_glyph_metrics(
     metrics: QFontMetrics,
     latin_metrics: QFontMetrics,
     font_for: FontSelector | None,
-) -> tuple[int, bool, float, float, int, int]:
+) -> tuple[int, bool, float, float, float, float, int, int]:
     """Font-determined glyph geometry: advance, ink box and bearings.
 
     只依赖 ``(text, glyph_font)``，与描边宽/字间距/空格宽等纯算术参数
     无关——底层按字体签名缓存后，调描边宽、改字间距不再重付
-    ``QPainterPath.addText`` 的矢量测量。
+    ``QPainterPath.addText`` 的矢量测量。``bounds_*`` 是相对 (0, 0)
+    基线的完整墨迹盒（QPainterPath.boundingRect 的控制点多边形口径），
+    行级墨迹包络据此平移合成，跨 layout_pass 复用。
     """
 
     key = (text, _font_signature(glyph_font))
@@ -268,6 +270,8 @@ def _char_glyph_metrics(
     bounds_empty = bounds.isEmpty()
     bounds_width = float(bounds.width())
     bounds_left = float(bounds.left())
+    bounds_top = float(bounds.top())
+    bounds_bottom = float(bounds.bottom())
     if bounds_empty:
         left_bearing = right_bearing = 0
     else:
@@ -285,11 +289,57 @@ def _char_glyph_metrics(
         except (TypeError, ValueError):
             left_bearing = int(bounds.left())
             right_bearing = int(advance - bounds.right())
-    entry = (advance, bounds_empty, bounds_width, bounds_left, left_bearing, right_bearing)
+    entry = (
+        advance,
+        bounds_empty,
+        bounds_width,
+        bounds_left,
+        bounds_top,
+        bounds_bottom,
+        left_bearing,
+        right_bearing,
+    )
     if len(_CHAR_GLYPH_CACHE) >= _CHAR_GLYPH_CACHE_MAX:
         _CHAR_GLYPH_CACHE.clear()
     _CHAR_GLYPH_CACHE[key] = entry
     return entry
+
+
+def char_glyph_ink_box(
+    text: str,
+    glyph_font: QFont,
+    metrics: QFontMetrics,
+    latin_metrics: QFontMetrics,
+    font_for: FontSelector | None,
+) -> tuple[float, float, float, float] | None:
+    """Return ``(left, top, right, bottom)`` of the glyph ink box.
+
+    相对 (0, 0) 基线、与 ``QPainterPath.addText(...).boundingRect()`` 同
+    口径（控制点多边形）。空串 / 空白 / 空墨迹字符返回 ``None``——调用
+    方按各自的空白契约处理。供行级墨迹包络按 ``glyph.left +
+    path_offset_x`` 平移合成，避免逐字符重付 path 构造。
+    """
+
+    if not text or text.isspace():
+        return None
+    (
+        _advance,
+        bounds_empty,
+        bounds_width,
+        bounds_left,
+        bounds_top,
+        bounds_bottom,
+        _left_bearing,
+        _right_bearing,
+    ) = _char_glyph_metrics(text, glyph_font, metrics, latin_metrics, font_for)
+    if bounds_empty:
+        return None
+    return (
+        bounds_left,
+        bounds_top,
+        bounds_left + bounds_width,
+        bounds_bottom,
+    )
 
 
 def truncate_div(numerator: int, denominator: int) -> int:
@@ -363,6 +413,8 @@ def _char_layout_metrics(
         bounds_empty,
         bounds_width,
         bounds_left,
+        _bounds_top,
+        _bounds_bottom,
         left_bearing,
         right_bearing,
     ) = _char_glyph_metrics(text, glyph_font, metrics, latin_metrics, font_for)
@@ -477,6 +529,7 @@ __all__ = [
     "build_font",
     "build_latin_font",
     "char_advance",
+    "char_glyph_ink_box",
     "char_ink_width",
     "char_layout_width",
     "char_path_left_offset",

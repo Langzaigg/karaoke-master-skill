@@ -552,16 +552,31 @@ def role_char_ink_ranges_by_index(
             content_right = content_left + max(int(content_width), 1)
             ranges[glyph.index] = (content_left, max(content_right, content_left))
             continue
+        if symbol is not None and not guide_symbol_is_bitmap(symbol):
+            # 矢量导唱符：墨迹是缩放后的符号 path，量少直接构造。
+            bounds = glyph_path(glyph, 0).boundingRect()
+            if bounds.isEmpty():
+                ranges[glyph.index] = (left, left)
+            else:
+                ranges[glyph.index] = (
+                    int(math.floor(bounds.left())),
+                    int(math.ceil(bounds.right())),
+                )
+            continue
         if not text or text.isspace():
             ranges[glyph.index] = (left, left)
             continue
-        bounds = glyph_path(glyph, 0).boundingRect()
-        if bounds.isEmpty():
+        # 文本墨迹盒按字体签名进程级缓存（GlyphLayout.ink_box），平移合成
+        # 与 glyph_path(...).boundingRect() 逐位同值，免逐字符 path 构造。
+        ink_box = glyph.ink_box
+        if ink_box is None:
             ranges[glyph.index] = (left, left)
         else:
+            box_left = glyph.left + glyph.path_offset_x + ink_box[0]
+            box_right = glyph.left + glyph.path_offset_x + ink_box[2]
             ranges[glyph.index] = (
-                int(math.floor(bounds.left())),
-                int(math.ceil(bounds.right())),
+                int(math.floor(box_left)),
+                int(math.ceil(box_right)),
             )
     return ranges
 
@@ -630,7 +645,16 @@ def glyph_ink_bounds(
                 - int(symbol.bitmap_margin_bottom_px)
             )
             top = bottom - float(max(int(content_height), 1))
+        elif glyph.ink_box is not None:
+            # 文本墨迹盒（字体签名进程级缓存）平移合成，免逐字符 path。
+            base_x = glyph.left + glyph.path_offset_x
+            left = base_x + glyph.ink_box[0]
+            right = base_x + glyph.ink_box[2]
+            top = baseline_y + glyph.ink_box[1]
+            bottom = baseline_y + glyph.ink_box[3]
         else:
+            if glyph.vector_glyph is None:
+                continue
             bounds = glyph_path(glyph, baseline_y).boundingRect()
             if bounds.isEmpty():
                 continue

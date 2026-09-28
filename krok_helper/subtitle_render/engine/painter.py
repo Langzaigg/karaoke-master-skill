@@ -1728,20 +1728,46 @@ def _display_line_horizontal_ink_rect(
 def _line_main_text_ink_rect(
     layout: _LineLayout,
 ) -> tuple[int, int, int, int] | None:
-    """Union of main-text glyph paths, before every painted decoration."""
+    """Union of main-text glyph paths, before every painted decoration.
 
-    bounds: list[QRectF] = []
+    文本字符按 ``GlyphLayout.ink_box``（字体签名进程级缓存）平移合成，
+    矢量导唱符仍走 path——合并 path 的 boundingRect 本就是各子 path
+    控制点包围盒的并集，逐字符合成与之逐位同值。
+    """
+
+    ink_left = ink_top = ink_right = ink_bottom = None
     for run in _text_glyph_runs(layout.text_layout, layout.has_inline_styles):
-        rect = _glyph_run_path(run, layout.baseline_y).boundingRect()
-        if not rect.isEmpty():
-            bounds.append(rect)
-    if not bounds:
+        for glyph in run:
+            ink_box = glyph.ink_box
+            if ink_box is None:
+                # 空墨迹文本与原 isEmpty 分支一致跳过；矢量导唱符量少走
+                # path（_text_glyph_runs 已滤除 bitmap guide，这里只会是
+                # vector 符号）。
+                if glyph.vector_glyph is None:
+                    continue
+                rect = _glyph_path(glyph, layout.baseline_y).boundingRect()
+                if rect.isEmpty():
+                    continue
+                left, top = float(rect.left()), float(rect.top())
+                right, bottom = float(rect.right()), float(rect.bottom())
+            else:
+                base_x = glyph.left + glyph.path_offset_x
+                baseline_y = layout.baseline_y
+                left = base_x + ink_box[0]
+                top = baseline_y + ink_box[1]
+                right = base_x + ink_box[2]
+                bottom = baseline_y + ink_box[3]
+            ink_left = left if ink_left is None else min(ink_left, left)
+            ink_top = top if ink_top is None else min(ink_top, top)
+            ink_right = right if ink_right is None else max(ink_right, right)
+            ink_bottom = bottom if ink_bottom is None else max(ink_bottom, bottom)
+    if ink_left is None:
         return None
     return (
-        int(math.floor(min(rect.left() for rect in bounds))),
-        int(math.floor(min(rect.top() for rect in bounds))),
-        int(math.ceil(max(rect.right() for rect in bounds))),
-        int(math.ceil(max(rect.bottom() for rect in bounds))),
+        int(math.floor(ink_left)),
+        int(math.floor(ink_top)),
+        int(math.ceil(ink_right)),
+        int(math.ceil(ink_bottom)),
     )
 
 

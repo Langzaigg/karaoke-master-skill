@@ -11107,6 +11107,53 @@ def test_whitespace_glyphs_do_not_inflate_line_metrics(qapp, monkeypatch):
     assert all_blank.ascent > 0
 
 
+def test_glyph_ink_box_synthesis_matches_direct_path(qapp):
+    """GlyphLayout.ink_box 平移合成必须与 glyph_path().boundingRect() 同值。
+
+    行级墨迹包络（碰撞带 / 走字分段 ink / 渐变带）已改读缓存的
+    ``ink_box`` 合成；本测试锁死合成口径与逐字符 path 直测逐位一致，
+    防止字体或 Qt 升级后两种口径悄悄分叉。
+    """
+
+    text = "あAh琿1！♪ｱ"  # 假名 / 拉丁 / 汉字 / 数字 / 标点 / 半角
+    style = Style()
+    line = TimingLine(
+        chars=[TimingChar(text=ch, start_ms=1000 + i * 500) for i, ch in enumerate(text)],
+        end_ms=9000,
+    )
+    layout = subtitle_painter._build_text_layout(
+        line, style, x0=0, baseline_y=0, inline_styles=False
+    )
+    assert layout.glyphs, "布局应产出 glyph"
+
+    from PyQt6.QtGui import QPainterPath
+
+    for glyph in layout.glyphs:
+        direct = subtitle_painter._glyph_path(glyph, 0).boundingRect()
+        ink_box = glyph.ink_box
+        if glyph.vector_glyph is not None:
+            continue  # 导唱符走 path，合成不覆盖
+        if ink_box is None:
+            assert direct.isEmpty() or not glyph.text or glyph.text.isspace()
+            continue
+        assert not direct.isEmpty(), f"直测非空但 ink_box 存在: {glyph.text!r}"
+        assert int(math.floor(direct.left())) == int(
+            math.floor(glyph.left + glyph.path_offset_x + ink_box[0])
+        )
+        assert int(math.ceil(direct.right())) == int(
+            math.ceil(glyph.left + glyph.path_offset_x + ink_box[2])
+        )
+        assert math.isclose(direct.top(), ink_box[1], abs_tol=1e-6)
+        assert math.isclose(direct.bottom(), ink_box[3], abs_tol=1e-6)
+        # 独立复核：与裸 addText 的相对包围盒同口径。
+        bare = QPainterPath()
+        bare.addText(0.0, 0.0, glyph.font, glyph.text)
+        bare_rect = bare.boundingRect()
+        assert math.isclose(bare_rect.left(), ink_box[0], abs_tol=1e-6)
+        assert math.isclose(bare_rect.top(), ink_box[1], abs_tol=1e-6)
+        assert math.isclose(bare_rect.bottom(), ink_box[3], abs_tol=1e-6)
+
+
 def test_tall_opted_out_glyph_does_not_raise_shared_ruby_baseline(qapp):
     line = TimingLine(
         chars=[
