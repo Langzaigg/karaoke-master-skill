@@ -230,6 +230,10 @@ def load_n3proj(path: str | Path) -> N3ImportResult:
     # ---------------------------------------------------------------- 样式
     changes: dict[str, Any] = {
         "layout_semantics": "n3_1074",
+        # 强制顶底是 N3 的固有行位行为（逆向文档：单行页在 Bottom 模式下按
+        # 相邻页重叠强制占最下行/上移），不是用户开关——产品默认已改为关闭，
+        # N3 导入必须显式固定开启，否则渲染偏离 N3 10.74。
+        "force_top_bottom_n3": True,
         "font_reference_height": font_reference_height,
         "layout_reference_height": layout_reference_height,
     }

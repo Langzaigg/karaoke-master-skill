@@ -651,7 +651,7 @@ def test_painter_schedule_and_native_ir_share_authoritative_page_plan():
     from krok_helper.subtitle_render.native.protocol import track_to_ir
 
     app = QApplication.instance() or QApplication([])
-    style = Style()
+    style = Style(force_top_bottom_n3=True)
     track = _track(3)
     track.page_plan = TrackPagePlan(
         [

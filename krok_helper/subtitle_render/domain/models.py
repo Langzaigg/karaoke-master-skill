@@ -967,10 +967,11 @@ class Style:
     中心位置对齐（逐行判断，N3 Single）；``equal_margins`` = 左右余白对齐
     （整页判断，N3 Multi，N3 默认）。"""
 
-    force_top_bottom_n3: bool = True
-    """单行底部对齐页的 N3「强制顶底」行位机制（默认开）：先把孤行强制到
+    force_top_bottom_n3: bool = False
+    """单行底部对齐页的 N3「强制顶底」行位机制（默认关）：开启时先把孤行强制到
     最下行，与上一页同位行冲突时再上移一行；关闭时孤行直接显示在天然
-    行位（T1），不做任何强制/上移。"""
+    行位（T1），不做任何强制/上移。N3 导入（``n3_1074``）固定开启以对齐
+    N3 的固有行为（见逆向文档「单行页在 Bottom 模式」一节）。"""
 
     layouts: list["LyricsLayout"] = field(default_factory=default_page_layouts)
     """额外的命名布局定义（N3 ``LyricsLayouts``）。``Style`` 自身的布局字段是

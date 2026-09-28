@@ -13075,6 +13075,7 @@ def test_force_bottom_requires_measured_spatial_conflict(qapp):
         font_family_latin="Arial",
         font_size_px=48,
         line_alignments=["right", "right"],
+        force_top_bottom_n3=True,
         layouts=[
             LyricsLayout(
                 name="左",
@@ -13124,6 +13125,7 @@ def test_force_bottom_lane_lift_is_reported_by_diagnostics(qapp):
         font_size_px=48,
         line_y_position="bottom",
         line_alignments=["right", "right"],
+        force_top_bottom_n3=True,
     )
 
     display = subtitle_painter.display_lines_for_style(
