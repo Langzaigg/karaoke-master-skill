@@ -144,11 +144,11 @@ def _with_announcement_banner(body: str) -> str:
     return f"{ANNOUNCEMENT_BANNER}\n\n{text}"
 
 
-#: 旧名主程序副本（``Karaoke Studio.exe``）随包分发的截止版本（含），其后所有
-#: 版本只打 ``Lin-K Lyrics.exe``。与 ``scripts/build_parts.py`` 的
-#: ``LAST_LEGACY_APP_VERSION`` 同源，护栏测试保证两处一致。改这个名字必须连同
-#: build_parts 的版本闸一起改。
-LEGACY_APP_EXE_LAST_VERSION = "4.3.0"
+#: 第一个不再随包分发旧名主程序副本（``Karaoke Studio.exe``）的版本；4.3.x 整条
+#: 线仍双名分发，自该版本起只打 ``Lin-K Lyrics.exe``。与 ``scripts/build_parts.py``
+#: 的 ``FIRST_LEGACY_FREE_VERSION`` 同源，护栏测试保证两处一致。改这个名字必须
+#: 连同 build_parts 的版本闸一起改。
+LEGACY_FREE_SINCE_VERSION = "4.4.0"
 
 #: 旧版手动更新提示：改名前安装、长期未更新而错过迁移版（4.2.8.9+）的用户，
 #: 自动更新到无旧名包会失败（全量被拒）或更新后无法启动（增量删了旧名 EXE），
@@ -162,9 +162,9 @@ MANUAL_UPDATE_NOTICE = (
 
 
 def _needs_manual_update_notice(version: str) -> bool:
-    """首个无旧名副本的版本起（4 段语义，4.3.0.1 > 4.3.0），正文头部加手动更新提示。"""
-    cutoff = tuple(int(part) for part in LEGACY_APP_EXE_LAST_VERSION.split("."))
-    return tuple(int(part) for part in version.split(".")) > cutoff
+    """首个无旧名副本的版本（含）起加手动更新提示；四段语义，4.3.1 不触发、4.4.0 触发。"""
+    since = tuple(int(part) for part in LEGACY_FREE_SINCE_VERSION.split("."))
+    return tuple(int(part) for part in version.split(".")) >= since
 
 
 def _with_manual_update_notice(body: str) -> str:
@@ -244,7 +244,7 @@ def cmd_notes(version: str, output: Path | None = None) -> int:
 def cmd_check_notes(version: str, path: Path) -> int:
     """校验 release body 与旧名停发口径一致，CI 发布前运行。
 
-    无旧名版本（> ``LEGACY_APP_EXE_LAST_VERSION``）的正文必须带手动更新提示，
+    无旧名版本（自 ``LEGACY_FREE_SINCE_VERSION`` 起，含）的正文必须带手动更新提示，
     仍在分发旧名副本的版本不得带（提示与包内容错位会误导用户）。用
     ``MANUAL_UPDATE_NOTICE`` 原文匹配而非关键词，改提示措辞不需要同步改这里。
     """

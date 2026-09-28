@@ -68,13 +68,13 @@ APP_EXE_NAME = "Lin-K Lyrics.exe"
 # 并在更新后按同一个名字重启。删掉它等于让所有旧版用户断更。
 # 详见 docs/auto_update.md §8 发布不变量。
 LEGACY_APP_EXE_NAME = "Karaoke Studio.exe"
-# 旧名主程序副本随包分发的截止版本（含）。自其后第一个版本起（含 4 段第 4 位，
-# 如 4.3.0.1）发布包只含新名 ``Lin-K Lyrics.exe``：改名迁移机制自 4.2.8.9
-# （2026-09-14）起持续为最新版，活跃安装已收敛到新名会话；仍以旧名会话停留在
-# ≤4.2.8.8 的存量将无法自动更新，只能手动重下完整包——release body 头部的
-# 手动更新提示由 ``scripts/release.py`` 按同一截止版本追加。判定口径只有这一处，
-# ``build_windows.bat`` 的复制步骤也通过 ``SHIP_LEGACY_APP_EXE`` 查询它。
-LAST_LEGACY_APP_VERSION = (4, 3, 0)
+# 第一个不再随包分发旧名主程序副本的版本：4.3.x 整条线（含 4.3.0.1 这类四段
+# 补丁版）仍双名分发，自 4.4.0 起发布包只含新名 ``Lin-K Lyrics.exe``。改名迁移
+# 机制自 4.2.8.9（2026-09-14）起持续为最新版，活跃安装已收敛到新名会话；仍以
+# 旧名会话停留在 ≤4.2.8.8 的存量将无法自动更新，只能手动重下完整包——release
+# body 头部的手动更新提示由 ``scripts/release.py`` 按同一版本追加。判定口径只有
+# 这一处，``build_windows.bat`` 的复制步骤也通过 ``SHIP_LEGACY_APP_EXE`` 查询它。
+FIRST_LEGACY_FREE_VERSION = (4, 4, 0)
 UPDATER_EXE_NAME = "Updater.exe"
 NATIVE_RENDERER_EXE_NAME = "krok_subtitle_renderer.exe"
 # 资产名刻意保持改名前的 "KaraokeStudio-" 前缀：存量 Updater 硬编码全量 zip 名，
@@ -116,14 +116,15 @@ def _version_tuple(version: str) -> tuple[int, ...]:
 
 
 def ship_legacy_app_exe(version: str | None = None) -> bool:
-    """旧名副本是否随该版本分发：仅截止版本及之前分发，之后一律停发。"""
+    """旧名副本是否随该版本分发：仅首个无旧名版本（4.4.0）之前分发，其后一律停发。"""
     if version is None:
         version = read_app_version()
-    return _version_tuple(version) <= LAST_LEGACY_APP_VERSION
+    return _version_tuple(version) < FIRST_LEGACY_FREE_VERSION
 
 
 #: 当前仓库版本（``krok_helper/config.py`` 的 ``APP_VERSION``）是否仍处迁移期。
-#: bump 过截止版本后自动翻转，APP_TARGETS / main() 护栏 / bat 复制步骤共用。
+#: bump 到首个无旧名版本（4.4.0）后自动翻转，APP_TARGETS / main() 护栏 / bat
+#: 复制步骤共用。
 SHIP_LEGACY_APP_EXE = ship_legacy_app_exe()
 
 APP_TARGETS = [

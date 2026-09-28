@@ -152,15 +152,15 @@ runtime 内容哈希、迫使所有用户重下运行库。
 - 全量 zip、app/runtime part、manifest 的现有资产名 —— 即 `KaraokeStudio-windows*`
   / `KaraokeStudio-macos.zip` 这套**改名前**的前缀。应用已更名为 Lin-K Lyrics，
   但资产名刻意保持原样：旧 worker 硬编码全量 zip 名，并从 zip 名派生 manifest 名。
-- **`Karaoke Studio.exe` 随包分发至 4.3.0（含）为止**（改名后它是 `Lin-K Lyrics.exe`
-  的同内容副本），期间必须列在 `build_parts.APP_TARGETS` 里；4.3.0 之后的版本由
-  `build_parts.LAST_LEGACY_APP_VERSION` 版本闸自动停发（判定与残余风险见 §8.1
+- **`Karaoke Studio.exe` 随 4.3.x 整条线分发为止**（改名后它是 `Lin-K Lyrics.exe`
+  的同内容副本），期间必须列在 `build_parts.APP_TARGETS` 里；自 4.4.0 起由
+  `build_parts.FIRST_LEGACY_FREE_VERSION` 版本闸自动停发（判定与残余风险见 §8.1
   末尾）。更新器名 `Updater.exe` 同样不可改。（2026-09 起新版主程序固定传新名、
   Updater 在新名会话成功后清理本地旧名副本，活跃安装已收敛到新名。）
 - **全量回退路径必须回写包内全部根目录 EXE**（包内主程序名 + `krok_subtitle_renderer.exe`
   GPU sidecar），不只回写 `--app-exe` 指定的那一个。**前置校验必备项为新名主程序
   与 sidecar**（4.3.0 起的 Updater；此前已发布的 Updater 还把旧名副本算作必备，
-  因此 4.3.0 之前的包必须继续带旧名）——包里缺任何一个都按损坏包拒绝，不触碰磁盘。
+  因此 4.3.x 及之前的包必须继续带旧名）——包里缺任何一个都按损坏包拒绝，不触碰磁盘。
   2026-09 事故：SUG 原版
   `apply_update` 只回写 `--app-exe` + `_internal`，sidecar 与另一份主程序名被静默
   跳过，走全量回退的用户得到「新 Python 代码 + 旧 schema sidecar」的混合安装，
@@ -227,25 +227,25 @@ runtime 内容哈希、迫使所有用户重下运行库。
 即可（产品决策接受此代价，换取安装彻底收敛到新名）。残余盲区还有开始菜单磁贴
 等极少数非 .lnk 入口。
 
-#### 停发旧名副本：截止 4.3.0，版本闸自动执行（2026-09-28 拍板）
+#### 停发旧名副本：自 4.4.0 起，版本闸自动执行（2026-09-28 拍板）
 
-原先设想的手工收尾清单已固化为版本闸，bump 过 4.3.0 后一切自动翻转，无需手工执行：
+原先设想的手工收尾清单已固化为版本闸，bump 到 4.4.0 后一切自动翻转，无需手工执行：
 
-1. **判定单一事实源**：`build_parts.LAST_LEGACY_APP_VERSION = (4, 3, 0)`。
+1. **判定单一事实源**：`build_parts.FIRST_LEGACY_FREE_VERSION = (4, 4, 0)`。
    `SHIP_LEGACY_APP_EXE` 在导入期按当前 `APP_VERSION` 求值（四段语义，
-   `4.3.0.1 > 4.3.0`）；`APP_TARGETS`、`main()` 的存在性护栏（迁移期缺副本 /
-   停发期 dist 里多出副本都 `SystemExit`）与 `build_windows.bat` 的
-   「Creating legacy-name EXE copy」步骤全部跟随它，两端口径不可能分叉。
-   护栏见 `tests/test_rename_release_invariants.py`。
-2. **放宽必须先行**（随 4.3.0 发出）：`_apply_workbench_update` 的必备根目录
-   EXE 前置校验只要求新名主程序 + GPU sidecar，旧名可选——执行 4.3.0 → 4.3.1
-   全量回退的正是 4.3.0 发出的 Updater，放宽晚一个版本就会把首个无旧名包当
+   `4.3.9.9` 仍属迁移期、`4.4.0.1` 已停发）；`APP_TARGETS`、`main()` 的存在性
+   护栏（迁移期缺副本 / 停发期 dist 里多出副本都 `SystemExit`）与
+   `build_windows.bat` 的「Creating legacy-name EXE copy」步骤全部跟随它，
+   两端口径不可能分叉。护栏见 `tests/test_rename_release_invariants.py`。
+2. **放宽必须先行**（随 4.3.0 提前发出）：`_apply_workbench_update` 的必备根目录
+   EXE 前置校验只要求新名主程序 + GPU sidecar，旧名可选——执行 4.3.x → 4.4.0
+   全量回退的正是 4.3.x 期间发出的 Updater，放宽晚于首个无旧名版本就会把它当
    损坏包拒绝。`_cleanup_legacy_main_exe` / `_migrate_legacy_shortcuts` 长期
    保留：存量安装里的旧名副本要靠它们回收。
-3. **release body 头部提示**：`scripts/release.py` 自首个无旧名版本起
-   （`LEGACY_APP_EXE_LAST_VERSION` 同源闸）在横幅下方自动插入「老版本用户请
+3. **release body 头部提示**：`scripts/release.py` 自首个无旧名版本（4.4.0，含）
+   起（`LEGACY_FREE_SINCE_VERSION` 同源闸）在横幅下方自动插入「老版本用户请
    手动下载完整包」提示；本地 `notes` 与 CI 的 release body 走同一出口生成，
-   两处截止版本有护栏测试对齐。
+   两处截止版本有护栏测试对齐，CI 发布前另有 `check-notes` 校验步骤。
 4. **残余风险**（接受的代价）：
    - 改名前安装、且在迁移版为最新版期间（4.2.8.9 自 2026-09-14 起）从未检查过
      更新的**旧名会话**用户，直更无旧名版本时：增量路径「装上了却拉不起来」
@@ -254,8 +254,8 @@ runtime 内容哈希、迫使所有用户重下运行库。
      旧版。只能手动重下完整包——release body 提示的受众就是这批人。
    - 4.2.8.9+ 用户（已收敛新名会话）无碍：增量路径本就不做三 EXE 校验；其旧
      Updater 的三 EXE 硬校验只拦全量回退，表现为更新失败、可重试，不砖。
-   - 缩小残余的唯一手段：拉长 4.3.0（最后一个双名版本）作为最新版的时间，
-     让沉默用户有机会先收敛到 4.3.0 再迎接首个无旧名版本。
+   - 缩小残余的唯一手段：拉长 4.3.x（最后一批双名版本）作为最新版的时间，
+     让沉默用户有机会先收敛到新名会话再迎接 4.4.0。
 
 ## 9. 发布 checklist
 

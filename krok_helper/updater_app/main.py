@@ -1308,10 +1308,10 @@ def _apply_workbench_update(app_dir, app_exe, internal_name, new_root, log):
         return False, error
     # 新名主程序与 GPU sidecar 是必备项（tests/test_rename_release_invariants.py
     # 与 build_windows.bat 打包校验双保险）；缺任何一个都按损坏包处理，宁可更新
-    # 失败也不产出混合安装。旧名副本自 4.3.1 起不再随包分发（build_parts 版本闸），
+    # 失败也不产出混合安装。旧名副本自 4.4.0 起不再随包分发（build_parts 版本闸），
     # 因此不再是必备项：旧名会话（存量客户端传旧名 --app-exe）由上面的通用
     # ``new_root / app_exe`` 校验兜底拒绝，对应 docs/auto_update.md §8.1 的
-    # 残余风险——该放宽必须先于首个无旧名包发布（随 4.3.0 发出）。
+    # 残余风险——该放宽必须先于首个无旧名包发布（随 4.3.0 提前发出）。
     for required_name in (
         PRIMARY_APP_EXE_NAME,
         NATIVE_RENDERER_EXE_NAME,

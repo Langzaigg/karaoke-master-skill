@@ -88,7 +88,7 @@ def test_pack_part_zip_uses_app_relative_arcnames(tmp_path) -> None:
     with zipfile.ZipFile(str(zip_path)) as zf:
         names = set(zf.namelist())
     assert build_parts.APP_EXE_NAME in names
-    # 兼容副本只在迁移期（≤4.3.0，build_parts 版本闸）进 app part：迁移期漏了它，
+    # 兼容副本只在迁移期（< 4.4.0，build_parts 版本闸）进 app part：迁移期漏了它，
     # 增量更新的 orphan cleanup 会把存量用户安装目录里的旧名 EXE 删掉，旧 Updater
     # 更新完就重启不起来；停发后则必须不在（targets 有而本地缺文件会让 part 构建失败）。
     assert (build_parts.LEGACY_APP_EXE_NAME in names) is build_parts.SHIP_LEGACY_APP_EXE

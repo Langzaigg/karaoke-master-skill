@@ -688,10 +688,11 @@ def test_full_update_removes_stale_backups_before_generic_apply(
 def test_full_update_accepts_package_without_legacy_copy(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """4.3.1 起发布包不再携带旧名副本；4.3.0 起发出的 Updater 必须放行这种包。
+    """自 4.4.0 起发布包不再携带旧名副本；4.3.0 起发出的 Updater 必须放行这种包。
 
-    放宽必须先于首个无旧名包发布（执行 4.3.0 → 4.3.1 全量回退的正是 4.3.0 的
-    Updater）。本地旧名副本不动——删除属于成功拉起后的启动挂钩，不在全量回写里。
+    放宽必须先于首个无旧名包发布（执行 4.3.x → 4.4.0 全量回退的正是 4.3.x 期间
+    发出的 Updater）。本地旧名副本不动——删除属于成功拉起后的启动挂钩，不在全量
+    回写里。
     """
 
     app_dir = tmp_path / "app"
@@ -990,7 +991,7 @@ def test_full_update_replaces_sidecar_and_dual_named_exes(
 
 @pytest.mark.parametrize(
     "missing_name",
-    # 旧名 Karaoke Studio.exe 不在列：4.3.1 起发布包不再携带它，新名会话必须
+    # 旧名 Karaoke Studio.exe 不在列：自 4.4.0 起发布包不再携带它，新名会话必须
     # 放行（test_full_update_accepts_package_without_legacy_copy）；旧名会话遇
     # 无旧名包由 test_full_update_rejects_legacy_session_when_package_lacks_legacy
     # 覆盖。

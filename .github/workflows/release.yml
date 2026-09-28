@@ -121,9 +121,9 @@ jobs:
           version="${GITHUB_REF_NAME#v}"
           python3 scripts/release.py notes "$version" --output release-notes.md
 
-      # 无旧名副本版本（> 4.3.0）的 release body 必须带「手动下载完整包」提示，
-      # 仍在双名分发的版本不得带。防止发布流程改动（如更换 body 来源）让提示与
-      # 包内容错位；口径与 scripts/release.py / build_parts.py 同源。
+      # 自 4.4.0 起（首个无旧名副本版本）的 release body 必须带「手动下载完整包」
+      # 提示，仍在双名分发（4.3.x 及更早）的版本不得带。防止发布流程改动（如更换
+      # body 来源）让提示与包内容错位；口径与 scripts/release.py / build_parts.py 同源。
       - name: Verify manual-update notice policy
         shell: bash
         run: |

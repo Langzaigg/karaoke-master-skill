@@ -126,12 +126,12 @@ def _prepare_filled_section(release_mod, version: str) -> None:
     release_mod.CHANGELOG.write_text(content, encoding="utf-8")
 
 
-def test_notes_after_the_cutoff_add_the_manual_update_notice(release_mod, tmp_path):
-    """首个无旧名副本版本起（含 4.3.0.1），正文头部在横幅下方插入手动更新提示。"""
+def test_notes_from_the_first_legacy_free_version_add_the_notice(release_mod, tmp_path):
+    """首个无旧名副本版本（4.4.0，含）起，正文头部在横幅下方插入手动更新提示。"""
 
-    _prepare_filled_section(release_mod, "4.3.1")
+    _prepare_filled_section(release_mod, "4.4.0")
     out = tmp_path / "notes.md"
-    assert release_mod.cmd_notes("4.3.1", out) == 0
+    assert release_mod.cmd_notes("4.4.0", out) == 0
     lines = out.read_text(encoding="utf-8").splitlines()
 
     assert lines[0] == release_mod.ANNOUNCEMENT_BANNER
@@ -140,12 +140,16 @@ def test_notes_after_the_cutoff_add_the_manual_update_notice(release_mod, tmp_pa
     assert "停发旧名主程序副本" in "\n".join(lines)
 
 
-def test_notes_at_and_before_the_cutoff_keep_the_body_unchanged(release_mod, tmp_path):
-    """4.3.0 仍随包携带旧名副本，正文不得出现手动更新提示（提示与包内容错位会误导用户）。"""
+@pytest.mark.parametrize("version", ["4.3.0", "4.3.1", "4.3.9.9"])
+def test_notes_while_still_shipping_the_legacy_exe_keep_the_body_unchanged(
+    release_mod, tmp_path, version
+):
+    """4.3.x 整条线仍随包携带旧名副本，正文不得出现手动更新提示（提示与包内容
+    错位会误导用户）。"""
 
-    _prepare_filled_section(release_mod, "4.3.0")
+    _prepare_filled_section(release_mod, version)
     out = tmp_path / "notes.md"
-    assert release_mod.cmd_notes("4.3.0", out) == 0
+    assert release_mod.cmd_notes(version, out) == 0
     text = out.read_text(encoding="utf-8")
 
     assert release_mod.MANUAL_UPDATE_NOTICE not in text
@@ -176,11 +180,11 @@ def test_check_notes_enforces_the_notice_policy(release_mod, tmp_path):
     noticed.write_text(with_notice, encoding="utf-8")
     plain.write_text(without_notice, encoding="utf-8")
 
-    # 4.3.1：无旧名副本，必须带提示。
-    assert release_mod.cmd_check_notes("4.3.1", noticed) == 0
+    # 4.4.0：首个无旧名副本版本，必须带提示。
+    assert release_mod.cmd_check_notes("4.4.0", noticed) == 0
     with pytest.raises(SystemExit):
-        release_mod.cmd_check_notes("4.3.1", plain)
-    # 4.3.0：仍双名分发，不得带提示（提示与包内容错位会误导用户）。
-    assert release_mod.cmd_check_notes("4.3.0", plain) == 0
+        release_mod.cmd_check_notes("4.4.0", plain)
+    # 4.3.1：仍双名分发，不得带提示（提示与包内容错位会误导用户）。
+    assert release_mod.cmd_check_notes("4.3.1", plain) == 0
     with pytest.raises(SystemExit):
-        release_mod.cmd_check_notes("4.3.0", noticed)
+        release_mod.cmd_check_notes("4.3.1", noticed)
