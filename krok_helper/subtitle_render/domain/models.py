@@ -268,6 +268,21 @@ class TitleOverlay:
     char_role_labels: list[list[Optional[str]]] = field(default_factory=list)
     """逐行逐字符角色标签；``None`` 表示继承内置「标题」方案。"""
 
+    guide_symbols: dict[int, GuideSymbol] = field(default_factory=dict)
+    """逐行行前导唱符（行号 → 符号），插在该行文字之前显示。
+
+    标题永不走字：位图导唱符恒取「走字前」一侧图片，``duration_ms`` 的
+    走字节奏不生效，仅 ``count``（插入几个字形）参与布局。"""
+
+    inline_guide_symbols: dict[tuple[int, int], GuideSymbol] = field(
+        default_factory=dict
+    )
+    """逐字符导唱符替换（``(行号, 字符下标)`` → 符号）。
+
+    与 :attr:`char_role_labels` 同一套对位契约：键挂在 ``text_template``
+    的字符矩阵上，模板仍含 ``{title}`` / ``{artist}`` 占位时无法对位，
+    首次逐字编辑 / 导入导唱符前宿主会先冻结模板。"""
+
     # 字体（逆向目标项目的 N3「情報小」）
     font_family: str = "UD デジタル 教科書体 N-B"
     font_family_latin: Optional[str] = "Comic Sans MS"
@@ -2727,6 +2742,16 @@ def title_overlay_to_dict(title: TitleOverlay) -> dict:
         "enabled": title.enabled,
         "text_template": title.text_template,
         "char_role_labels": [list(row) for row in title.char_role_labels],
+        "guide_symbols": [
+            [int(row), guide_symbol_to_dict(symbol)]
+            for row, symbol in sorted(title.guide_symbols.items())
+            if symbol is not None
+        ],
+        "inline_guide_symbols": [
+            [int(row), int(index), guide_symbol_to_dict(symbol)]
+            for (row, index), symbol in sorted(title.inline_guide_symbols.items())
+            if symbol is not None
+        ],
         "scheme_name": title.scheme_name,
         "font_family": title.font_family,
         "font_family_latin": title.font_family_latin,
@@ -2767,6 +2792,41 @@ def title_overlay_to_dict(title: TitleOverlay) -> dict:
     }
 
 
+def _title_guide_symbols_from_dict(
+    text_template: str, payload: dict
+) -> tuple[dict[int, GuideSymbol], dict[tuple[int, int], GuideSymbol]]:
+    """解析标题导唱符的两个持久化列表并按当前模板文字裁剪。"""
+    row_symbols: dict[int, GuideSymbol] = {}
+    raw_rows = payload.get("guide_symbols")
+    if isinstance(raw_rows, list):
+        for entry in raw_rows:
+            if not isinstance(entry, (list, tuple)) or len(entry) != 2:
+                continue
+            try:
+                row = int(entry[0])
+            except (TypeError, ValueError):
+                continue
+            symbol = guide_symbol_from_dict(entry[1])
+            if symbol is not None:
+                row_symbols[row] = symbol
+    inline_symbols: dict[tuple[int, int], GuideSymbol] = {}
+    raw_inline = payload.get("inline_guide_symbols")
+    if isinstance(raw_inline, list):
+        for entry in raw_inline:
+            if not isinstance(entry, (list, tuple)) or len(entry) != 3:
+                continue
+            try:
+                row, index = int(entry[0]), int(entry[1])
+            except (TypeError, ValueError):
+                continue
+            symbol = guide_symbol_from_dict(entry[2])
+            if symbol is not None:
+                inline_symbols[(row, index)] = symbol
+    return normalize_title_guide_symbols(
+        text_template, row_symbols, inline_symbols
+    )
+
+
 def title_overlay_from_dict(payload: object) -> Optional[TitleOverlay]:
     if not isinstance(payload, dict):
         return None
@@ -2789,6 +2849,9 @@ def title_overlay_from_dict(payload: object) -> Optional[TitleOverlay]:
     scheme_name = payload.get("scheme_name", defaults.scheme_name)
     if scheme_name is not None:
         scheme_name = str(scheme_name).strip() or None
+    guide_symbols, inline_guide_symbols = _title_guide_symbols_from_dict(
+        text_template, payload
+    )
     return TitleOverlay(
         name=str(payload.get("name", defaults.name)) or defaults.name,
         enabled=bool(payload.get("enabled", defaults.enabled)),
@@ -2797,6 +2860,8 @@ def title_overlay_from_dict(payload: object) -> Optional[TitleOverlay]:
         char_role_labels=normalize_title_char_role_labels(
             text_template, payload.get("char_role_labels")
         ),
+        guide_symbols=guide_symbols,
+        inline_guide_symbols=inline_guide_symbols,
         font_family=str(payload.get("font_family", defaults.font_family)),
         font_family_latin=(
             str(payload["font_family_latin"])
@@ -3025,6 +3090,126 @@ def migrate_title_char_role_labels(
             if row_role is not None:
                 rows[row_index] = [row_role] * len(new_lines[row_index])
     return rows
+
+
+def normalize_title_guide_symbols(
+    text: str,
+    row_symbols: object,
+    inline_symbols: object,
+) -> tuple[dict[int, GuideSymbol], dict[tuple[int, int], GuideSymbol]]:
+    """把持久化标题导唱符裁剪到当前文字范围内（越界 / 无视觉条目丢弃）。"""
+    lines = str(text).split("\n")
+    rows: dict[int, GuideSymbol] = {}
+    if isinstance(row_symbols, dict):
+        for raw_row, symbol in row_symbols.items():
+            try:
+                row = int(raw_row)
+            except (TypeError, ValueError):
+                continue
+            if 0 <= row < len(lines) and guide_symbol_has_visual(symbol):
+                rows[row] = symbol
+    inline: dict[tuple[int, int], GuideSymbol] = {}
+    if isinstance(inline_symbols, dict):
+        for raw_key, symbol in inline_symbols.items():
+            if not isinstance(raw_key, tuple) or len(raw_key) != 2:
+                continue
+            try:
+                row, index = int(raw_key[0]), int(raw_key[1])
+            except (TypeError, ValueError):
+                continue
+            if (
+                0 <= row < len(lines)
+                and 0 <= index < len(lines[row])
+                and guide_symbol_has_visual(symbol)
+            ):
+                inline[(row, index)] = symbol
+    return rows, inline
+
+
+def migrate_title_guide_symbols(
+    old_text: str,
+    old_row_symbols: object,
+    old_inline_symbols: object,
+    new_text: str,
+) -> tuple[dict[int, GuideSymbol], dict[tuple[int, int], GuideSymbol]]:
+    """标题文字编辑后按字符 / 行差异迁移导唱符。
+
+    行前导唱符跟着整行走（行级 ``SequenceMatcher`` 等价块平移行号）；
+    行内替换沿用角色标签同一套扁平字符对位——只有在新旧文字里都存活的
+    字符保得住自己的图片，新增 / 改写字符退回普通文字。
+    """
+    old_text = str(old_text)
+    new_text = str(new_text)
+    rows, inline = normalize_title_guide_symbols(
+        old_text, old_row_symbols, old_inline_symbols
+    )
+    if old_text == new_text:
+        return rows, inline
+
+    old_lines = old_text.split("\n")
+    new_lines = new_text.split("\n")
+    if old_text == new_text:
+        return rows, inline
+
+    flat_old: list[Optional[GuideSymbol]] = []
+    old_row_starts: list[int] = []
+    for row_index, line in enumerate(old_lines):
+        old_row_starts.append(len(flat_old))
+        for index in range(len(line)):
+            flat_old.append(inline.get((row_index, index)))
+        if row_index + 1 < len(old_lines):
+            flat_old.append(None)
+    migrated_flat: list[Optional[GuideSymbol]] = [None] * len(new_text)
+    old_to_new: dict[int, int] = {}
+    matcher = SequenceMatcher(a=old_text, b=new_text, autojunk=False)
+    for old_start, new_start, size in matcher.get_matching_blocks():
+        for offset in range(size):
+            migrated_flat[new_start + offset] = flat_old[old_start + offset]
+            old_to_new[old_start + offset] = new_start + offset
+
+    new_row_starts: list[int] = []
+    position = 0
+    for line in new_lines:
+        new_row_starts.append(position)
+        position += len(line) + 1
+
+    def _new_row_for(position: int) -> Optional[int]:
+        for row_index in range(len(new_row_starts) - 1, -1, -1):
+            if new_row_starts[row_index] <= position:
+                return row_index
+        return None
+
+    # 行前导唱符按字符锚点迁移：该行只要有字符在新文字里存活，符号就跟着
+    # 它的第一个存活字符落到所在行——单行标题改一两个字不会把行前图片弄丢。
+    migrated_rows: dict[int, GuideSymbol] = {}
+    for row_index, symbol in rows.items():
+        if row_index >= len(old_row_starts):
+            continue
+        start = old_row_starts[row_index]
+        for old_position in range(start, start + len(old_lines[row_index])):
+            new_position = old_to_new.get(old_position)
+            if new_position is None:
+                continue
+            target_row = _new_row_for(new_position)
+            if target_row is not None:
+                migrated_rows[target_row] = symbol
+            break
+
+    if not inline:
+        return migrated_rows, {}
+
+    migrated_inline: dict[tuple[int, int], GuideSymbol] = {}
+    row_index = 0
+    char_index = 0
+    for position, symbol in enumerate(migrated_flat):
+        if new_text[position] == "\n":
+            row_index += 1
+            char_index = 0
+            continue
+        if symbol is not None:
+            migrated_inline[(row_index, char_index)] = symbol
+        char_index += 1
+    return migrated_rows, migrated_inline
 
 
 def _singer_overrides_from_dict(payload: object) -> dict[int, SubtitleStyleScheme]:

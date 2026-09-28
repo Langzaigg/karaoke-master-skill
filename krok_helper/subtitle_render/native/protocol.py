@@ -114,6 +114,11 @@ def title_overlay_to_ir(
 ) -> dict[str, Any]:
     """Serialize a resolved title without inheriting Latin metrics from lyrics."""
     payload = title_overlay_to_dict(title)
+    # 导唱符不随外观载荷下发：role_styles 里的解析结果会原样带着 base 的
+    # 符号字典（含体积可观的矢量轮廓），而 sidecar 只在主载荷消费 IR 形态
+    # （render_ir._title_guide_to_ir），这里先剥掉原始形态。
+    payload.pop("guide_symbols", None)
+    payload.pop("inline_guide_symbols", None)
     payload["latin_font_size_px"] = max(
         int(
             scheme.latin_font_size_px
@@ -220,6 +225,9 @@ def gpu_unsupported_features(
                     "note",
                 }:
                     reasons.append("line_animation_override")
+    # 标题图片导唱符（2026-09 新增）由 GPU sidecar 原生渲染（gpu_scene_projection
+    # 按字符挂载 bitmap/vector 管线，标题永不走字 → 恒取「走字前」一侧），
+    # 与 Painter 同一口径，不触发整帧回退。
     return tuple(dict.fromkeys(reasons))
 
 

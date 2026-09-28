@@ -777,6 +777,74 @@ def test_gpu_title_latin_stretch_changes_title_pixels() -> None:
 
 
 @pytest.mark.skipif(os.name != "nt", reason="Direct2D GPU backend is Windows-only")
+def test_gpu_title_guide_symbol_renders_before_image_only(tmp_path) -> None:
+    """标题导唱符走 GPU 原生管线：永不走字 → 恒画「走字前」图片。"""
+    def png(name: str, color: str) -> str:
+        image = QImage(10, 10, QImage.Format.Format_ARGB32_Premultiplied)
+        image.fill(QColor(color))
+        path = tmp_path / name
+        assert image.save(str(path))
+        return str(path)
+
+    before = png("before.png", "#FF0000")
+    after = png("after.png", "#00FF00")
+
+    def red_green_count(payload: bytes) -> tuple[int, int]:
+        red = green = 0
+        for offset in range(0, len(payload), 4):
+            r, g, b = payload[offset], payload[offset + 1], payload[offset + 2]
+            if r > 200 and g < 60 and b < 60:
+                red += 1
+            elif g > 200 and r < 60 and b < 60:
+                green += 1
+        return red, green
+
+    track = TimingTrack(
+        lines=[TimingLine(chars=[TimingChar("尾", 3_000)], end_ms=4_000)]
+    )
+
+    def render(title: TitleOverlay) -> tuple[int, int]:
+        style = _g1_style(title_overlays=[title])
+        with NativeRendererProcess(
+            _renderer_path(), response_timeout_s=60.0
+        ) as renderer:
+            _, frames = _render_g1_frames(
+                renderer, style, (500,), force_warp=True, track=track
+            )
+        return red_green_count(frames[0])
+
+    base = dict(
+        enabled=True,
+        text_template="あい",
+        font_size_px=80,
+        stroke_width_px=0,
+        stroke2_width_px=0,
+        decoration_kind="none",
+        layout_index=None,
+        show_mode="whole",
+    )
+    inline_symbol = GuideSymbol(
+        kind="bitmap", bitmap_before_path=before, bitmap_after_path=after
+    )
+    prefix_symbol = GuideSymbol(
+        kind="bitmap", bitmap_before_path=before, count=2
+    )
+    # 行内替换与行前导唱符都画出红图；走字后的绿图永不出现。
+    assert render(TitleOverlay(
+        inline_guide_symbols={(0, 0): inline_symbol}, **base
+    ))[0] > 50
+    assert render(TitleOverlay(
+        guide_symbols={0: prefix_symbol}, **base
+    ))[0] > 50
+    red, green = render(TitleOverlay(
+        inline_guide_symbols={(0, 0): inline_symbol}, **base
+    ))
+    assert green == 0
+    # 无导唱符的对照帧里没有红 / 绿。
+    assert render(TitleOverlay(**base)) == (0, 0)
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Direct2D GPU backend is Windows-only")
 @pytest.mark.parametrize("animation", ["none", "utopia"])
 def test_gpu_shared_realizations_preserve_pixels(animation, monkeypatch) -> None:
     monkeypatch.setenv("QT_QPA_PLATFORM", "offscreen")

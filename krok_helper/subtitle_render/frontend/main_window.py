@@ -319,6 +319,7 @@ from krok_helper.subtitle_render.domain.models import (
     layout_display_name,
     layout_id_for_index,
     migrate_spacing_bindings_to_used_layouts,
+    migrate_title_guide_symbols,
     normalize_title_char_role_labels,
     remap_title_char_role_labels,
     rescale_font_sizes,
@@ -6620,10 +6621,18 @@ class SubtitleRenderWindow(QWidget):
                 duration=3000,
             )
             return
+        row_symbols, inline_symbols = migrate_title_guide_symbols(
+            title.text_template,
+            title.guide_symbols,
+            title.inline_guide_symbols,
+            resolved,
+        )
         fixed = replace(
             title,
             text_template=resolved,
             char_role_labels=[[None] * len(line) for line in resolved.split("\n")],
+            guide_symbols=row_symbols,
+            inline_guide_symbols=inline_symbols,
         )
         self._replace_active_title_overlay(fixed)
         InfoBar.info(
@@ -6713,8 +6722,11 @@ class SubtitleRenderWindow(QWidget):
         self._set_line_role_labels(track, row, normalized)
 
     def _on_guide_symbol_import_requested(self, rows: list[int]) -> None:
+        if self._title_source_active:
+            self._import_title_guide_symbols(rows)
+            return
         track = self._active_track()
-        if track is None or self._title_source_active:
+        if track is None:
             return
         valid_rows = tuple(
             sorted(
@@ -6925,6 +6937,56 @@ class SubtitleRenderWindow(QWidget):
             position=InfoBarPosition.BOTTOM_RIGHT,
             duration=2500,
         )
+
+    def _import_title_guide_symbols(self, rows: list[int]) -> None:
+        """标题条目的「导入图片导唱符…」：写进该条目的逐行行前导唱符。
+
+        与歌词共用同一组设置对话框；标题永不走字，位图恒取「走字前」一侧，
+        ``interval``（走字节奏）不生效仅保留在数据里。写回走
+        ``_replace_active_title_overlay``，撤销 / 刷新与标题逐字角色同路。
+        """
+        self._freeze_title_template_for_character_edit()
+        title = self._active_title_overlay()
+        if title is None or self._timing_track is None:
+            return
+        lines = title.text_template.split("\n")
+        valid_rows = tuple(
+            sorted(
+                {
+                    int(row)
+                    for row in rows
+                    if 0 <= int(row) < len(lines) and lines[int(row)].strip()
+                }
+            )
+        )
+        if not valid_rows:
+            return
+        start_dir = str(self._subtitle_path.parent) if self._subtitle_path else ""
+        bitmap_dialog = GuideBitmapSettingsDialog(start_dir=start_dir, parent=self)
+        if bitmap_dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+        current = title.guide_symbols.get(valid_rows[0])
+        settings_dialog = _GuideSymbolSettingsDialog(
+            count=current.count if current is not None else 1,
+            interval_ms=current.duration_ms if current is not None else 1000,
+            parent=self,
+        )
+        if settings_dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+        count, duration_ms = settings_dialog.settings()
+        symbol = guide_symbol_from_bitmap_dialog(
+            bitmap_dialog, duration_ms=duration_ms, count=count
+        )
+        if symbol is None:
+            return
+        old_values = tuple(title.guide_symbols.get(row) for row in valid_rows)
+        new_values = tuple(symbol for _row in valid_rows)
+        if old_values == new_values:
+            return
+        symbols = dict(title.guide_symbols)
+        for row in valid_rows:
+            symbols[row] = symbol
+        self._replace_active_title_overlay(replace(title, guide_symbols=symbols))
 
     def _on_guide_prefix_replace_requested(self) -> None:
         track = self._active_track()
@@ -7151,8 +7213,31 @@ class SubtitleRenderWindow(QWidget):
         return True
 
     def _on_guide_symbol_remove_requested(self, rows: list[int]) -> None:
+        if self._title_source_active:
+            title = self._active_title_overlay()
+            if title is None:
+                return
+            valid_rows = tuple(
+                sorted(
+                    {
+                        int(row)
+                        for row in rows
+                        if 0 <= int(row) < len(title.text_template.split("\n"))
+                        and title.guide_symbols.get(int(row)) is not None
+                    }
+                )
+            )
+            if not valid_rows:
+                return
+            symbols = dict(title.guide_symbols)
+            for row in valid_rows:
+                symbols.pop(row, None)
+            self._replace_active_title_overlay(
+                replace(title, guide_symbols=symbols)
+            )
+            return
         track = self._active_track()
-        if track is None or self._title_source_active:
+        if track is None:
             return
         valid_rows = tuple(
             sorted(
@@ -7180,6 +7265,9 @@ class SubtitleRenderWindow(QWidget):
     def _on_guide_char_roles_changed(
         self, row: int, guide_labels: object, labels: list
     ) -> None:
+        if self._title_source_active:
+            self._set_title_guide_char_roles(row, guide_labels, labels)
+            return
         track = self._active_track()
         if track is None or not 0 <= row < len(track.lines):
             return
@@ -7227,6 +7315,7 @@ class SubtitleRenderWindow(QWidget):
     ) -> None:
         """Commit guide replacements selected in the per-character role dialog."""
         if self._title_source_active:
+            self._apply_title_inline_char_edit(row, guide_labels, labels, vector_symbols)
             return
         track = self._active_track()
         if track is None or not 0 <= row < len(track.lines):
@@ -7395,12 +7484,10 @@ class SubtitleRenderWindow(QWidget):
         title = self._active_title_overlay()
         if title is None:
             return
-        rows = [list(values) for values in title.char_role_labels]
+        rows = self._title_label_matrix(title)
         lines = title.text_template.split("\n")
         if not 0 <= row < len(lines) or len(labels) != len(lines[row]):
             return
-        while len(rows) < len(lines):
-            rows.append([None] * len(lines[len(rows)]))
         normalized = [str(label).strip() or None if label else None for label in labels]
         if rows[row] == normalized:
             return
@@ -7408,6 +7495,136 @@ class SubtitleRenderWindow(QWidget):
         self._materialize_role_schemes({label for label in normalized if label})
         self._replace_active_title_overlay(
             replace(title, char_role_labels=rows),
+        )
+
+    @staticmethod
+    def _title_label_matrix(title: TitleOverlay) -> list[list]:
+        """按当前模板文字补齐到等长的角色标签矩阵（行数不足补 None）。"""
+        rows = [list(values) for values in title.char_role_labels]
+        lines = title.text_template.split("\n")
+        while len(rows) < len(lines):
+            rows.append([None] * len(lines[len(rows)]))
+        return rows
+
+    def _set_title_guide_char_roles(
+        self, row: int, guide_labels: object, labels: list
+    ) -> None:
+        """标题模式：逐字符编辑器只改角色（导唱符芯片标签 + 正文标签）。"""
+        title = self._active_title_overlay()
+        if title is None:
+            return
+        lines = title.text_template.split("\n")
+        symbol = title.guide_symbols.get(row)
+        if symbol is None or not 0 <= row < len(lines):
+            return
+        if (
+            not isinstance(guide_labels, list)
+            or len(guide_labels) != max(int(symbol.count), 1)
+            or len(labels) != len(lines[row])
+        ):
+            return
+        normalized_guides = [
+            str(label).strip() or None if label else None for label in guide_labels
+        ]
+        normalized = [str(label).strip() or None if label else None for label in labels]
+        rows = self._title_label_matrix(title)
+        if (
+            rows[row] == normalized
+            and list(guide_symbol_role_labels(symbol)) == normalized_guides
+        ):
+            return
+        rows[row] = normalized
+        symbols = dict(title.guide_symbols)
+        symbols[row] = guide_symbol_with_role_labels(symbol, normalized_guides)
+        self._materialize_role_schemes(
+            {label for label in [*normalized_guides, *normalized] if label}
+        )
+        self._replace_active_title_overlay(
+            replace(
+                title,
+                guide_symbols=symbols,
+                char_role_labels=rows,
+            ),
+        )
+
+    def _apply_title_inline_char_edit(
+        self, row: int, guide_labels: object, labels: list, vector_symbols: object
+    ) -> None:
+        """标题模式：逐字符编辑器写回行内图片替换 / 还原与角色。
+
+        标题条目的行前导唱符没有行首标记替换语义（无 ``replacement_prefix``），
+        只走「行前保护前缀 + 正文逐字符」这条简单路径。
+        """
+        title = self._active_title_overlay()
+        if title is None:
+            return
+        lines = title.text_template.split("\n")
+        if not 0 <= row < len(lines):
+            return
+        symbol = title.guide_symbols.get(row)
+        if symbol is None:
+            if guide_labels is not None:
+                return
+            normalized_guides: list[Optional[str]] = []
+            new_symbol = None
+        else:
+            if (
+                not isinstance(guide_labels, list)
+                or len(guide_labels) != max(int(symbol.count), 1)
+            ):
+                return
+            normalized_guides = [
+                str(label).strip() or None if label else None for label in guide_labels
+            ]
+            new_symbol = guide_symbol_with_role_labels(symbol, normalized_guides)
+        if (
+            len(labels) != len(lines[row])
+            or not isinstance(vector_symbols, list)
+            or len(vector_symbols) != len(lines[row])
+        ):
+            return
+        normalized = [str(label).strip() or None if label else None for label in labels]
+        new_inline: dict[tuple[int, int], GuideSymbol] = {}
+        for index, value in enumerate(vector_symbols):
+            if value is None:
+                continue
+            if not guide_symbol_has_visual(value):
+                return
+            new_inline[(row, index)] = value
+        rows = self._title_label_matrix(title)
+        if (
+            rows[row] == normalized
+            and symbol == new_symbol
+            and {
+                key: value
+                for key, value in title.inline_guide_symbols.items()
+                if key[0] == row
+            }
+            == new_inline
+        ):
+            return
+        rows[row] = normalized
+        symbols = dict(title.guide_symbols)
+        if new_symbol is None:
+            symbols.pop(row, None)
+        else:
+            symbols[row] = new_symbol
+        merged_inline = {
+            key: value
+            for key, value in title.inline_guide_symbols.items()
+            if key[0] != row
+        }
+        merged_inline.update(new_inline)
+        self._materialize_role_schemes(
+            {label for label in [*normalized_guides, *normalized] if label}
+        )
+        self._replace_active_title_overlay(
+            replace(
+                title,
+                guide_symbols=symbols,
+                inline_guide_symbols=merged_inline,
+                char_role_labels=rows,
+            ),
         )
 
     def _set_line_role_labels(

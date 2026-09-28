@@ -5,19 +5,34 @@ from __future__ import annotations
 import math
 from collections.abc import Callable
 from dataclasses import dataclass, field
-from typing import Hashable
+from typing import Hashable, Optional
 
 from PyQt6.QtCore import QPointF, QRectF
 from PyQt6.QtGui import QFont, QFontMetrics, QImage, QPainter, QPainterPath
 
 from krok_helper.subtitle_render.engine.render.effects import (
+    brush_for_fill,
     fill_is_alpha,
+    glow_blur_radii,
+    glow_extent,
     paint_fill_path,
     paint_glow_path,
     paint_shadow_silhouette,
     paint_stroke_path,
     stroke2_pen_width,
     stroke_pen_width,
+)
+from krok_helper.subtitle_render.engine.render.core.raster_blur import blur_image
+from krok_helper.subtitle_render.engine.guide.metrics import (
+    bitmap_guide_content_size,
+    bitmap_guide_frame_at,
+    vector_glyph_width,
+)
+from krok_helper.subtitle_render.engine.guide.semantics import (
+    guide_symbol_is_bitmap,
+)
+from krok_helper.subtitle_render.sources.guide_symbols import (
+    scaled_guide_symbol_path,
 )
 from krok_helper.subtitle_render.engine.render.core.layers import (
     BakedLayer,
@@ -42,10 +57,15 @@ from krok_helper.subtitle_render.domain.models import (
     Style,
     TitleOverlay,
     normalize_title_char_role_labels,
+    normalize_title_guide_symbols,
 )
 from krok_helper.subtitle_render.n3.font_catalog import resolve_qt_font_family
 from krok_helper.subtitle_render.domain.paint import PaintFill
-from krok_helper.subtitle_render.domain.timing import TimingTrack
+from krok_helper.subtitle_render.domain.timing import (
+    GuideSymbol,
+    TimingTrack,
+    guide_symbol_role_labels,
+)
 
 
 @dataclass(frozen=True)
@@ -56,6 +76,11 @@ class TitleGlyphLayout:
     font: QFont
     metrics: QFontMetrics
     title: TitleOverlay
+    guide_symbol: GuideSymbol | None = None
+    """行前导唱符或行内图片替换；非 ``None`` 时不按 ``text`` 画字形。
+
+    矢量符号作为路径并入所在文字 run（共享同一套描边 / 填充 / 发光），
+    位图符号恒取「走字前」一侧图片——标题永不走字，没有走字后态。"""
 
 
 @dataclass(frozen=True)
@@ -303,6 +328,10 @@ def layout_title_overlay(
     line_heights: list[float] = []
     line_ascents: list[float] = []
     max_edge = 0.0
+    # 导唱符键位与展示文字（已解析占位符）对齐：模板未冻结时越界条目在此丢弃。
+    row_symbols, inline_symbols = normalize_title_guide_symbols(
+        text, title.guide_symbols, title.inline_guide_symbols
+    )
     fallback_ascent = n3_char_box_ascent(
         metrics,
         title.font_size_px,
@@ -314,16 +343,34 @@ def layout_title_overlay(
         title.stroke_width_px,
     )
     for row_index, text_line in enumerate(lines):
+        # 行前导唱符（count 个）+ 正文逐字符；行内被替换的字符画导唱符图片。
+        # 角色口径与歌词一致：行前导唱符用符号自带逐个角色标签，行内替换
+        # 沿用被替换字符自己的角色标签。
+        units: list[tuple[str, Optional[str], GuideSymbol | None]] = []
+        row_symbol = row_symbols.get(row_index)
+        if row_symbol is not None:
+            units.extend(
+                ("\uFFFC", label, row_symbol)
+                for label in guide_symbol_role_labels(row_symbol)
+            )
+        units.extend(
+            (
+                char,
+                labels[row_index][char_index],
+                inline_symbols.get((row_index, char_index)),
+            )
+            for char_index, char in enumerate(text_line)
+        )
         glyphs: list[TitleGlyphLayout] = []
         cursor = 0.0
         max_ascent = 0.0
         max_descent = 0.0
-        for char_index, char in enumerate(text_line):
+        for unit_index, (unit_text, role_label, unit_symbol) in enumerate(units):
             glyph_title = (
                 resolve_title_role_overlay(
                     style,
                     title,
-                    labels[row_index][char_index],
+                    role_label,
                 )
                 if style is not None
                 else title
@@ -336,28 +383,33 @@ def layout_title_overlay(
                 glyph_latin_font,
             )
             glyph_font = (
-                glyph_font_for(char) if glyph_font_for is not None else glyph_jp_font
+                glyph_font_for(unit_text) if glyph_font_for is not None else glyph_jp_font
             )
             glyph_metrics = QFontMetrics(glyph_font)
-            if char == " ":
+            if unit_symbol is not None:
+                # vector_glyph_width 只读 font_size_px：标题的逐字解析外观与
+                # 歌词 Style 同名同义，直接复用同一套导唱符宽度契约。
+                advance = float(vector_glyph_width(unit_symbol, glyph_title))
+            elif unit_text == " ":
                 space_unit = glyph_font.pixelSize()
                 if space_unit <= 0:
                     space_unit = max(int(glyph_title.font_size_px), 1)
                 advance = float(space_unit * title_space_percent // 100)
             else:
-                advance = float(glyph_metrics.horizontalAdvance(char))
+                advance = float(glyph_metrics.horizontalAdvance(unit_text))
             glyphs.append(
                 TitleGlyphLayout(
-                    text=char,
+                    text=unit_text,
                     x=cursor,
                     advance=advance,
                     font=glyph_font,
                     metrics=glyph_metrics,
                     title=glyph_title,
+                    guide_symbol=unit_symbol,
                 )
             )
             cursor += advance
-            if char_index + 1 < len(text_line):
+            if unit_index + 1 < len(units):
                 cursor += int(glyph_title.letter_spacing_px)
             max_ascent = max(
                 max_ascent,
@@ -481,6 +533,7 @@ def title_overlay_layer_key(
                 int(glyph.font.weight()),
                 glyph.font.italic(),
                 glyph.font.stretch(),
+                glyph.guide_symbol,
                 fill_signature(glyph.title.fill),
                 fill_signature(glyph.title.stroke),
                 glyph.title.stroke_width_px,
@@ -499,6 +552,140 @@ def title_overlay_layer_key(
     )
 
 
+def _title_bitmap_guide_rects(
+    layout: TitleOverlayLayout,
+) -> list[tuple[TitleGlyphLayout, QRectF]]:
+    """位图导唱符图片在标题块坐标系（``x0`` / 块顶为原点）里的目标矩形。
+
+    垂直锚定与歌词 n3_1074 语义、D2D sidecar 的 ``anchorDescent`` 同式：
+    图片底缘贴 ``基线 + 字号×descent/(ascent+descent) + 描边宽/2``
+    （可被 ``bitmap_margin_bottom_px`` 上移），高度按导唱符自身缩放。
+    """
+    rects: list[tuple[TitleGlyphLayout, QRectF]] = []
+    row_top = 0.0
+    for row_x, glyphs, line_height, line_ascent in zip(
+        layout.row_x,
+        layout.glyph_rows,
+        layout.line_heights,
+        layout.line_ascents,
+    ):
+        for glyph in glyphs:
+            symbol = glyph.guide_symbol
+            if not guide_symbol_is_bitmap(symbol):
+                continue
+            width, height = bitmap_guide_content_size(symbol, glyph.title)
+            left = row_x + glyph.x + int(symbol.bitmap_margin_left_px) - layout.x0
+            anchor_descent = n3_char_box_descent(
+                glyph.metrics,
+                glyph.title.font_size_px,
+                glyph.title.stroke_width_px,
+            )
+            bottom = (
+                row_top
+                + line_ascent
+                + anchor_descent
+                - int(symbol.bitmap_margin_bottom_px)
+            )
+            rects.append(
+                (
+                    glyph,
+                    QRectF(
+                        float(left),
+                        float(bottom - height),
+                        float(max(width, 1)),
+                        float(max(height, 1)),
+                    ),
+                )
+            )
+        row_top += line_height + layout.gap
+    return rects
+
+
+def _tinted_title_guide_silhouette(
+    image: QImage, fill: PaintFill, rect: QRectF
+) -> QImage:
+    """把导唱符图片的 Alpha 剪影按飾り画刷染色（标题单态，无走字渐变跨度）。"""
+    width = max(int(math.ceil(rect.width())), 1)
+    height = max(int(math.ceil(rect.height())), 1)
+    silhouette = QImage(width, height, QImage.Format.Format_ARGB32_Premultiplied)
+    silhouette.fill(0)
+    painter = QPainter(silhouette)
+    try:
+        painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, True)
+        painter.translate(-rect.left(), -rect.top())
+        painter.drawImage(rect, image)
+        painter.setCompositionMode(
+            QPainter.CompositionMode.CompositionMode_SourceIn
+        )
+        painter.fillRect(rect, brush_for_fill(fill, rect))
+    finally:
+        painter.end()
+    return silhouette
+
+
+def _paint_title_bitmap_guide_decor(
+    painter: QPainter,
+    glyph: TitleGlyphLayout,
+    image: QImage,
+    rect: QRectF,
+) -> None:
+    """标题位图导唱符的飾り（shadow / glow）剪影。
+
+    与歌词 :func:`paint_bitmap_guide_decor` 同一套几何；标题永不走字，
+    恒用「走字前」单态配色（标题装饰本就单态），也没有 wipe 裁切。标题层
+    按 static key 整块烘焙一次，这里不需要歌词侧的帧级缓存。
+    """
+    symbol = glyph.guide_symbol
+    title = glyph.title
+    if symbol is None or symbol.bitmap_no_decor:
+        return
+    if title.decoration_kind not in {"shadow", "glow"}:
+        return
+    fill = title.shadow
+    if not fill.color:
+        return
+    if title.decoration_kind == "glow":
+        radius = max(int(title.glow_radius_px), 0)
+        if radius <= 0:
+            return
+        pad = glow_extent(0, 0, radius) + 2
+        silhouette = _tinted_title_guide_silhouette(image, fill, rect)
+        source = QImage(
+            max(int(math.ceil(rect.width())) + pad * 2, 1),
+            max(int(math.ceil(rect.height())) + pad * 2, 1),
+            QImage.Format.Format_ARGB32_Premultiplied,
+        )
+        source.fill(0)
+        source_painter = QPainter(source)
+        try:
+            source_painter.setRenderHint(
+                QPainter.RenderHint.SmoothPixmapTransform, True
+            )
+            source_painter.drawImage(QPointF(pad, pad), silhouette)
+        finally:
+            source_painter.end()
+        painter.save()
+        try:
+            for blur_value in glow_blur_radii(
+                radius, title.glow_concentration_level
+            ):
+                painter.drawImage(
+                    QPointF(rect.left() - pad, rect.top() - pad),
+                    blur_image(source, blur_value),
+                )
+        finally:
+            painter.restore()
+        return
+    shadow_dx = int(title.shadow_offset_x or 0)
+    shadow_dy = int(title.shadow_offset_y or 0)
+    if not (shadow_dx or shadow_dy):
+        return
+    painter.drawImage(
+        rect.translated(shadow_dx, shadow_dy),
+        _tinted_title_guide_silhouette(image, fill, rect),
+    )
+
+
 def build_title_overlay_layer(
     layout: TitleOverlayLayout,
     title: TitleOverlay,
@@ -514,6 +701,18 @@ def build_title_overlay_layer(
     pad_right = max(max(0, item.shadow_offset_x) for item in glyph_titles) + extent
     pad_top = max(max(0, -item.shadow_offset_y) for item in glyph_titles) + extent
     pad_bottom = max(max(0, item.shadow_offset_y) for item in glyph_titles) + extent
+    # 位图导唱符可能高出块顶 / 超出块宽（大倍率缩放、负余白）：烘焙图必须
+    # 先把这些矩形包进来，否则图片会被自己的图层边界裁掉。
+    bitmap_units = _title_bitmap_guide_rects(layout)
+    if bitmap_units:
+        left = min(rect.left() for _glyph, rect in bitmap_units)
+        right = max(rect.right() for _glyph, rect in bitmap_units)
+        top = min(rect.top() for _glyph, rect in bitmap_units)
+        bottom = max(rect.bottom() for _glyph, rect in bitmap_units)
+        pad_left = max(pad_left, int(math.ceil(max(0.0, -left))))
+        pad_right = max(pad_right, int(math.ceil(max(0.0, right - layout.block_w))))
+        pad_top = max(pad_top, int(math.ceil(max(0.0, -top))))
+        pad_bottom = max(pad_bottom, int(math.ceil(max(0.0, bottom - layout.block_h))))
     img_w = max(int(math.ceil(pad_left + layout.block_w + pad_right)), 1)
     img_h = max(int(math.ceil(pad_top + layout.block_h + pad_bottom)), 1)
     image = ports.make_raster_image(img_w, img_h, device_pixel_ratio)
@@ -538,19 +737,37 @@ def build_title_overlay_layer(
                 baseline = line_top + line_ascent
                 run_start = 0
                 while run_start < len(glyphs):
+                    if guide_symbol_is_bitmap(glyphs[run_start].guide_symbol):
+                        run_start += 1
+                        continue
                     run_end = run_start + 1
                     run_title = glyphs[run_start].title
-                    while run_end < len(glyphs) and glyphs[run_end].title == run_title:
+                    while run_end < len(glyphs) and (
+                        glyphs[run_end].title == run_title
+                        and not guide_symbol_is_bitmap(glyphs[run_end].guide_symbol)
+                    ):
                         run_end += 1
                     run = glyphs[run_start:run_end]
                     path = QPainterPath()
                     for glyph in run:
-                        path.addText(
-                            float(line_x + glyph.x),
-                            baseline,
-                            glyph.font,
-                            glyph.text,
-                        )
+                        if glyph.guide_symbol is not None:
+                            # 矢量导唱符：作为路径并入本 run，共享同一套
+                            # 描边 / 填充 / 发光装饰。
+                            path.addPath(
+                                scaled_guide_symbol_path(
+                                    glyph.guide_symbol,
+                                    pixel_size=max(glyph.font.pixelSize(), 1),
+                                    left=float(line_x + glyph.x),
+                                    baseline_y=float(baseline),
+                                )
+                            )
+                        else:
+                            path.addText(
+                                float(line_x + glyph.x),
+                                baseline,
+                                glyph.font,
+                                glyph.text,
+                            )
                     left = float(line_x + run[0].x)
                     right = float(line_x + run[-1].x + run[-1].advance)
                     ascent = max(glyph.metrics.ascent() for glyph in run)
@@ -564,6 +781,19 @@ def build_title_overlay_layer(
                     ports.paint_text_stack(painter, path, rect, run_title)
                     run_start = run_end
             line_top += line_height + layout.gap
+        # 位图导唱符叠在文字之上（与歌词「先文字、后导唱符图片」的次序一致）；
+        # 标题静态烘焙 → 动图固定取首帧。
+        for glyph, rect in bitmap_units:
+            symbol = glyph.guide_symbol
+            frame = bitmap_guide_frame_at(
+                symbol.bitmap_before_path if symbol is not None else None,
+                None,
+            )
+            if frame is None or frame.image.isNull():
+                continue
+            target = rect.translated(float(pad_left), float(pad_top))
+            _paint_title_bitmap_guide_decor(painter, glyph, frame.image, target)
+            painter.drawImage(target, frame.image)
     finally:
         painter.end()
     return image, -pad_left, -pad_top
@@ -623,9 +853,14 @@ class TitleOverlayLayer:
             ),
             default=self.ports.visual_padding(self.title),
         )
+        top = -pad
+        bottom = self.title_layout.block_h + pad
+        for _glyph, rect in _title_bitmap_guide_rects(self.title_layout):
+            top = min(top, rect.top())
+            bottom = max(bottom, rect.bottom())
         return (
-            int(math.floor(self.title_layout.y_top - pad)),
-            int(math.ceil(self.title_layout.y_top + self.title_layout.block_h + pad)),
+            int(math.floor(self.title_layout.y_top + top)),
+            int(math.ceil(self.title_layout.y_top + bottom)),
         )
 
 

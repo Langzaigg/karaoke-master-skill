@@ -16,20 +16,28 @@ from krok_helper.subtitle_render.engine.style.title_semantics import (
     title_row_alignments,
     title_show_specs,
 )
-from krok_helper.subtitle_render.domain.timing import TimingTrack
+from krok_helper.subtitle_render.domain.timing import (
+    TimingTrack,
+    guide_symbol_has_visual,
+    guide_symbol_role_labels,
+)
 from krok_helper.subtitle_render.engine.render.effects.particles import FX_SPRITES
 from krok_helper.subtitle_render.domain.models import (
     TITLE_SCHEME_NAME,
     Style,
     TitleOverlay,
     normalize_title_char_role_labels,
+    normalize_title_guide_symbols,
     resolve_volume_appearance,
     style_for_track,
     style_to_dict,
 )
+from krok_helper.subtitle_render.serialization.timing import guide_symbol_to_dict
+from krok_helper.subtitle_render.engine.guide.semantics import guide_symbol_is_bitmap
 from krok_helper.subtitle_render.native.protocol import (
     RENDER_IR_SCHEMA,
     VectorGlyphTable,
+    bitmap_guide_to_ir,
     title_overlay_to_ir,
     track_to_ir,
 )
@@ -76,14 +84,65 @@ def title_to_ir(
     ]
     labels = normalize_title_char_role_labels(text, title.char_role_labels)
     payload["resolved_role_labels"] = labels
+    row_symbols, inline_symbols = normalize_title_guide_symbols(
+        text, title.guide_symbols, title.inline_guide_symbols
+    )
+    payload["guide_symbols"] = [
+        [row, _title_guide_to_ir(symbol)]
+        for row, symbol in sorted(row_symbols.items())
+    ]
+    payload["inline_guide_symbols"] = [
+        [row, index, _title_guide_to_ir(symbol)]
+        for (row, index), symbol in sorted(inline_symbols.items())
+    ]
+    # 行前导唱符的逐个角色标签也要能解析到外观：与正文字符共用 role_styles。
+    role_labels = {label for row in labels for label in row if label}
+    role_labels.update(
+        label
+        for symbol in row_symbols.values()
+        for label in guide_symbol_role_labels(symbol)
+        if label
+    )
     payload["role_styles"] = {
         label: title_overlay_to_ir(
             resolve_title_role_overlay(style, title, label),
             style.custom_style_schemes.get(label),
         )
-        for row in labels
-        for label in row
-        if label
+        for label in sorted(role_labels)
+    }
+    return payload
+
+
+# 标题位图导唱符的动图锚点：INT_MAX 让 sidecar 的「渲染时间 − 锚点」恒 ≤0、
+# 钳到 0 后永远选首帧——与 Python 标题层的静态烘焙（恒取首帧）同一画面。
+_TITLE_GUIDE_STATIC_ANCHOR_MS = 2147483647
+
+
+def _title_guide_to_ir(symbol: object) -> dict[str, Any] | None:
+    """把标题导唱符序列化成 sidecar 可解析的 IR 形态。
+
+    位图复用歌词 ``bitmap_guide_to_ir`` 的键名与文件签名（缓存身份），
+    矢量直接内嵌 ``guide_symbol_to_dict``（``parseVectorGlyph`` 同构）。
+    """
+    if not guide_symbol_has_visual(symbol):
+        return None
+    count = max(int(getattr(symbol, "count", 1) or 1), 1)
+    guide_labels = [
+        label or None for label in getattr(symbol, "role_labels", ()) or ()
+    ][:count]
+    if guide_symbol_is_bitmap(symbol):
+        payload = dict(
+            bitmap_guide_to_ir(symbol, anim_anchor_ms=_TITLE_GUIDE_STATIC_ANCHOR_MS)
+        )
+        payload["kind"] = "bitmap"
+        payload["count"] = count
+        payload["role_labels"] = guide_labels
+        return payload
+    payload = {
+        "kind": "vector",
+        "count": count,
+        "role_labels": guide_labels,
+        "vector_glyph": guide_symbol_to_dict(symbol),
     }
     return payload
 

@@ -111,6 +111,7 @@ from krok_helper.subtitle_render.domain.models import (
     TITLE_SCHEME_NAME,
     TitleOverlay,
     normalize_title_char_role_labels,
+    normalize_title_guide_symbols,
     layout_capacity,
     layout_display_name,
 )
@@ -1763,6 +1764,13 @@ class LyricsPanel(DropPanel):
         labels = normalize_title_char_role_labels(
             title.text_template, title.char_role_labels
         )
+        # 展示文字可能已由宿主替换为解析后的实际内容（模板占位符展开）：
+        # 导唱符键位与其对齐裁剪，未冻结模板时越界条目自然丢弃。
+        row_symbols, inline_symbols = normalize_title_guide_symbols(
+            title.text_template,
+            title.guide_symbols,
+            title.inline_guide_symbols,
+        )
         lines = [
             TimingLine(
                 chars=[
@@ -1771,6 +1779,12 @@ class LyricsPanel(DropPanel):
                 ],
                 end_ms=0,
                 layout_index=int(title.layout_index or 0),
+                guide_symbol=row_symbols.get(row),
+                inline_guide_symbols={
+                    index: symbol
+                    for (symbol_row, index), symbol in inline_symbols.items()
+                    if symbol_row == row
+                },
             )
             for row, text in enumerate(title.text_template.split("\n"))
         ]
@@ -2673,24 +2687,27 @@ class LyricsPanel(DropPanel):
             )
             menu.addAction(char_role_action)
             menu.addSeparator()
+        # 图片导唱符：歌词与标题共用同一条通道（标题恒显示「走字前」一侧）；
+        # 行首标记批量识别依赖打轴前缀，标题没有前缀标记，仅歌词模式提供。
+        guide_action = Action("导入图片导唱符…", menu)
+        guide_action.triggered.connect(
+            lambda _checked=False, rs=list(rows): self.guideSymbolImportRequested.emit(rs)
+        )
+        menu.addAction(guide_action)
         if not self._title_mode:
-            guide_action = Action("导入图片导唱符…", menu)
-            guide_action.triggered.connect(
-                lambda _checked=False, rs=list(rows): self.guideSymbolImportRequested.emit(rs)
-            )
-            menu.addAction(guide_action)
             replace_prefix_action = Action("批量识别导唱标记…", menu)
             replace_prefix_action.triggered.connect(
                 lambda _checked=False: self.guidePrefixReplaceRequested.emit()
             )
             menu.addAction(replace_prefix_action)
-            if any(self._track.lines[row].guide_symbol is not None for row in rows):
-                remove_guide_action = Action("移除所选行导唱符", menu)
-                remove_guide_action.triggered.connect(
-                    lambda _checked=False, rs=list(rows): self.guideSymbolRemoveRequested.emit(rs)
-                )
-                menu.addAction(remove_guide_action)
-            menu.addSeparator()
+        if any(self._track.lines[row].guide_symbol is not None for row in rows):
+            remove_guide_action = Action("移除所选行导唱符", menu)
+            remove_guide_action.triggered.connect(
+                lambda _checked=False, rs=list(rows): self.guideSymbolRemoveRequested.emit(rs)
+            )
+            menu.addAction(remove_guide_action)
+        menu.addSeparator()
+        if not self._title_mode:
             anchor_row = rows[0]
             insert_page = Action("在此行前插入分页", menu)
             insert_page.triggered.connect(
@@ -3135,7 +3152,7 @@ class LyricsPanel(DropPanel):
         line = self._track.lines[row]
         if line.is_blank or not line.chars:
             return
-        guide = line.guide_symbol if not self._title_mode else None
+        guide = line.guide_symbol
         replacement_count = guide_symbol_replacement_count(line)
         if replacement_count:
             # 行首标记替换：替换区芯片并入正文序列（保留原字符文本，可再
@@ -3178,7 +3195,7 @@ class LyricsPanel(DropPanel):
             default_swatch_role=TITLE_SCHEME_NAME if self._title_mode else "",
             vector_symbols=vector_symbols,
             protected_prefix_count=protected_count,
-            allow_svg_replacement=not self._title_mode,
+            allow_svg_replacement=True,
         )
         if dialog.exec() != QDialog.DialogCode.Accepted:
             return

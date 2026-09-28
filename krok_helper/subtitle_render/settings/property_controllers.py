@@ -25,6 +25,7 @@ from krok_helper.subtitle_render.domain.models import (
     ViewportAlign,
     builtin_preset_layout_ids,
     migrate_title_char_role_labels,
+    migrate_title_guide_symbols,
     rescale_scheme_font_sizes,
 )
 from krok_helper.subtitle_render.domain.timing import (
@@ -766,6 +767,16 @@ class TitleOverlaysController:
                 title.text_template,
                 title.char_role_labels,
                 new_text,
+            )
+            # 导唱符与角色标签同一套字符对位迁移：改字后只有在新旧文字里
+            # 都存活的字符保得住自己的图片 / 行前符号。
+            normalized["guide_symbols"], normalized["inline_guide_symbols"] = (
+                migrate_title_guide_symbols(
+                    title.text_template,
+                    title.guide_symbols,
+                    title.inline_guide_symbols,
+                    new_text,
+                )
             )
         if (
             "show_mode" in normalized

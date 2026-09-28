@@ -18,7 +18,9 @@
 
 #include <algorithm>
 #include <cmath>
+#include <map>
 #include <optional>
+#include <utility>
 
 namespace krok::subtitle::native::legacy_qt {
 
@@ -28,6 +30,8 @@ using protocol::ResolvedLineLayout;
 using protocol::ResolvedStyle;
 using protocol::RubyAnnotation;
 using protocol::TimingLine;
+using protocol::parseBitmapGuide;
+using protocol::parseVectorGlyph;
 using protocol::resolvedStyleForCharacter;
 using protocol::resolvedStyleForLine;
 using protocol::resolvedStyleFromTitle;
@@ -905,6 +909,71 @@ krok::subtitle::native::RenderScene gpuSceneFromConfig(const RenderConfig &confi
             titleRoleStyleIndices.insert(it.key(), styleIndex);
         }
 
+        // 标题图片导唱符：IR 下发 [行号, 符号] / [行号, 字符下标, 符号]
+        // （render_ir._title_guide_to_ir），复用歌词字符的 bitmap/vector
+        // 管线；标题永不走字，位图恒取「走字前」一侧。
+        struct TitleGuideEntry {
+            int count = 1;
+            std::shared_ptr<const krok::subtitle::native::VectorGlyph> vectorGlyph;
+            std::optional<krok::subtitle::native::BitmapGuide> bitmapGuide;
+            QStringList roleLabels;
+        };
+        const auto parseTitleGuide = [&](const QJsonObject &guide) -> TitleGuideEntry {
+            TitleGuideEntry entry;
+            entry.count = std::max(
+                guide.value(QStringLiteral("count")).toInt(1),
+                1
+            );
+            const QJsonArray labels = guide.value(
+                QStringLiteral("role_labels")
+            ).toArray();
+            for (int index = 0; index < entry.count; ++index) {
+                entry.roleLabels.append(
+                    index < labels.size() ? labels.at(index).toString() : QString{}
+                );
+            }
+            if (guide.value(QStringLiteral("kind")).toString()
+                == QStringLiteral("bitmap")) {
+                entry.bitmapGuide = parseBitmapGuide(guide);
+            } else {
+                const auto glyph = parseVectorGlyph(
+                    guide.value(QStringLiteral("vector_glyph"))
+                );
+                if (glyph.has_value()) {
+                    entry.vectorGlyph = std::make_shared<
+                        const krok::subtitle::native::VectorGlyph
+                    >(std::move(*glyph));
+                }
+            }
+            return entry;
+        };
+        QHash<int, TitleGuideEntry> rowGuides;
+        for (const auto &entryValue : title.value(
+                 QStringLiteral("guide_symbols")
+             ).toArray()) {
+            const QJsonArray entry = entryValue.toArray();
+            if (entry.size() == 2 && entry.at(0).isDouble()) {
+                rowGuides.insert(
+                    entry.at(0).toInt(),
+                    parseTitleGuide(entry.at(1).toObject())
+                );
+            }
+        }
+        std::map<std::pair<int, int>, TitleGuideEntry> inlineGuides;
+        for (const auto &entryValue : title.value(
+                 QStringLiteral("inline_guide_symbols")
+             ).toArray()) {
+            const QJsonArray entry = entryValue.toArray();
+            if (entry.size() == 3
+                && entry.at(0).isDouble()
+                && entry.at(1).isDouble()) {
+                inlineGuides.emplace(
+                    std::make_pair(entry.at(0).toInt(), entry.at(1).toInt()),
+                    parseTitleGuide(entry.at(2).toObject())
+                );
+            }
+        }
+
         for (int rowIndex = 0; rowIndex < rows.size(); ++rowIndex) {
             const QString &row = rows.at(rowIndex);
             if (row.isEmpty()) {
@@ -927,23 +996,58 @@ krok::subtitle::native::RenderScene gpuSceneFromConfig(const RenderConfig &confi
             titleLine.fadeInMs = defaultFadeInMs;
             titleLine.fadeOutMs = defaultFadeOutMs;
             titleLine.displayWindows = windows;
-            titleLine.chars.reserve(static_cast<std::size_t>(row.size()));
             const QJsonArray roleLabels = rowIndex < titleRoleRows.size()
                 ? titleRoleRows.at(rowIndex).toArray()
                 : QJsonArray{};
+            const auto rowGuide = rowGuides.constFind(rowIndex);
+            titleLine.chars.reserve(
+                static_cast<std::size_t>(row.size())
+                + (rowGuide != rowGuides.constEnd()
+                    ? static_cast<std::size_t>(rowGuide->count)
+                    : 0)
+            );
+            if (rowGuide != rowGuides.constEnd()) {
+                // 行前导唱符：count 个虚拟字符插在正文之前；标题永不走字
+                // （字符时间钉在遥远未来），位图恒取「走字前」一侧，动图按
+                // IR 锚点钉死首帧——与 Painter 标题层的静态烘焙同一画面。
+                for (int glyphIndex = 0; glyphIndex < rowGuide->count; ++glyphIndex) {
+                    const QString guideRole = glyphIndex < rowGuide->roleLabels.size()
+                        ? rowGuide->roleLabels.at(glyphIndex)
+                        : QString{};
+                    titleLine.chars.push_back(TextChar{
+                        std::wstring(L"\uFFFC"),
+                        1000000000,
+                        1000000001,
+                        titleRoleStyleIndices.value(guideRole, -1),
+                        rowGuide->vectorGlyph,
+                        rowGuide->bitmapGuide,
+                    });
+                }
+            }
             for (int charIndex = 0; charIndex < row.size(); ++charIndex) {
                 const QString roleLabel = charIndex < roleLabels.size()
                     ? roleLabels.at(charIndex).toString()
                     : QString{};
                 const int styleIndex = titleRoleStyleIndices.value(roleLabel, -1);
-                titleLine.chars.push_back(TextChar{
+                TextChar titleChar{
                     QString(row.at(charIndex)).toStdWString(),
                     1000000000,
                     1000000001,
                     styleIndex,
                     nullptr,
                     std::nullopt,
-                });
+                };
+                // 行内图片替换：与歌词 render line 同构——原字符槽位换成
+                // \uFFFC 虚拟字符 + 导唱符，角色沿用被替换字符自己的标签。
+                const auto inlineGuide = inlineGuides.find(
+                    std::make_pair(rowIndex, charIndex)
+                );
+                if (inlineGuide != inlineGuides.end()) {
+                    titleChar.text = std::wstring(L"\uFFFC");
+                    titleChar.vectorGlyph = inlineGuide->second.vectorGlyph;
+                    titleChar.bitmapGuide = inlineGuide->second.bitmapGuide;
+                }
+                titleLine.chars.push_back(std::move(titleChar));
             }
             // 行级对齐：row_alignments 与 text 的原始行号一一对应（含空行），
             // 缺省回落锚点水平位；非法值同样回落，不让坏 IR 移动标题。
