@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections import OrderedDict
 from collections.abc import Callable, Hashable, Sequence
 from dataclasses import dataclass, replace
+from threading import Lock
 
 from krok_helper.subtitle_render.engine.layout.display.diagnostics import (
     TimingCollisionAdjustment,
@@ -523,6 +524,22 @@ class DisplayResolutionCache:
 
 _DISPLAY_LINE_RESOLUTION_CACHE = DisplayResolutionCache(max_items=24)
 
+# 按 track 身份粗粒度互斥整轨解析：预览 worker 与余白诊断线程在样式刚变
+# 时会同时 miss 同一份解析（key 相同），两个线程各付一遍全价还互相抢
+# GIL。解析本身无重入（resolve_display_lines 不回调本入口），同 track
+# 共享一把锁即无死锁；锁字典按需增长，清缓存时一并回收。
+_DISPLAY_RESOLUTION_LOCKS: dict[int, Lock] = {}
+_DISPLAY_RESOLUTION_LOCKS_GUARD = Lock()
+
+
+def _display_resolution_lock(track_id: int) -> Lock:
+    with _DISPLAY_RESOLUTION_LOCKS_GUARD:
+        lock = _DISPLAY_RESOLUTION_LOCKS.get(track_id)
+        if lock is None:
+            lock = Lock()
+            _DISPLAY_RESOLUTION_LOCKS[track_id] = lock
+        return lock
+
 
 def cached_display_line_resolution(key: Hashable) -> DisplayLines | None:
     return _DISPLAY_LINE_RESOLUTION_CACHE.get(key)
@@ -538,6 +555,8 @@ def store_display_line_resolution(
 
 def clear_display_line_resolution_cache() -> None:
     _DISPLAY_LINE_RESOLUTION_CACHE.clear()
+    with _DISPLAY_RESOLUTION_LOCKS_GUARD:
+        _DISPLAY_RESOLUTION_LOCKS.clear()
 
 
 @dataclass(frozen=True)
@@ -1207,13 +1226,20 @@ def resolve_display_lines_for_style(
         cached = cached_display_line_resolution(cache_key)
         if cached is not None:
             return cached
-        resolved = resolve_display_lines(
-            avoid_collisions=not style.allow_inter_page_line_overlap,
-            auto_fill_section_time=style.auto_fill_section_time,
-            ports=ports.build(logical_w, logical_h, base_kwargs),
-        )
-        store_display_line_resolution(cache_key, track, resolved)
-        return resolved
+        # 并发 miss 防双算：预览 worker 与诊断线程可能同时对同一 (track,
+        # style) 全量解析；后到者在锁上等先到者写完缓存再读，各线程下游
+        # （绘制可见行 / 逐行余白测量）互不重复付整轨解析的钱。
+        with _display_resolution_lock(id(track)):
+            cached = cached_display_line_resolution(cache_key)
+            if cached is not None:
+                return cached
+            resolved = resolve_display_lines(
+                avoid_collisions=not style.allow_inter_page_line_overlap,
+                auto_fill_section_time=style.auto_fill_section_time,
+                ports=ports.build(logical_w, logical_h, base_kwargs),
+            )
+            store_display_line_resolution(cache_key, track, resolved)
+            return resolved
 
 
 __all__ = [

@@ -25,6 +25,8 @@ def layout_pass():
         _LAYOUT_PASS.line_indices = {}
         _LAYOUT_PASS.active_rubies = {}
         _LAYOUT_PASS.ruby_gaps = {}
+        _LAYOUT_PASS.line_widths = {}
+        _LAYOUT_PASS.signatures = {}
         _LAYOUT_PASS.char_advances = {}
         _LAYOUT_PASS.char_ink_widths = {}
         _LAYOUT_PASS.ink_rects = {}
@@ -36,6 +38,7 @@ def layout_pass():
         _LAYOUT_PASS.lines = []
         _LAYOUT_PASS.ruby_lists = []
         _LAYOUT_PASS.metrics = []
+        _LAYOUT_PASS.signature_refs = []
     _LAYOUT_PASS.depth = depth + 1
     try:
         yield
@@ -47,6 +50,8 @@ def layout_pass():
             _LAYOUT_PASS.line_indices = None
             _LAYOUT_PASS.active_rubies = None
             _LAYOUT_PASS.ruby_gaps = None
+            _LAYOUT_PASS.line_widths = None
+            _LAYOUT_PASS.signatures = None
             _LAYOUT_PASS.char_advances = None
             _LAYOUT_PASS.char_ink_widths = None
             _LAYOUT_PASS.ink_rects = None
@@ -55,9 +60,10 @@ def layout_pass():
             _LAYOUT_PASS.section_edges = None
             _LAYOUT_PASS.tracks = []
             _LAYOUT_PASS.styles = []
-            _LAYOUT_PASS.lines = []
-            _LAYOUT_PASS.ruby_lists = []
-            _LAYOUT_PASS.metrics = []
+        _LAYOUT_PASS.lines = []
+        _LAYOUT_PASS.ruby_lists = []
+        _LAYOUT_PASS.metrics = []
+        _LAYOUT_PASS.signature_refs = []
 
 
 __all__ = ["layout_pass"]

@@ -121,6 +121,10 @@ from krok_helper.subtitle_render.engine.render_progress import (
     render_progress_scope,
     yield_to_gui,
 )
+from krok_helper.subtitle_render.engine.value_signature import (
+    lyric_layout_style_signature,
+    value_signature,
+)
 from krok_helper.subtitle_render.frontend.preview.preview_async import (
     _RENDER_STAGE_LABELS,
     _RENDER_STAGE_SPANS_PAINTER,
@@ -1098,6 +1102,12 @@ class SubtitleRenderWindow(QWidget):
         )
         self._last_margin_warning_key = ""
         self._layout_issues: list[_LayoutIssue | _TimingIssue] = []
+        # 逐轨诊断缓存：key 为 (track 内容签名, 样式布局签名, 画面宽高)，
+        # 纯绘制字段调整时直接复用上次结果，跳过整条测量链路。
+        self._layout_issue_cache: dict[int, tuple[tuple, object]] = {}
+        # 区分「从未跑过诊断」与「跑过且无问题」：对话框路径据此决定
+        # 是先补一次后台检查还是直接展示空结果。
+        self._layout_issues_ready = False
         self._layout_issues_dialog: Optional[_LayoutIssuesDialog] = None
         # 歌词 / 属性面板分割比例：默认 4:6，用户拖动后记忆。拖动过程中
         # splitterMoved 连续触发，用单发定时器合并成一次落盘。
@@ -2174,6 +2184,7 @@ class SubtitleRenderWindow(QWidget):
             self._tracks_view.set_time(0)
             self._set_layout_issues([])
             self._last_margin_warning_key = ""
+            self._layout_issue_cache.clear()
         finally:
             self._loading_project = False
             self._sync_subtitle_source_watcher()
@@ -6113,12 +6124,35 @@ class SubtitleRenderWindow(QWidget):
         issues: list[_LayoutIssue | _TimingIssue] = []
         for track_index, track in enumerate(tracks):
             yield_to_gui()
-            warnings = check_layout_margins(track, style, logical_w)
             source_name = (
                 source_names[track_index]
                 if track_index < len(source_names)
                 else f"字幕源 {track_index + 1}"
             )
+            # 诊断结果只由 (track 内容, 样式的布局相关字段, 画面宽高) 决定。
+            # 按输入签名逐轨缓存后，纯绘制字段（配色/发光/装饰等白名单项）
+            # 的调整不再重跑整条测量链路——引擎缓存 key 用的同一份签名口径。
+            cache_key = (
+                value_signature(track),
+                lyric_layout_style_signature(style),
+                logical_w,
+                logical_h,
+            )
+            cached = self._layout_issue_cache.get(track_index)
+            if cached is None or cached[0] != cache_key:
+                warnings = check_layout_margins(track, style, logical_w)
+                diagnostics = layout_timing_diagnostics_for_style(
+                    logical_w,
+                    logical_h,
+                    track,
+                    style,
+                )
+                self._layout_issue_cache[track_index] = (
+                    cache_key,
+                    (warnings, diagnostics),
+                )
+            else:
+                warnings, diagnostics = cached[1]
             issues.extend(
                 _LayoutIssue(
                     track_index=track_index,
@@ -6127,12 +6161,6 @@ class SubtitleRenderWindow(QWidget):
                 )
                 for warning in warnings
                 if 0 <= warning.line_index < len(track.lines)
-            )
-            diagnostics = layout_timing_diagnostics_for_style(
-                logical_w,
-                logical_h,
-                track,
-                style,
             )
             issues.extend(
                 _TimingIssue(
@@ -6153,6 +6181,7 @@ class SubtitleRenderWindow(QWidget):
         self, issues: list[_LayoutIssue | _TimingIssue]
     ) -> None:
         self._layout_issues = list(issues)
+        self._layout_issues_ready = True
         if hasattr(self, "_layout_issues_button"):
             count = len(issues)
             self._layout_issues_button.setToolTip(
@@ -6166,14 +6195,15 @@ class SubtitleRenderWindow(QWidget):
             self._layout_issues_dialog.set_issues(self._layout_issues)
 
     def _show_layout_issues(self) -> None:
-        """Open or focus the persistent list of current lyrics problems."""
-        try:
-            self._set_layout_issues(self._collect_layout_issues())
-        except Exception:  # noqa: BLE001 — diagnostics must not block editing
-            logging.getLogger(__name__).warning(
-                "刷新歌词布局问题失败", exc_info=True
-            )
-        if not self._layout_issues:
+        """Open or focus the persistent list of current lyrics problems.
+
+        直接展示后台检查维护的结果，不再在 GUI 线程同步重算（多字幕源
+        工程一次全量诊断要几百毫秒，会把界面冻住）；展示的同时补一次
+        后台刷新，对话框开着时结果回来会自动更新。
+        """
+        if not self._layout_issues_ready:
+            self._check_layout_margins()
+        if self._layout_issues_ready and not self._layout_issues:
             fluent_info(
                 self,
                 "当前字幕诊断",
@@ -6191,6 +6221,8 @@ class SubtitleRenderWindow(QWidget):
         self._layout_issues_dialog.show()
         self._layout_issues_dialog.raise_()
         self._layout_issues_dialog.activateWindow()
+        if self._layout_issues_ready:
+            self._check_layout_margins()
 
     def _on_layout_issues_dialog_destroyed(self, _object: object = None) -> None:
         self._layout_issues_dialog = None
@@ -6221,6 +6253,7 @@ class SubtitleRenderWindow(QWidget):
         if not self._all_tracks():
             self._set_layout_issues([])
             self._last_margin_warning_key = ""
+            self._layout_issue_cache.clear()
             return
         if self._margin_check_busy:
             self._margin_check_rerun_pending = True

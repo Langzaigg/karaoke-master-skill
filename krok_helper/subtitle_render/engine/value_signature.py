@@ -6,6 +6,7 @@ from dataclasses import fields as dataclass_fields, is_dataclass
 from typing import Hashable
 
 from krok_helper.subtitle_render.domain.timing import GuideSymbol
+from krok_helper.subtitle_render.engine.layout.layout_context import _LAYOUT_PASS
 from krok_helper.subtitle_render.engine.render_progress import yield_to_gui
 
 
@@ -139,8 +140,29 @@ _LYRIC_LAYOUT_EXCLUDED_SCHEME_FIELDS = frozenset({
 
 
 def value_signature(value) -> Hashable:
-    """Recursively describe the current value without using object identity."""
+    """Recursively describe the current value without using object identity.
 
+    同一 :func:`layout_pass` 区间内按对象身份 memoize：整轨签名的深度
+    递归要遍历每行每字符，而 display 缓存查找、诊断缓存 key、页偏移等
+    会在一个区间里对同一 track/style 反复签名。区间契约保证输入不可变，
+    身份键即语义键；区间外（或无区间）退化为每次现算。
+    """
+
+    cache = getattr(_LAYOUT_PASS, "signatures", None)
+    if cache is not None:
+        key = ("value", id(value))
+        hit = cache.get(key)
+        if hit is not None:
+            return hit
+        result = _value_signature_impl(value)
+        cache[key] = result
+        # 键里有 id()：存住入参，避免回收后地址被复用。
+        _LAYOUT_PASS.signature_refs.append(value)
+        return result
+    return _value_signature_impl(value)
+
+
+def _value_signature_impl(value) -> Hashable:
     # 整轨签名是热路径（布局计划缓存每次查找都要重算），长曲目的递归
     # 遍历不释放 GIL 会饿到 GUI 线程；节流后的让出近乎零开销。
     yield_to_gui()
@@ -186,6 +208,18 @@ def lyric_layout_style_signature(style, *, include_paint_fields: bool = False) -
     布局计划 / 显示行解析 / 页偏移缓存的值是纯几何与时间结构，用默认
     的颜色剔除版即可在颜色编辑时安全复用。
     """
+    cache = getattr(_LAYOUT_PASS, "signatures", None)
+    if cache is not None:
+        key = ("layout-style", id(style), bool(include_paint_fields))
+        hit = cache.get(key)
+        if hit is not None:
+            return hit
+        result = _lyric_layout_value_signature(
+            style, root=True, include_paint_fields=include_paint_fields
+        )
+        cache[key] = result
+        _LAYOUT_PASS.signature_refs.append(style)
+        return result
     return _lyric_layout_value_signature(
         style, root=True, include_paint_fields=include_paint_fields
     )

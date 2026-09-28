@@ -14,6 +14,7 @@ from krok_helper.subtitle_render.engine.guide import (
     render_line_with_guide_symbols,
     vector_glyph_width,
 )
+from krok_helper.subtitle_render.engine.layout.layout_context import _LAYOUT_PASS
 from krok_helper.subtitle_render.engine.layout.line.geometry import (
     line_has_role_labels,
 )
@@ -22,6 +23,7 @@ from krok_helper.subtitle_render.engine.layout.page.pagination import (
     line_center_override,
     renderable_page_lines,
 )
+from krok_helper.subtitle_render.engine.render_progress import yield_to_gui
 from krok_helper.subtitle_render.engine.ruby import (
     active_rubies_for_line,
     ruby_char_gaps,
@@ -139,7 +141,34 @@ def line_total_width(
     style: Style,
     rubies: list[RubyAnnotation] | None = None,
 ) -> int:
-    """Measure the N3 horizontal line box, optionally including ruby."""
+    """Measure the N3 horizontal line box, optionally including ruby.
+
+    同一 :func:`layout_pass` 区间内按入参身份缓存：SmartHorizon 的页级
+    宽度盘点、余白诊断与碰撞测量会在一次区间里对同一行反复测量，字符级
+    ``_CHAR_GLYPH_CACHE`` 只省 path 构造，省不掉逐字符的 Python 循环。
+    区间契约保证 track/style/rubies 不可变，身份键即语义键。
+    """
+
+    cache = getattr(_LAYOUT_PASS, "line_widths", None)
+    if cache is None:
+        return _line_total_width_uncached(line, style, rubies)
+    key = (id(line), id(style), id(rubies))
+    hit = cache.get(key)
+    if hit is None:
+        hit = _line_total_width_uncached(line, style, rubies)
+        cache[key] = hit
+        # 键里有 id()：存住入参，避免回收后地址被复用。
+        _LAYOUT_PASS.lines.append(line)
+        _LAYOUT_PASS.styles.append(style)
+        _LAYOUT_PASS.ruby_lists.append(rubies)
+    return hit
+
+
+def _line_total_width_uncached(
+    line: TimingLine,
+    style: Style,
+    rubies: list[RubyAnnotation] | None = None,
+) -> int:
     source_line = line
     line = render_line_with_guide_symbols(line)
     if line_has_role_labels(line):
@@ -152,8 +181,12 @@ def line_total_width(
         latin_font = build_latin_font(style)
         font_for = make_font_for(style, font, latin_font)
         latin_metrics = QFontMetrics(latin_font) if font_for is not None else metrics
-        char_widths = [
-            (
+        char_widths = []
+        for char in line.chars:
+            # 逐字符测量是余白诊断整轨重算的热点循环；节流后的让出保证
+            # 后台线程长段执行不饿死 GUI 线程（与 value_signature 同口径）。
+            yield_to_gui()
+            char_widths.append(
                 vector_glyph_width(
                     char.vector_glyph,
                     style_for_role_in_layout(style, char.role_label),
@@ -168,8 +201,6 @@ def line_total_width(
                     style,
                 )
             )
-            for char in line.chars
-        ]
         text_width = line_text_width(char_widths, style)
     left_ext = right_ext = 0
     gap_total = 0

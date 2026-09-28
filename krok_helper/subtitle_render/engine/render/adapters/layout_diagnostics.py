@@ -118,11 +118,15 @@ def layout_timing_diagnostics_for_style(
         independent_line_entry=True,
     )
     synchronized = apply_constrained_page_sync(ideal, style)
+    # 一份静态墨迹几何贯穿 ideal / guarded / final 三条派生线：几何与
+    # 显示时间窗无关（key 是 track 行索引 + lane），重复测量纯属浪费。
+    geometry_cache = painter_impl.CollisionGeometryCache()
     animation_ports = painter_impl.animation_guard_ports_for_style(
         logical_w,
         logical_h,
         track,
         style,
+        geometry_cache=geometry_cache,
     )
     animation_candidate = apply_animation_time_guard(
         style,
@@ -161,6 +165,7 @@ def layout_timing_diagnostics_for_style(
         track,
         style,
         collision_guarded,
+        geometry_cache=geometry_cache,
     )
     diagnostics.extend(
         build_force_bottom_diagnostics(
@@ -175,6 +180,7 @@ def layout_timing_diagnostics_for_style(
                 track,
                 style,
                 collision_guarded,
+                geometry_cache=geometry_cache,
             ),
         )
     )
@@ -205,6 +211,7 @@ def layout_timing_diagnostics_for_style(
         track,
         style,
         final,
+        geometry_cache=geometry_cache,
     )
     diagnostics.extend(
         build_page_shift_diagnostics(

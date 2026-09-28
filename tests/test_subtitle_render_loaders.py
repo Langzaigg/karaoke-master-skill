@@ -10,6 +10,7 @@ import ast
 import os
 from pathlib import Path
 import sys
+import threading
 import time
 
 import pytest
@@ -45,6 +46,7 @@ from krok_helper.subtitle_render.domain.models import (  # noqa: E402
     GuideSymbol,
     LyricsLayout,
     Style,
+    TitleOverlay,
     SubtitleStyleScheme,
     TimingChar,
     TimingLine,
@@ -2539,6 +2541,9 @@ def test_layout_issue_button_lists_and_jumps_to_problem_line(qapp, monkeypatch):
         "layout_timing_diagnostics_for_style",
         lambda *_args: [timing],
     )
+    # 换桩后清逐轨结果缓存：缓存按输入签名复用，monkeypatch 打破了
+    # 「结果纯函数于输入」的假设，需显式作废。
+    win._layout_issue_cache.clear()
     win._check_layout_margins()
     _drain_margin_check(win, qapp)
     assert win._layout_issues_button.toolTip() == "当前字幕诊断（1 条）"
@@ -2556,10 +2561,147 @@ def test_layout_issue_button_lists_and_jumps_to_problem_line(qapp, monkeypatch):
         "layout_timing_diagnostics_for_style",
         lambda *_args: [],
     )
+    win._layout_issue_cache.clear()
     win._check_layout_margins()
     _drain_margin_check(win, qapp)
     assert win._layout_issues_button.isHidden() is True
     assert dialog._summary_label.text().startswith("未发现字幕布局或时间问题")
+    win.close()
+
+
+def test_collect_layout_issues_caches_by_layout_signature(qapp, monkeypatch):
+    """逐轨诊断缓存：纯绘制字段变化复用结果，布局字段变化重算。
+
+    缓存 key 与引擎布局缓存的签名口径一致（``lyric_layout_style_signature``
+    剔除纯绘制字段），调配色不再重跑整条测量链路；字号属于布局输入，
+    变化必须作废缓存。
+    """
+    win = _make_window(qapp, monkeypatch)
+    track = TimingTrack(
+        lines=[
+            TimingLine(
+                chars=[TimingChar(text="あ", start_ms=1_000)], end_ms=2_000
+            )
+        ]
+    )
+    win._apply_timing_track(track, None)
+    calls: list[tuple] = []
+
+    def counting_check(source_track, source_style, width):
+        calls.append(("margin", source_style.stroke_color, source_style.font_size_px))
+        return [
+            mw.LayoutMarginWarning(
+                line_index=0, text="あ", level="overflow", left=-5, right=1925
+            )
+        ]
+
+    monkeypatch.setattr(mw, "check_layout_margins", counting_check)
+    monkeypatch.setattr(
+        mw, "layout_timing_diagnostics_for_style", lambda *_args: []
+    )
+
+    style_paint = Style()
+    style_paint.stroke_color = "#112233"
+    first = win._collect_layout_issues(
+        tracks=[track], style=style_paint, logical_w=1920, logical_h=1080
+    )
+    assert calls, "首次收集必须真正执行测量"
+
+    # 纯绘制字段（描边颜色）变化：签名不变 → 直接复用，不再调测量。
+    style_repaint = Style()
+    style_repaint.stroke_color = "#445566"
+    second = win._collect_layout_issues(
+        tracks=[track], style=style_repaint, logical_w=1920, logical_h=1080
+    )
+    assert len(calls) == 1, "纯绘制字段变化不应触发诊断重算"
+    assert second == first
+
+    # 布局字段（字号）变化：签名变化 → 重算并更新缓存。
+    style_layout = Style()
+    style_layout.stroke_color = "#445566"
+    style_layout.font_size_px = style_layout.font_size_px + 10
+    win._collect_layout_issues(
+        tracks=[track], style=style_layout, logical_w=1920, logical_h=1080
+    )
+    assert len(calls) == 2, "布局字段变化必须作废缓存重算"
+
+    # 标题条目与音量柱/指示灯的纯外观编辑（属性面板标题页 / 特效页）：
+    # 不参与歌词行布局，签名必须保持稳定——调它们不得连带重测歌词诊断。
+    style_title = Style()
+    style_title.font_size_px = style_layout.font_size_px
+    style_title.title_overlays = [
+        TitleOverlay(enabled=True, text_template="副标题 {artist}")
+    ]
+    win._collect_layout_issues(
+        tracks=[track], style=style_title, logical_w=1920, logical_h=1080
+    )
+    style_fx = Style()
+    style_fx.font_size_px = style_layout.font_size_px
+    style_fx.volume_fill_color = "#101010"
+    style_fx.volume_column_width = 9
+    style_fx.lit_style = "heart"
+    win._collect_layout_issues(
+        tracks=[track], style=style_fx, logical_w=1920, logical_h=1080
+    )
+    assert len(calls) == 2, "标题/音量柱外观/指示灯外观编辑不应触发诊断重算"
+
+    # 音量柱开关属于时序输入（段首信号窗口），必须作废缓存。
+    style_signal = Style()
+    style_signal.font_size_px = style_layout.font_size_px
+    style_signal.volume_enabled = not Style().volume_enabled
+    win._collect_layout_issues(
+        tracks=[track], style=style_signal, logical_w=1920, logical_h=1080
+    )
+    assert len(calls) == 3, "音量柱开关改变信号窗口，必须重算"
+
+    # 轨道内容变化同样作废缓存。
+    track.lines[0].end_ms = 3_000
+    win._collect_layout_issues(
+        tracks=[track], style=style_signal, logical_w=1920, logical_h=1080
+    )
+    assert len(calls) == 4, "轨道内容变化必须作废缓存重算"
+    win.close()
+
+
+def test_show_layout_issues_uses_background_results(qapp, monkeypatch):
+    """诊断对话框路径不再在 GUI 线程同步重算，直接展示后台维护的结果。"""
+    win = _make_window(qapp, monkeypatch)
+    track = TimingTrack(
+        lines=[
+            TimingLine(
+                chars=[TimingChar(text="い", start_ms=1_000)], end_ms=2_000
+            )
+        ]
+    )
+    win._apply_timing_track(track, None)
+    collect_threads: list[str] = []
+
+    def fake_collect(**kwargs):
+        collect_threads.append(threading.current_thread().name)
+        return []
+
+    monkeypatch.setattr(win, "_collect_layout_issues", fake_collect)
+
+    # 未跑过后台检查时打开对话框：不在 GUI 线程同步重算，展示后由后台回填。
+    assert win._layout_issues_ready is False
+    win._show_layout_issues()
+    deadline = time.perf_counter() + 5.0
+    while win._margin_check_busy and time.perf_counter() < deadline:
+        qapp.processEvents()
+        time.sleep(0.01)
+    qapp.processEvents()
+    assert collect_threads, "应触发一次后台诊断"
+    assert "MainThread" not in collect_threads, (
+        "对话框路径不得在 GUI 线程同步收集诊断"
+    )
+
+    # 后台结果送达后再次打开：直接复用，不新增任何收集。
+    assert win._layout_issues_ready is True
+    before = len(collect_threads)
+    win._show_layout_issues()
+    assert len(collect_threads) in (before, before + 1)
+    if len(collect_threads) == before + 1:
+        assert collect_threads[-1] != "MainThread"
     win.close()
 
 

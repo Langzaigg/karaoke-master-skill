@@ -179,12 +179,12 @@ def char_ink_width(
     return width
 
 
-_CHAR_METRIC_CACHE: dict[tuple, tuple[int, float]] = {}
-_CHAR_METRIC_CACHE_MAX = 16384
+_CHAR_GLYPH_CACHE: dict[tuple, tuple] = {}
+_CHAR_GLYPH_CACHE_MAX = 16384
 
 
 def clear_char_metric_cache() -> None:
-    _CHAR_METRIC_CACHE.clear()
+    _CHAR_GLYPH_CACHE.clear()
 
 
 def n3_char_box_ascent(
@@ -215,21 +215,54 @@ def _font_signature(font: QFont) -> tuple:
     return (font.family(), font.pixelSize(), int(font.weight()), font.italic(), font.stretch())
 
 
-def _char_metric_key(
+def _char_glyph_metrics(
     text: str,
     glyph_font: QFont,
-    advance: int,
-    style: Style,
-) -> tuple:
-    return (
-        text,
-        _font_signature(glyph_font),
-        advance,
-        bool(style.allow_biting),
-        int(style.stroke_width_px),
-        int(style.space_width_percent),
-        int(style.font_size_px),
-    )
+    metrics: QFontMetrics,
+    latin_metrics: QFontMetrics,
+    font_for: FontSelector | None,
+) -> tuple[int, bool, float, float, int, int]:
+    """Font-determined glyph geometry: advance, ink box and bearings.
+
+    只依赖 ``(text, glyph_font)``，与描边宽/字间距/空格宽等纯算术参数
+    无关——底层按字体签名缓存后，调描边宽、改字间距不再重付
+    ``QPainterPath.addText`` 的矢量测量。
+    """
+
+    key = (text, _font_signature(glyph_font))
+    cached = _CHAR_GLYPH_CACHE.get(key)
+    if cached is not None:
+        return cached
+    advance = char_advance(text, metrics, latin_metrics, font_for)
+    path = QPainterPath()
+    if text:
+        path.addText(0.0, 0.0, glyph_font, text)
+    bounds = path.boundingRect()
+    bounds_empty = bounds.isEmpty()
+    bounds_width = float(bounds.width())
+    bounds_left = float(bounds.left())
+    if bounds_empty:
+        left_bearing = right_bearing = 0
+    else:
+        is_latin_glyph = font_for is not None and is_n3_latin_text(text)
+        glyph_metrics = (
+            QFontMetrics(glyph_font)
+            if is_emoji_text(text)
+            else latin_metrics
+            if is_latin_glyph
+            else metrics
+        )
+        try:
+            left_bearing = glyph_metrics.leftBearing(text)
+            right_bearing = glyph_metrics.rightBearing(text)
+        except (TypeError, ValueError):
+            left_bearing = int(bounds.left())
+            right_bearing = int(advance - bounds.right())
+    entry = (advance, bounds_empty, bounds_width, bounds_left, left_bearing, right_bearing)
+    if len(_CHAR_GLYPH_CACHE) >= _CHAR_GLYPH_CACHE_MAX:
+        _CHAR_GLYPH_CACHE.clear()
+    _CHAR_GLYPH_CACHE[key] = entry
+    return entry
 
 
 def truncate_div(numerator: int, denominator: int) -> int:
@@ -286,13 +319,6 @@ def _char_layout_metrics(
 ) -> tuple[int, float]:
     is_latin_glyph = font_for is not None and is_n3_latin_text(text)
     glyph_font = font_for(text) if font_for is not None else font
-    glyph_metrics = (
-        QFontMetrics(glyph_font)
-        if is_emoji_text(text)
-        else latin_metrics
-        if is_latin_glyph
-        else metrics
-    )
     font_size = glyph_font.pixelSize()
     if font_size <= 0:
         font_size = max(
@@ -305,55 +331,40 @@ def _char_layout_metrics(
     if text == " ":
         return font_size * space_percent // 100, 0.0
 
-    advance = char_advance(text, metrics, latin_metrics, font_for)
-    key = _char_metric_key(text, glyph_font, advance, style)
-    cached = _CHAR_METRIC_CACHE.get(key)
-    if cached is not None:
-        return cached
+    (
+        advance,
+        bounds_empty,
+        bounds_width,
+        bounds_left,
+        left_bearing,
+        right_bearing,
+    ) = _char_glyph_metrics(text, glyph_font, metrics, latin_metrics, font_for)
 
-    path = QPainterPath()
-    if text:
-        path.addText(0.0, 0.0, glyph_font, text)
-    bounds = path.boundingRect()
-    if bounds.isEmpty():
+    if bounds_empty:
         body_width = font_size * space_percent * 25 // 100 // 10
-        result = (max(body_width, 0) + edge_size, 0.0)
-    else:
-        try:
-            width_left_bearing = glyph_metrics.leftBearing(text)
-            width_right_bearing = glyph_metrics.rightBearing(text)
-        except (TypeError, ValueError):
-            width_left_bearing = int(bounds.left())
-            width_right_bearing = int(advance - bounds.right())
-        width = nicokara_layout_width(
-            int(bounds.width()),
-            advance,
-            width_left_bearing,
-            width_right_bearing,
-            edge_size=edge_size,
-            allow_biting=bool(style.allow_biting),
-        )
-        try:
-            offset_left_bearing = glyph_metrics.leftBearing(text)
-        except (TypeError, ValueError):
-            offset_left_bearing = int(bounds.left())
-        geometry_left = nicokara_char_geometry_left_offset(
-            int(bounds.width()),
-            advance,
-            offset_left_bearing,
-            allow_biting=bool(style.allow_biting),
-        )
-        offset = (
-            -float(bounds.left())
-            + float(geometry_left)
-            + max(int(style.stroke_width_px), 0) / 2.0
-        )
-        result = (width, offset)
+        return max(body_width, 0) + edge_size, 0.0
 
-    if len(_CHAR_METRIC_CACHE) >= _CHAR_METRIC_CACHE_MAX:
-        _CHAR_METRIC_CACHE.clear()
-    _CHAR_METRIC_CACHE[key] = result
-    return result
+    allow_biting = bool(style.allow_biting)
+    width = nicokara_layout_width(
+        int(bounds_width),
+        advance,
+        left_bearing,
+        right_bearing,
+        edge_size=edge_size,
+        allow_biting=allow_biting,
+    )
+    geometry_left = nicokara_char_geometry_left_offset(
+        int(bounds_width),
+        advance,
+        left_bearing,
+        allow_biting=allow_biting,
+    )
+    offset = (
+        -bounds_left
+        + float(geometry_left)
+        + edge_size / 2.0
+    )
+    return width, offset
 
 
 def char_path_left_offset(
