@@ -49,6 +49,30 @@ class TestContainerPage:
         container = AudioProcessingPage(QWidget(), QWidget(), settings, lambda: None)
         assert container.current_tab() == "alignment"
 
+    def test_merge_tab_registered_and_persisted(self) -> None:
+        from krok_helper.audio_processing.page import TAB_ALIGNMENT, TAB_MERGE
+
+        settings = AppSettings()
+        merge = QWidget()
+        container = AudioProcessingPage(
+            QWidget(), QWidget(), settings, lambda: None, merge_page=merge
+        )
+        container.switch_tab(TAB_MERGE)
+        assert container.current_tab() == "merge"
+        assert settings.pymss["last_internal_tab"] == "merge"
+        assert container.merge_page is merge
+        container.switch_tab(TAB_ALIGNMENT)
+        assert container.current_tab() == "alignment"
+
+    def test_merge_tab_ignored_without_merge_page(self) -> None:
+        from krok_helper.audio_processing.page import TAB_MERGE
+
+        settings = AppSettings()
+        settings.pymss["last_internal_tab"] = TAB_MERGE
+        container = AudioProcessingPage(QWidget(), QWidget(), settings, lambda: None)
+        # 没有 merge 页（独立运行/旧用法）时，持久化的 merge tab 回落到对齐页。
+        assert container.current_tab() == "alignment"
+
 
 class TestSeparationSettingsDialog:
     def test_external_address_is_reconfigured_through_capability_wizard(self) -> None:

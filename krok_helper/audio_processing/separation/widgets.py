@@ -769,13 +769,13 @@ class OutputSettingsCard(CardWidget):
 
     FORMATS = (("WAV（无损）", "wav"), ("FLAC（无损）", "flac"))
 
-    def __init__(self, parent: QWidget | None = None) -> None:
+    def __init__(self, parent: QWidget | None = None, *, title: str = "输出设置") -> None:
         super().__init__(parent)
         layout = self.createVBoxLayout()
 
         header = QHBoxLayout()
         header.setContentsMargins(0, 0, 0, 0)
-        header.addWidget(StrongBodyLabel("输出设置", self))
+        header.addWidget(StrongBodyLabel(title, self))
         header.addStretch(1)
         self._open_dir_button = ToolButton(FIF.FOLDER, self)
         self._open_dir_button.setToolTip("打开输出目录")

@@ -586,6 +586,7 @@ class KrokHelperQtApp(QMainWindow):
             ("Hi-Res 混流－后台任务运行中", "hires_page"),
             ("视频下载", "video_download_page"),
             ("音频分离", "audio_separation_page"),
+            ("音频合成", "audio_merge_page"),
             ("字幕视频生成", "subtitle_render_page"),
         ):
             page = getattr(self, attr_name, None)
@@ -921,12 +922,21 @@ class KrokHelperQtApp(QMainWindow):
             parent=self.page_stack,
             workflow_context=self,
         )
+        from krok_helper.audio_processing.merge import MergePage
+
+        self.audio_merge_page = MergePage(
+            self,
+            self.settings,
+            self._save_all_settings,
+            parent=self.page_stack,
+        )
         self.audio_processing_page = AudioProcessingPage(
             self.align_page,
             self.audio_separation_page,
             self.settings,
             self._save_all_settings,
             parent=self.page_stack,
+            merge_page=self.audio_merge_page,
         )
         self._report_startup(50, "正在加载歌词检索模块")
         self.lyrics_page = LyricsSearchPage(host=self, parent=self.page_stack)
@@ -2338,7 +2348,18 @@ class KrokHelperQtApp(QMainWindow):
         if not KrokHelperQtApp._confirm_unsaved_projects(self, event):
             return False
         KrokHelperQtApp._finalize_lyrics_timing_shutdown(self)
+        KrokHelperQtApp._shutdown_audio_merge(self)
         return True
+
+    def _shutdown_audio_merge(self) -> None:
+        """音频合成页受控收尾：停播放、清预览临时文件。"""
+        page = getattr(self, "audio_merge_page", None)
+        if page is None:
+            return
+        try:
+            page.shutdown()
+        except Exception:
+            logging.getLogger(__name__).warning("音频合成页收尾失败", exc_info=True)
 
     def _confirm_unsaved_projects(self, event, pages=None) -> bool:
         candidates = pages or (

@@ -211,6 +211,17 @@ git submodule status
     `cmake --build build\native-renderer --config Release --clean-first`
     全量重建后再验证。
 
+12. **offscreen 平台下「整应用构造→关闭→解释器退出」脚本约半数进程收尾段错误
+    （exit 139，faulthandler 无 Python 帧）**——2026-09 音频合成页接入后首踩。
+    仅 `QT_QPA_PLATFORM=offscreen` 的冒烟脚本复现；**真实 Windows 平台同脚本
+    8/8 干净退出、pytest 全绿**，用户实际运行不受影响。已排查并排除：页面控件
+    构成（换成哑控件/空页同样崩）、构造时机（提前/延后同样崩）、SUG 补丁顺序、
+    字体预热线程、`theme.changed` 连接、纯时间偏移（基线+sleep 不崩）、提前
+    `sip.delete` 整页（收尾仍崩）——指向 offscreen 插件在解释器终结阶段的
+    环境性缺陷。**验证整应用生命周期请用真实平台跑脚本；不要把 offscreen
+    冒烟的退出码当回归信号**（构造期断言仍可信）。若未来在真实平台复现，
+    再按 §9 的销毁顺序思路深挖。
+
 ---
 
 ## 9. 字幕渲染模块

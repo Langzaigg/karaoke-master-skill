@@ -138,6 +138,11 @@ class AppSettings:
     # last_internal_tab 等。API key 不写入本 namespace（每次启动临时生成）。
     pymss: dict = field(default_factory=dict)
 
+    # ── 「音视频处理」模块（音频合成）的设置 namespace ──
+    # 音频合成页以 dict 形式读写：接缝淡化/间隔/首尾淡化、静音检测参数
+    # （阈值、最短静音时长、保留余量）与输出目录/格式。
+    audio_merge: dict = field(default_factory=dict)
+
 
 # settings.json 解析失败时，``load_app_settings`` 会把坏文件备份并把备份路径
 # 记到这里。GUI 在主窗口起来后调 :func:`consume_corruption_backup` 取走（同时清零）
@@ -356,6 +361,7 @@ def _settings_from_payload(payload: dict) -> AppSettings:
         window_fullscreen=bool(payload.get("window_fullscreen", False)),
         subtitle_render=_safe_dict(payload.get("subtitle_render")),
         pymss=_safe_dict(payload.get("pymss")),
+        audio_merge=_safe_dict(payload.get("audio_merge")),
     )
 
 
