@@ -9,6 +9,7 @@
 #include <d2d1_2.h>
 #include <d2d1helper.h>
 #include <dwrite.h>
+#include <dwrite_3.h>
 
 #include <algorithm>
 #include <bit>
@@ -451,6 +452,26 @@ void Direct2DGpuBackend::configure(const RenderScene &scene) {
         "IDWriteFactory::GetSystemFontCollection",
         device_
     );
+    // Typographic-model collection: variable fonts group under merged family
+    // names ("Segoe UI Variable") here while the classic GDI-model collection
+    // above only lists per-weight subfamilies.  Qt's font picker offers the
+    // merged spelling, so without this collection those names resolved to the
+    // default-font substitution.  Null on pre-RS4 DirectWrite keeps legacy
+    // behavior; both collections contain the same fonts, just grouped
+    // differently.
+    Microsoft::WRL::ComPtr<IDWriteFontCollection> typographicFontCollection;
+    {
+        Microsoft::WRL::ComPtr<IDWriteFactory7> factory7;
+        Microsoft::WRL::ComPtr<IDWriteFontCollection3> typedCollection;
+        if (SUCCEEDED(device_.dwriteFactory()->QueryInterface(
+                IID_PPV_ARGS(factory7.ReleaseAndGetAddressOf())))
+            && SUCCEEDED(factory7->GetSystemFontCollection(
+                FALSE,
+                DWRITE_FONT_FAMILY_MODEL_TYPOGRAPHIC,
+                typedCollection.ReleaseAndGetAddressOf()))) {
+            typographicFontCollection = typedCollection;
+        }
+    }
     auto resolveFace = [&](const std::wstring &family, int weight, bool italic) {
         const std::wstring resolvedFamily = family.empty() ? L"Segoe UI" : family;
         const Impl::FontFaceKey key{resolvedFamily, weight, italic};
@@ -459,11 +480,19 @@ void Direct2DGpuBackend::configure(const RenderScene &scene) {
             return found->second;
         }
         auto face = createFontFace(
-            fontCollection.Get(), resolvedFamily, weight, italic
+            fontCollection.Get(),
+            typographicFontCollection.Get(),
+            resolvedFamily,
+            weight,
+            italic
         );
         if (!face && resolvedFamily != L"Segoe UI") {
             face = createFontFace(
-                fontCollection.Get(), L"Segoe UI", weight, italic
+                fontCollection.Get(),
+                typographicFontCollection.Get(),
+                L"Segoe UI",
+                weight,
+                italic
             );
         }
         if (!face) {

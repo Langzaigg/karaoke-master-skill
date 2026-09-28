@@ -94,27 +94,17 @@ Microsoft::WRL::ComPtr<IDWriteFont> findFontByGdiFamilyName(
     return match;
 }
 
-}  // namespace
-
-Microsoft::WRL::ComPtr<IDWriteFontFace> createFontFace(
+// Look the family up by name in one collection and weight-match within it.
+Microsoft::WRL::ComPtr<IDWriteFontFace> tryFamilyMatch(
     IDWriteFontCollection *collection,
     const std::wstring &familyName,
     int weight,
     bool italic
 ) {
-    if (familyName.empty()) {
-        return {};
-    }
     UINT32 familyIndex = 0;
     BOOL exists = FALSE;
     if (FAILED(collection->FindFamilyName(familyName.c_str(), &familyIndex, &exists))
         || !exists) {
-        if (auto font = findFontByGdiFamilyName(collection, familyName)) {
-            Microsoft::WRL::ComPtr<IDWriteFontFace> legacyFace;
-            if (SUCCEEDED(font->CreateFontFace(legacyFace.ReleaseAndGetAddressOf()))) {
-                return legacyFace;
-            }
-        }
         return {};
     }
     Microsoft::WRL::ComPtr<IDWriteFontFamily> family;
@@ -134,6 +124,42 @@ Microsoft::WRL::ComPtr<IDWriteFontFace> createFontFace(
         return {};
     }
     return face;
+}
+
+}  // namespace
+
+Microsoft::WRL::ComPtr<IDWriteFontFace> createFontFace(
+    IDWriteFontCollection *collection,
+    IDWriteFontCollection *typographicCollection,
+    const std::wstring &familyName,
+    int weight,
+    bool italic
+) {
+    if (familyName.empty()) {
+        return {};
+    }
+    // Qt's font database offers both spellings: GDI-compatible per-weight
+    // families (``Yu Gothic UI Semibold``) and the merged typographic
+    // families DirectWrite groups variable fonts under (``Segoe UI
+    // Variable``).  The classic system collection only knows the former, so
+    // without the typographic collection a variable-font family silently
+    // fell through to the caller's default-font substitution.
+    if (typographicCollection != nullptr && typographicCollection != collection) {
+        if (auto face = tryFamilyMatch(
+                typographicCollection, familyName, weight, italic)) {
+            return face;
+        }
+    }
+    if (auto face = tryFamilyMatch(collection, familyName, weight, italic)) {
+        return face;
+    }
+    if (auto font = findFontByGdiFamilyName(collection, familyName)) {
+        Microsoft::WRL::ComPtr<IDWriteFontFace> legacyFace;
+        if (SUCCEEDED(font->CreateFontFace(legacyFace.ReleaseAndGetAddressOf()))) {
+            return legacyFace;
+        }
+    }
+    return {};
 }
 
 namespace {
@@ -216,12 +242,12 @@ Microsoft::WRL::ComPtr<IDWriteFontFace> findFallbackFontFace(
 
     if (containsEmoji(text)) {
         if (auto face = tryFace(createFontFace(
-                collection, L"Segoe UI Symbol", DWRITE_FONT_WEIGHT_NORMAL, false))) {
+                collection, nullptr, L"Segoe UI Symbol", DWRITE_FONT_WEIGHT_NORMAL, false))) {
             return face;
         }
     }
     if (auto face = tryFace(createFontFace(
-            collection, L"Microsoft JhengHei", DWRITE_FONT_WEIGHT_BOLD, false))) {
+            collection, nullptr, L"Microsoft JhengHei", DWRITE_FONT_WEIGHT_BOLD, false))) {
         return face;
     }
     const UINT32 familyCount = collection->GetFontFamilyCount();
