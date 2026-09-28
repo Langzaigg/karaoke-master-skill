@@ -590,6 +590,10 @@ def track_to_ir(
                             else None
                         ),
                         resolved_intervals[index],
+                        char_visible=[
+                            not str(getattr(ch, "text", "") or "").isspace()
+                            for ch in render_lines[index].chars
+                        ],
                     )
                     if style is not None
                     else []

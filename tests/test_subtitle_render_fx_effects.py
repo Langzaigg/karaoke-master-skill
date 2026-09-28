@@ -664,3 +664,26 @@ def test_particle_anim_core_is_staggered_char_transition():
         style, _exit_transition("ripple", 0), 4, 5,
         t_ms=10_000, char_center_x=None, line_center_x=None,
     )[0] == 0.0
+
+
+def test_sing_particles_skip_whitespace_chars():
+    """空格无走字内容：唱字粒子跳过；出入场粒子仍整行参与。"""
+    style = Style(
+        sing_fx="twinkle",
+        entry_anim="ripple",
+        entry_lead_ms=600,
+        karaoke_anim="none",
+    )
+    # 「あ い」中间是空格：3 个字符窗。
+    windows = [(1200, 1600), (1600, 2000), (2000, 2400)]
+    visible = [True, False, True]
+    bursts = plan_line_bursts(
+        style, 0, 1000, 4000, 3900, windows, char_visible=visible
+    )
+    sing_starts = [b["start_ms"] for b in bursts if b["kind"] == "twinkle"]
+    # 空格（1600 起）不发射唱字粒子。
+    assert 1600 not in sing_starts
+    assert sorted(sing_starts) == [1200, 2000]
+    # 入场涟漪仍按整行逐字（3 枚，含空格位）。
+    ripples = [b for b in bursts if b["kind"] == "ripple"]
+    assert [b["char_index"] for b in ripples] == [0, 1, 2]

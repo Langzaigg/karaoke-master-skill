@@ -3505,6 +3505,10 @@ def _paint_line_fx_particles(
         display_end,
         _line_end_ms(render_line),
         layout.intervals,
+        char_visible=[
+            not str(getattr(ch, "text", "") or "").isspace()
+            for ch in render_line.chars
+        ],
     )
     if not bursts:
         return

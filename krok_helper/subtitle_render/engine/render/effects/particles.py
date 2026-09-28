@@ -177,6 +177,8 @@ def plan_line_bursts(
     display_end_ms: int | None,
     line_end_ms: int | None,
     char_windows: list[tuple[int, int]],
+    *,
+    char_visible: list[bool] | None = None,
 ) -> list[dict[str, object]]:
     """把 style 的粒子档位规划成逐行 burst 列表（IR-ready dict）。
 
@@ -187,6 +189,8 @@ def plan_line_bursts(
     尺寸语义：``fx_particle_size_em`` 为相对主字号的 em 比例（0.40 =
     40% 字号），此处按全局字号折算成像素下发，两后端同值。
     ``line_index`` 参与种子，保证同曲目每行轨迹不同且重开可复现。
+    ``char_visible``（与 char_windows 等长）：False = 空白字符（空格等
+    无字形内容）——唱字粒子跳过（无走字内容），出入场仍整行参与。
     """
     bursts: list[dict[str, object]] = []
     count = max(2, min(64, int(style.fx_particle_count)))
@@ -377,6 +381,8 @@ def plan_line_bursts(
             duration = int(end_ms) - int(start_ms)
             if duration <= 0:
                 continue
+            if char_visible is not None and not char_visible[char_index]:
+                continue
             bursts.append({
                 "kind": "ripple", "anchor": "char",
                 "char_index": int(char_index),
@@ -393,6 +399,8 @@ def plan_line_bursts(
         for char_index, (start_ms, end_ms) in enumerate(char_windows):
             duration = int(end_ms) - int(start_ms)
             if duration <= 0:
+                continue
+            if char_visible is not None and not char_visible[char_index]:
                 continue
             seed = (seed_base + 5 + char_index) & 0xFFFFFFFF
             bursts.append({
