@@ -960,7 +960,7 @@ def test_gpu_async_renderer_queue_is_capacity_one_latest_wins(qapp, monkeypatch)
             if len(rendered) == 1:
                 first_started.set()
                 unblock.wait(timeout=2.0)
-            if int(t_ms) == 2_099:
+            if int(t_ms) == 2_100:  # request(2_099) 吸附到帧键网格 2100
                 latest_finished.set()
             return {
                 "ok": True,
@@ -1003,7 +1003,8 @@ def test_gpu_async_renderer_queue_is_capacity_one_latest_wins(qapp, monkeypatch)
         assert latest_finished.wait(timeout=2.0)
         recovery_ms = (time.monotonic() - released_at) * 1000.0
 
-        assert rendered == [1_000, 2_099]
+        # request(2_099) 已吸附到 60fps 帧键网格（2100）再下渲染请求。
+        assert rendered == [1_000, 2_100]
         assert recovery_ms < 250.0
         stats = renderer.stats_snapshot()
         assert stats["requests"] == 101
@@ -3317,3 +3318,103 @@ def test_preview_graphics_image_fit_cover_and_contain(qapp, tmp_path):
         assert graphics._letterbox_rect.isVisible()
     finally:
         graphics.deleteLater()
+
+
+# ---------------------------------------------------------------------------
+# GPU 预览 request 的帧键吸附（防相邻键交替消费）
+# ---------------------------------------------------------------------------
+
+
+def _broken_sidecar_renderer(monkeypatch, qapp):
+    """构造一个 sidecar 永远起不来的 GPU 预览渲染器（不拉真实进程）。"""
+
+    import krok_helper.subtitle_render.frontend.preview.preview_async as preview_async
+    from krok_helper.subtitle_render.native.backend import NativeRendererError
+
+    class BrokenSidecar:
+        def __init__(self, *_args, **_kwargs):
+            pass
+
+        def start(self):
+            raise NativeRendererError("sidecar unavailable in test")
+
+        def close(self):
+            return None
+
+    monkeypatch.setattr(preview_async, "NativeRendererProcess", BrokenSidecar)
+    return preview_async.GpuAsyncSubtitleRenderer(320, 180)
+
+
+def test_gpu_preview_request_snaps_to_frame_key_grid(qapp, monkeypatch):
+    """request 的 t 必须吸附到 60fps 帧键网格再消费/下渲染请求。
+
+    媒体时钟的原始毫秒在键边界附近抖动时，未吸附的 request 会让缓存
+    消费键与 speculative 键序列相位错开，emit 的帧内容时刻来回漂移
+    （快动画字表现为逐帧位置抖动）。
+    """
+
+    from krok_helper.subtitle_render.domain.models import Style
+    from krok_helper.subtitle_render.domain.timing import (
+        TimingChar,
+        TimingLine,
+        TimingTrack,
+    )
+
+    renderer = _broken_sidecar_renderer(monkeypatch, qapp)
+    try:
+        track = TimingTrack(
+            lines=[TimingLine(chars=[TimingChar("歌", 0)], end_ms=1_000)]
+        )
+        renderer.set_state(track, Style())
+        # 键 600 的网格时刻是 10000；9995..10008 都量化进键 600。
+        for raw_t in (9_996, 10_000, 10_007, 10_008):
+            renderer.request(raw_t)
+            assert renderer._latest_t == 10_000, (
+                f"request({raw_t}) 应吸附到网格时刻 10000，"
+                f"实际 {renderer._latest_t}"
+            )
+        # 跨过键边界（10_009 → 键 601）吸附到下一格 10017。
+        renderer.request(10_009)
+        assert renderer._latest_t == 10_017
+    finally:
+        renderer.stop()
+
+
+def test_gpu_preview_request_snap_is_deterministic_for_same_frame(qapp, monkeypatch):
+    """同一逻辑帧内的 ±毫秒抖动必须产生完全相同的吸附值（无交替）。"""
+
+    from krok_helper.subtitle_render.domain.models import Style
+    from krok_helper.subtitle_render.domain.timing import (
+        TimingChar,
+        TimingLine,
+        TimingTrack,
+    )
+
+    renderer = _broken_sidecar_renderer(monkeypatch, qapp)
+    try:
+        track = TimingTrack(
+            lines=[TimingLine(chars=[TimingChar("歌", 0)], end_ms=1_000)]
+        )
+        renderer.set_state(track, Style())
+        seen = set()
+        for raw_t in (10_006, 10_008, 10_007, 10_008, 10_006):
+            renderer.request(raw_t)
+            seen.add(renderer._latest_t)
+        assert seen == {10_000}
+    finally:
+        renderer.stop()
+
+
+def test_native_preview_frame_cache_key_grid_roundtrip():
+    """key_for / timestamp_for_key 的往返必须幂等（吸附值自身落在网格上）。"""
+
+    from krok_helper.subtitle_render.frontend.preview.preview_async import (
+        NativePreviewFrameCache,
+    )
+
+    cache = NativePreviewFrameCache(max_frames=1, fps=60)
+    for raw_t in range(9_990, 10_030):
+        key = cache.key_for(raw_t)
+        snapped = cache.timestamp_for_key(key)
+        assert cache.key_for(snapped) == key
+        assert abs(snapped - raw_t) <= 1000 / 60 / 2 + 1

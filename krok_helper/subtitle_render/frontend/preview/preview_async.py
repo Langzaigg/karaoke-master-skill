@@ -763,6 +763,14 @@ class GpuAsyncSubtitleRenderer(QObject):
 
     def request(self, t_ms: int) -> None:
         requested_t = int(t_ms)
+        # 媒体时钟的原始毫秒值在帧键边界附近抖动时，request 的量化键
+        # 会在两个相邻键间交替，emit 的帧内容时刻随之来回漂移（快动画
+        # 字表现为逐帧位置抖动）。统一吸附到帧键网格，保证消费键与
+        # speculative 缓存键恒同相；吸附偏差上限半个帧间隔（≈8ms），
+        # 对渲染内容不可见。
+        requested_t = self._frame_cache.timestamp_for_key(
+            self._frame_cache.key_for(requested_t)
+        )
         cached = None if self._native_preview else self._frame_cache.take(requested_t)
         with self._condition:
             if self._stopped:
