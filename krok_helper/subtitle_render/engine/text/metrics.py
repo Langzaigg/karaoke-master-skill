@@ -54,6 +54,29 @@ def latin_font_weight(style: Style) -> int:
     return int(value) if value is not None and int(value) > 0 else int(style.font_weight)
 
 
+_TEXT_CLASS_CACHE: dict[str, tuple[bool, bool]] = {}
+_TEXT_CLASS_CACHE_MAX = 8192
+
+
+def _text_class(text: str) -> tuple[bool, bool]:
+    """Memoized (is_n3_latin_text, is_emoji_text) classification.
+
+    字符测量热路径对同一字符反复分类（字体选择、度量源选择各查一次），
+    ``all()/any()`` 生成器遍历比一次 dict 查找贵得多；字符表有限，
+    模块级缓存稳定后全命中。多字符串键按整串记录，语义与逐字符判定
+    一致（is_n3_latin_text 本就要求全字符命中）。
+    """
+
+    cached = _TEXT_CLASS_CACHE.get(text)
+    if cached is not None:
+        return cached
+    classification = (is_n3_latin_text(text), is_emoji_text(text))
+    if len(_TEXT_CLASS_CACHE) >= _TEXT_CLASS_CACHE_MAX:
+        _TEXT_CLASS_CACHE.clear()
+    _TEXT_CLASS_CACHE[text] = classification
+    return classification
+
+
 def is_n3_latin_text(text: str) -> bool:
     return bool(text) and all(
         ("0" <= char <= "9" or "A" <= char <= "Z" or "a" <= char <= "z")
@@ -100,9 +123,10 @@ def make_font_for(
     same_text_fonts = _font_signature(latin_font) == _font_signature(jp_font)
 
     def font_for(text: str) -> QFont:
-        if is_emoji_text(text):
+        is_latin, is_emoji = _text_class(text)
+        if is_emoji:
             return emoji_font
-        return latin_font if not same_text_fonts and is_n3_latin_text(text) else jp_font
+        return latin_font if not same_text_fonts and is_latin else jp_font
 
     return font_for
 
@@ -120,8 +144,10 @@ def char_advance(
         if font_for is not None and is_n3_latin_text(text):
             return latin_metrics.horizontalAdvance(text)
         return metrics.horizontalAdvance(text)
-    use_emoji = font_for is not None and is_emoji_text(text)
-    use_latin = font_for is not None and is_n3_latin_text(text)
+    use_emoji = False
+    use_latin = False
+    if font_for is not None:
+        use_latin, use_emoji = _text_class(text)
     if use_emoji:
         emoji_font = font_for(text)
         source = QFontMetrics(emoji_font)
@@ -154,8 +180,9 @@ def char_ink_width(
     """
     if not text or text.isspace():
         return 0
-    use_emoji = font_for is not None and is_emoji_text(text)
-    use_latin = font_for is not None and is_n3_latin_text(text)
+    use_latin, use_emoji = (
+        _text_class(text) if font_for is not None else (False, False)
+    )
     source_font = font_for(text) if use_emoji else None
     cache = getattr(_LAYOUT_PASS, "char_ink_widths", None)
     source_key: object
@@ -244,12 +271,12 @@ def _char_glyph_metrics(
     if bounds_empty:
         left_bearing = right_bearing = 0
     else:
-        is_latin_glyph = font_for is not None and is_n3_latin_text(text)
+        use_latin, use_emoji = _text_class(text)
         glyph_metrics = (
             QFontMetrics(glyph_font)
-            if is_emoji_text(text)
+            if use_emoji
             else latin_metrics
-            if is_latin_glyph
+            if font_for is not None and use_latin
             else metrics
         )
         try:
@@ -317,7 +344,7 @@ def _char_layout_metrics(
     font_for: FontSelector | None,
     style: Style,
 ) -> tuple[int, float]:
-    is_latin_glyph = font_for is not None and is_n3_latin_text(text)
+    is_latin_glyph = font_for is not None and _text_class(text)[0]
     glyph_font = font_for(text) if font_for is not None else font
     font_size = glyph_font.pixelSize()
     if font_size <= 0:
@@ -377,13 +404,8 @@ def char_path_left_offset(
 ) -> float:
     if not text or text.isspace():
         return 0.0
-    return _char_layout_metrics(
-        text,
-        font,
-        metrics,
-        latin_metrics,
-        font_for,
-        style,
+    return _cached_char_layout_metrics(
+        text, font, metrics, latin_metrics, font_for, style
     )[1]
 
 
@@ -395,14 +417,37 @@ def char_layout_width(
     font_for: FontSelector | None,
     style: Style,
 ) -> int:
-    return _char_layout_metrics(
-        text,
-        font,
-        metrics,
-        latin_metrics,
-        font_for,
-        style,
+    return _cached_char_layout_metrics(
+        text, font, metrics, latin_metrics, font_for, style
     )[0]
+
+
+def _cached_char_layout_metrics(
+    text: str,
+    font: QFont,
+    metrics: QFontMetrics,
+    latin_metrics: QFontMetrics,
+    font_for: FontSelector | None,
+    style: Style,
+) -> tuple[int, float]:
+    """Pass-scoped memo over :func:`_char_layout_metrics`.
+
+    同一 ``(text, style)`` 的宽度/偏移在一次 :func:`layout_pass` 区间内
+    会被行宽测量、行布局构建、区间解析等多个调用点重复请求；font 与
+    metrics 都是 style 的纯函数，结果只取决于 ``(text, style)``。
+    """
+
+    cache = getattr(_LAYOUT_PASS, "char_layout_metrics", None)
+    if cache is None:
+        return _char_layout_metrics(text, font, metrics, latin_metrics, font_for, style)
+    key = (text, id(style))
+    hit = cache.get(key)
+    if hit is None:
+        hit = _char_layout_metrics(text, font, metrics, latin_metrics, font_for, style)
+        cache[key] = hit
+        # 键里有 id()：存住入参，避免回收后地址被复用。
+        _LAYOUT_PASS.styles.append(style)
+    return hit
 
 
 def letter_spacing(style: Style) -> int:

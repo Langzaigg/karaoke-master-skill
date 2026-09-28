@@ -12,12 +12,33 @@ from krok_helper.subtitle_render.domain.timing import (
     guide_symbol_replacement_count,
     guide_symbol_role_labels,
 )
+from krok_helper.subtitle_render.engine.layout.layout_context import _LAYOUT_PASS
 
 
 def render_line_with_guide_symbols(line: TimingLine) -> TimingLine:
-    """Return a render-only line with prefix and inline guides materialized."""
+    """Return a render-only line with prefix and inline guides materialized.
+
+    同一 :func:`layout_pass` 区间内按行身份缓存：display 解析、行宽测量、
+    区间解析与 IR 序列化会对同一行反复替换（每次都重算 guide 替换计数并
+    replace 出新对象）；区间契约保证行不可变，身份键即语义键。
+    """
+
     if not line.chars:
         return line
+    cache = getattr(_LAYOUT_PASS, "render_lines", None)
+    if cache is None:
+        return _render_line_with_guide_symbols_uncached(line)
+    key = id(line)
+    hit = cache.get(key)
+    if hit is None:
+        hit = _render_line_with_guide_symbols_uncached(line)
+        cache[key] = hit
+        # 键里有 id()：存住入参，避免回收后地址被复用。
+        _LAYOUT_PASS.lines.append(line)
+    return hit
+
+
+def _render_line_with_guide_symbols_uncached(line: TimingLine) -> TimingLine:
     symbol = line.guide_symbol
     replacement_count = guide_symbol_replacement_count(line, symbol)
     chars = list(line.chars)

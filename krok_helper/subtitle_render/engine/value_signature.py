@@ -145,9 +145,12 @@ def value_signature(value) -> Hashable:
     同一 :func:`layout_pass` 区间内按对象身份 memoize：整轨签名的深度
     递归要遍历每行每字符，而 display 缓存查找、诊断缓存 key、页偏移等
     会在一个区间里对同一 track/style 反复签名。区间契约保证输入不可变，
-    身份键即语义键；区间外（或无区间）退化为每次现算。
+    身份键即语义键；区间外（或无区间）退化为每次现算。叶子标量不经
+    memoize——查一次缓存 dict 比直接返回值更贵，而签名树几乎全是叶子。
     """
 
+    if value is None or isinstance(value, (str, int, float, bool)):
+        return value
     cache = getattr(_LAYOUT_PASS, "signatures", None)
     if cache is not None:
         key = ("value", id(value))
