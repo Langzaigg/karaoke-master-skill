@@ -8165,12 +8165,24 @@ class SubtitleRenderWindow(QWidget):
             singer_style_overrides=deepcopy(self._style.singer_style_overrides),
             hidden_builtin_layout_ids=deepcopy(self._style.hidden_builtin_layout_ids),
         )
-        self._property_panel.set_style(self._style)
-        self._preview_panel.set_style(self._style)
-        self._lyrics_panel.set_style(self._style)
-        self._clamp_active_title_index()
-        self._refresh_preview_style_soon()
-        self._mark_project_dirty()
+        # 灌入复位样式/方案与工程装载同类：不是用户编辑。临时置
+        # ``_loading_project``，避免方案切换信号（schemeSelectionChanged →
+        # _on_scheme_selection_changed）把无工程的干净工作区标脏。
+        was_loading_project = self._loading_project
+        self._loading_project = True
+        try:
+            self._property_panel.set_style(self._style)
+            self._preview_panel.set_style(self._style)
+            self._lyrics_panel.set_style(self._style)
+            self._clamp_active_title_index()
+            self._refresh_preview_style_soon()
+        finally:
+            self._loading_project = was_loading_project
+        if self._project_session.path is not None:
+            # 已打开的工程被重置了通用样式，按未保存改动提示；无工程时的
+            # 工作区只是习惯种子——记忆已随重置落盘，之后新建工程自然从
+            # 新默认播种，标脏只会带来多余的保存询问。
+            self._mark_project_dirty()
         self._layout_assignment_preference = loaded.layout_assignment
         self._subtitle_loading_defaults = loaded.subtitle_loading_defaults
         self._auto_chorus_role = loaded.auto_chorus_role
@@ -8179,11 +8191,17 @@ class SubtitleRenderWindow(QWidget):
         self._auto_chorus_overwrite = loaded.auto_chorus_overwrite
         self._auto_chorus_auto_apply = loaded.auto_chorus_auto_apply
         # 当前配色方案选择也回「全局」：与工程装载同路径推给面板再读回，
-        # 面板不接受的键由它自己钳回合法值。
+        # 面板不接受的键由它自己钳回合法值；同样在装载态下推送，方案切换
+        # 信号不把工程标脏。
         self._selected_scheme_key = loaded.selected_scheme_key
         if hasattr(self, "_property_panel"):
-            self._property_panel.set_current_scheme_key(self._selected_scheme_key)
-            self._selected_scheme_key = self._property_panel.current_scheme_key()
+            was_loading_project = self._loading_project
+            self._loading_project = True
+            try:
+                self._property_panel.set_current_scheme_key(self._selected_scheme_key)
+                self._selected_scheme_key = self._property_panel.current_scheme_key()
+            finally:
+                self._loading_project = was_loading_project
         self._preview_splitter_ratio = loaded.preview_splitter_ratio
         self._auto_save_enabled = loaded.auto_save_enabled
         self._auto_save_interval_minutes = loaded.auto_save_interval_minutes

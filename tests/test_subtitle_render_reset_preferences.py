@@ -421,3 +421,35 @@ def test_reset_resolves_title_layout_against_preserved_library(
     workspace_index = int(workspace_title.layout_index or 0)
     assert window._style.layouts[workspace_index - 1].name == "タイトル左上"
     assert workspace_title.show_mode == TitleOverlay().show_mode
+
+
+def test_reset_without_open_project_does_not_mark_dirty(
+    make_window, settings, confirm, tmp_path
+) -> None:
+    """未打开工程时工作区只是习惯种子：重置不标脏、不多弹保存询问。"""
+    settings.data = _polluted_payload(str(tmp_path / "skip.yurika"))
+    window = make_window()
+    assert window._project_session.path is None
+
+    confirm(True)
+    window._reset_app_preferences()
+
+    assert window._project_session.dirty is False
+    # 样式确实复位了（重置本身仍生效）。
+    assert window._style.fill_gradient_enabled == Style().fill_gradient_enabled
+
+
+def test_reset_with_open_project_marks_dirty(make_window, settings, confirm) -> None:
+    """已打开的工程被重置通用样式：按未保存改动提示。"""
+    from pathlib import Path
+
+    window = make_window()
+    window._project_session.adopt_project_identity(
+        path=Path("D:/karaoke/某首歌.yurika"), disk_revision=1
+    )
+    window._project_session.set_dirty(False)
+
+    confirm(True)
+    window._reset_app_preferences()
+
+    assert window._project_session.dirty is True
