@@ -25,6 +25,20 @@ Microsoft::WRL::ComPtr<ID2D1Brush> createPaintBrush(
     float layoutScale = 1.0f
 );
 
+// 扫字线羽化 mask 画刷：把逐像素 alpha 贴图（BGRA 预乘、行距 = width*4）
+// 上传为位图并包成 CLAMP + 最近邻的画刷，平移到 (originX, originY) 实现
+// 与 mask 矩形的 1:1 对齐（无过滤、无外扩）。像素生成（Bayer 抖动距离场）
+// 留在调用方，这里只负责 D2D 资源构造。
+Microsoft::WRL::ComPtr<ID2D1BitmapBrush> createScanlineMaskBrush(
+    ID2D1DeviceContext *context,
+    const std::uint8_t *pixels,
+    UINT32 width,
+    UINT32 height,
+    float originX,
+    float originY,
+    const D2DDevice &device
+);
+
 D2D1_RECT_F rubyPaintBounds(
     const PaintStyle &paint,
     const D2D1_RECT_F &localBounds,

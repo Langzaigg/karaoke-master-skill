@@ -25,6 +25,7 @@ using Clock = direct2d::RuntimeClock;
 using direct2d::burstParticlesAt;
 using direct2d::checkHr;
 using direct2d::createPaintBrush;
+using direct2d::createScanlineMaskBrush;
 using direct2d::elapsedMs;
 using direct2d::fxSpriteForKind;
 using direct2d::FxParticle;
@@ -4607,37 +4608,12 @@ ProbeResult Direct2DGpuBackend::renderFrameInternal(
                     px[3] = value;
                 }
             }
-            const D2D1_BITMAP_PROPERTIES bitmapProps = D2D1::BitmapProperties(
-                D2D1_PIXEL_FORMAT{
-                    DXGI_FORMAT_B8G8R8A8_UNORM,
-                    D2D1_ALPHA_MODE_PREMULTIPLIED,
-                }
+            // D2D 资源构造(位图上传 + 画刷包装)走 paint_resources 封装;
+            // Bayer 抖动距离场的像素生成是纯计算,留在渲染侧。
+            return createScanlineMaskBrush(
+                context, pixels.data(), maskWidth, maskHeight,
+                maskRect.left, maskRect.top, device_
             );
-            Microsoft::WRL::ComPtr<ID2D1Bitmap> bitmap;
-            checkHr(
-                context->CreateBitmap(
-                    D2D1::SizeU(maskWidth, maskHeight), pixels.data(),
-                    maskWidth * 4, bitmapProps, &bitmap
-                ),
-                "ID2D1DeviceContext::CreateBitmap(scanline mask)",
-                device_
-            );
-            const D2D1_BITMAP_BRUSH_PROPERTIES brushProps = D2D1::BitmapBrushProperties(
-                D2D1_EXTEND_MODE_CLAMP, D2D1_EXTEND_MODE_CLAMP,
-                D2D1_BITMAP_INTERPOLATION_MODE_NEAREST_NEIGHBOR
-            );
-            Microsoft::WRL::ComPtr<ID2D1BitmapBrush> brush;
-            checkHr(
-                context->CreateBitmapBrush(
-                    bitmap.Get(), &brushProps, nullptr, &brush
-                ),
-                "ID2D1RenderTarget::CreateBitmapBrush(scanline mask)",
-                device_
-            );
-            brush->SetTransform(
-                D2D1::Matrix3x2F::Translation(maskRect.left, maskRect.top)
-            );
-            return brush;
         };
         const auto pushScanlineStateClip = [&](float edge, bool after) {
             pushAxisAlignedClip(

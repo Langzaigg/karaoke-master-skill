@@ -245,6 +245,45 @@ void updatePaintBrush(
         : D2D1::Point2F((rect.left + rect.right) * 0.5f, rect.bottom));
 }
 
+Microsoft::WRL::ComPtr<ID2D1BitmapBrush> createScanlineMaskBrush(
+    ID2D1DeviceContext *context,
+    const std::uint8_t *pixels,
+    UINT32 width,
+    UINT32 height,
+    float originX,
+    float originY,
+    const D2DDevice &device
+) {
+    const D2D1_BITMAP_PROPERTIES bitmapProps = D2D1::BitmapProperties(
+        D2D1_PIXEL_FORMAT{
+            DXGI_FORMAT_B8G8R8A8_UNORM,
+            D2D1_ALPHA_MODE_PREMULTIPLIED,
+        }
+    );
+    Microsoft::WRL::ComPtr<ID2D1Bitmap> bitmap;
+    checkHr(
+        context->CreateBitmap(
+            D2D1::SizeU(width, height), pixels, width * 4, bitmapProps, &bitmap
+        ),
+        "ID2D1DeviceContext::CreateBitmap(scanline mask)",
+        device
+    );
+    const D2D1_BITMAP_BRUSH_PROPERTIES brushProps = D2D1::BitmapBrushProperties(
+        D2D1_EXTEND_MODE_CLAMP, D2D1_EXTEND_MODE_CLAMP,
+        D2D1_BITMAP_INTERPOLATION_MODE_NEAREST_NEIGHBOR
+    );
+    Microsoft::WRL::ComPtr<ID2D1BitmapBrush> brush;
+    checkHr(
+        context->CreateBitmapBrush(
+            bitmap.Get(), &brushProps, nullptr, &brush
+        ),
+        "Create scanline mask bitmap brush",
+        device
+    );
+    brush->SetTransform(D2D1::Matrix3x2F::Translation(originX, originY));
+    return brush;
+}
+
 Microsoft::WRL::ComPtr<ID2D1Bitmap1> loadWicBitmap(
     ID2D1DeviceContext *context,
     const std::wstring &path
