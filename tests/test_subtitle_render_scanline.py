@@ -139,37 +139,82 @@ def test_scanline_style_fields_round_trip() -> None:
     assert style_from_dict({"scanline_mode": "wat"}).scanline_mode == "color"
 
 
-def test_scanline_pixel_fields_rescale_with_output_height() -> None:
-    """扫字线像素字段与字号共用 SizeAndRatio 语义随输出高度换算。"""
+def test_scanline_pixel_fields_use_fixed_1080_base() -> None:
+    """扫字线像素字段固定 1080 基准:渲染按画布映射,存储不随高度重写。"""
+    from krok_helper.subtitle_render.domain.models import (
+        SCANLINE_BASE_HEIGHT,
+        scanline_base_px_from_output,
+        scanline_px_for_output,
+        style_with_output_scanline,
+    )
+
     style = _scanline_style(
         karaoke_anim="utopia_scanline",
-        font_reference_height=1080,
-        scanline_width_px=16,
+        scanline_width_px=25,
         scanline_glow_px=8,
         scanline_mode="brighten",
         scanline_brightness_pct=60,
-        custom_style_schemes={"主唱": SubtitleStyleScheme(font_size_px=80)},
     )
 
+    # 双向换算:4K(高 2160)实画 100px → 基准 50;基准 25 → 2K(1440) 实画 33。
+    assert scanline_base_px_from_output(100, 2160) == 50
+    assert scanline_px_for_output(25, 1440) == 33
+    assert scanline_px_for_output(25, 1080) == 25
+    # 0 在任何高度保持 0。
+    assert scanline_px_for_output(0, 2160) == 0
+
+    # 输出高度重算(字号走 SizeAndRatio)不再改写扫字线:任何画布切换后
+    # 扫字线都从同一基准重新推导,与切换历史无关。
     up = rescale_font_sizes(style, 2160)
     assert up.font_reference_height == 2160
-    assert up.scanline_width_px == 32
-    assert up.scanline_glow_px == 16
-    # 模式 / 颜色 / 亮度无量纲，不随画布变化。
-    assert up.scanline_mode == "brighten"
-    assert up.scanline_color == "#40E0FF"
-    assert up.scanline_brightness_pct == 60
-    # 配色方案不携带扫字线字段，只有常规字体字段换算。
-    assert up.custom_style_schemes["主唱"].font_size_px == 160
-    # 柔化半径 0 在任何高度下保持 0。
-    zero_glow = rescale_font_sizes(replace(style, scanline_glow_px=0), 2160)
-    assert zero_glow.scanline_glow_px == 0
-    # 往返一致：切回 1080 恢复原值；等高度 no-op 返回同一对象。
-    back = rescale_font_sizes(up, 1080)
-    assert back.font_reference_height == 1080
-    assert back.scanline_width_px == 16
-    assert back.scanline_glow_px == 8
-    assert rescale_font_sizes(back, 1080) is back
+    assert up.scanline_width_px == 25
+    assert up.scanline_glow_px == 8
+
+    # 渲染入口把基准值换算为输出高度下的实画值;1080/非法高度原对象返回。
+    scaled = style_with_output_scanline(up, 1440)
+    assert scaled.scanline_width_px == 33
+    assert scaled.scanline_glow_px == 11
+    assert style_with_output_scanline(scaled, 1080) is scaled
+    assert style_with_output_scanline(scaled, 0) is scaled
+
+    # 幂等:同一基准在 4K↔2K 间任意切换,实画值只由(基准,画布)决定。
+    assert style_with_output_scanline(up, 2160).scanline_width_px == 50
+    back = rescale_font_sizes(up, 1440)
+    assert style_with_output_scanline(back, 2160).scanline_width_px == 50
+    assert SCANLINE_BASE_HEIGHT == 1080
+
+
+def test_scanline_px_base_migration_on_load() -> None:
+    """旧 payload(无基准标记)按工程 font_reference_height 一次性折算到 1080。"""
+    legacy = style_from_dict(
+        {
+            "font_reference_height": 2160,
+            "scanline_width_px": 100,
+            "scanline_glow_px": 16,
+        }
+    )
+    # 4K 工程里的实画值 100/16 迁移为 1080 基准 50/8。
+    assert legacy.scanline_width_px == 50
+    assert legacy.scanline_glow_px == 8
+
+    # 新格式(带标记)原样采用,即使工程基准不是 1080。
+    current = style_from_dict(
+        {
+            "font_reference_height": 2160,
+            "scanline_width_px": 25,
+            "scanline_glow_px": 8,
+            "scanline_px_base": 1080,
+        }
+    )
+    assert current.scanline_width_px == 25
+    assert current.scanline_glow_px == 8
+
+    # 存盘往返:写出端带基准标记,值保持 1080 语义。
+    payload = style_to_dict(Style(scanline_width_px=33, scanline_glow_px=9))
+    assert payload["scanline_px_base"] == 1080
+    restored = style_from_dict(payload)
+    assert restored.scanline_width_px == 33
+    assert restored.scanline_glow_px == 9
 
 
 def test_reverse_karaoke_scanline_bakes_per_line() -> None:
@@ -280,7 +325,8 @@ def test_render_ir_paint_scope_reuses_plan_across_scanline_edits() -> None:
     assert [line["karaoke_anim"] for line in base["track"]["lines"]] == ["utopia"]
     assert [line["scanline"] for line in reused["track"]["lines"]] == [True]
     assert [line["karaoke_anim"] for line in reused["track"]["lines"]] == ["utopia"]
-    assert reused["style"]["scanline_width_px"] == 40
+    # IR 携带的是输出高度下的实画值:基准 40 在 360 高画布上换算为 13。
+    assert reused["style"]["scanline_width_px"] == 13
 
 
 def test_render_ir_stamps_per_line_scanline_flag() -> None:
@@ -306,10 +352,11 @@ def test_render_ir_stamps_per_line_scanline_flag() -> None:
         assert ir["track"]["lines"][0]["karaoke_anim"] == effective_karaoke_animation(
             _scanline_style(karaoke_anim=karaoke)
         )
-        # 参数随样式整包进入 IR，sidecar 解析后即可绘制。
-        assert ir["style"]["scanline_width_px"] == 18
+        # 参数随样式整包进入 IR,sidecar 解析后即可绘制;像素值为 360 高
+        # 画布下的实画换算值(基准 18/6 → 6/2)。
+        assert ir["style"]["scanline_width_px"] == 6
         assert ir["style"]["scanline_color"] == "#40E0FF"
-        assert ir["style"]["scanline_glow_px"] == 6
+        assert ir["style"]["scanline_glow_px"] == 2
         assert ir["style"]["scanline_mode"] == "color"
         assert ir["style"]["scanline_brightness_pct"] == 60
 
@@ -443,14 +490,22 @@ def test_painter_utopia_scanline_varies_with_width(qapp) -> None:
 
 def test_painter_scanline_brighten_mode_lifts_existing_colors(qapp) -> None:
     track = _wiping_track()
+    # 450 高测试画布下扫字线按 1080 基准映射:基准 43/14 ≈ 实画 18/6,
+    # 与旧直读语义同带宽,保持本测试的像素差异阈值口径。
+    lifted = dict(scanline_width_px=43, scanline_glow_px=14)
     base = _frame_bytes(track, _scanline_style(karaoke_anim="none"), 500)
-    color = _frame_bytes(track, _scanline_style(karaoke_anim="scanline"), 500)
+    color = _frame_bytes(
+        track,
+        _scanline_style(karaoke_anim="scanline", **lifted),
+        500,
+    )
     brighten = _frame_bytes(
         track,
         _scanline_style(
             karaoke_anim="scanline",
             scanline_mode="brighten",
             scanline_brightness_pct=70,
+            **lifted,
         ),
         500,
     )
@@ -464,6 +519,7 @@ def test_painter_scanline_brighten_mode_lifts_existing_colors(qapp) -> None:
             karaoke_anim="scanline",
             scanline_mode="brighten",
             scanline_brightness_pct=0,
+            **lifted,
         ),
         500,
     )

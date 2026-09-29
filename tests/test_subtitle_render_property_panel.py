@@ -6054,27 +6054,36 @@ def test_property_panel_animation_controls_emit_style(qapp):
     assert effective_karaoke_animation(emitted[-1]) == "utopia"
 
 
-def test_property_panel_set_rescaled_style_updates_scanline_spins(qapp):
-    """切画布走 set_rescaled_style 定向同步时，扫字线像素 spin 也要回显换算值。"""
+def test_property_panel_scanline_spins_show_canvas_values_over_fixed_base(qapp):
+    """扫字线像素 spin 显示当前画布换算值,存储恒为 1080 基准。"""
     panel = PropertyPanel()
     panel.set_style(
-        Style(
-            karaoke_anim="scanline",
-            scanline_width_px=16,
-            scanline_glow_px=8,
-            font_reference_height=1080,
-        )
+        Style(karaoke_anim="scanline", scanline_width_px=16, scanline_glow_px=8)
     )
     assert panel._scanline_width_spin.value() == 16
     assert panel._scanline_glow_spin.value() == 8
 
-    panel.set_rescaled_style(rescale_font_sizes(panel.subtitle_style, 2160))
-    assert panel._scanline_width_spin.value() == 32
-    assert panel._scanline_glow_spin.value() == 16
+    # 画布切到 2K(1440):显示值按新高度重映射,存储基准不变。
+    panel.set_output_size(2560, 1440)
+    assert panel._scanline_width_spin.value() == 21
+    assert panel._scanline_glow_spin.value() == 11
+    assert panel.subtitle_style.scanline_width_px == 16
+    assert panel.subtitle_style.scanline_glow_px == 8
 
+    # 画布切到 4K(2160) 再编辑粗细 100:写回 1080 基准 50,上限随画布放大。
+    panel.set_output_size(3840, 2160)
+    assert panel._scanline_width_spin.value() == 32
+    emitted: list[Style] = []
+    panel.styleChanged.connect(emitted.append)
+    panel._scanline_width_spin.setValue(100)
+    assert emitted[-1].scanline_width_px == 50
+    assert panel._scanline_width_spin.maximum() >= 100
+
+    # 高度重算的定向同步(字号 rescale 路径)同样按当前画布映射显示。
+    panel.set_output_size(1920, 1080)
     panel.set_rescaled_style(rescale_font_sizes(panel.subtitle_style, 1080))
-    assert panel._scanline_width_spin.value() == 16
-    assert panel._scanline_glow_spin.value() == 8
+    assert panel._scanline_width_spin.value() == 50
+    assert panel.subtitle_style.scanline_width_px == 50
 
 
 def test_property_panel_shows_legacy_utopia_as_utopia_karaoke_effect(qapp):

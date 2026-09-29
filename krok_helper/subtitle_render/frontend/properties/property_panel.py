@@ -180,6 +180,8 @@ from krok_helper.subtitle_render.domain.models import (
     Style,
     StyleTimingConfig,
     SCANLINE_GLOBAL_ROLE_KEY,
+    scanline_base_px_from_output,
+    scanline_px_for_output,
     TITLE_SCHEME_NAME,
     TitleOverlay,
     TitleTimeWindow,
@@ -958,7 +960,44 @@ class PropertyPanel(QWidget):
 
     def set_n3_template_target_height(self, height: int) -> None:
         """Set the output height used when preset schemes are resolved."""
-        self._n3_template_target_height = max(1, int(height))
+        height = max(1, int(height))
+        previous = getattr(self, "_n3_template_target_height", None)
+        self._n3_template_target_height = height
+        if previous == height:
+            return
+        # 扫字线像素字段与 N3 模板预设共用这个「当前输出高度」：编辑/显示
+        # 值从 1080 基准重新映射，存储基准值不变。
+        self._sync_scanline_size_controls()
+
+    def _scanline_display_px(self, base_value: int) -> int:
+        """1080 基准存储值 → 当前输出高度下的编辑/显示值。"""
+        return scanline_px_for_output(base_value, self._n3_template_target_height)
+
+    def _scanline_base_px(self, display_value: int) -> int:
+        """当前输出高度下的编辑值 → 1080 基准存储值。"""
+        return scanline_base_px_from_output(
+            display_value, self._n3_template_target_height
+        )
+
+    def _sync_scanline_size_controls(self) -> None:
+        """按当前输出高度回显扫字线像素 spin 并缩放其编辑上限。"""
+        if not hasattr(self, "_scanline_width_spin"):
+            return
+        scale = self._n3_template_target_height / 1080
+        width_max = max(400, int(round(400 * scale)))
+        glow_max = max(200, int(round(200 * scale)))
+        self._syncing = True
+        try:
+            self._scanline_width_spin.setRange(1, width_max)
+            self._scanline_width_spin.setValue(
+                max(self._scanline_display_px(self._style.scanline_width_px), 1)
+            )
+            self._scanline_glow_spin.setRange(0, glow_max)
+            self._scanline_glow_spin.setValue(
+                max(self._scanline_display_px(self._style.scanline_glow_px), 0)
+            )
+        finally:
+            self._syncing = False
 
     def set_output_size(self, width: int, height: int) -> None:
         """Update output-dependent preset resolution and layout schematic."""
@@ -1071,10 +1110,10 @@ class PropertyPanel(QWidget):
                 )
             )
             self._scanline_width_spin.setValue(
-                max(int(self._style.scanline_width_px), 1)
+                max(self._scanline_display_px(self._style.scanline_width_px), 1)
             )
             self._scanline_glow_spin.setValue(
-                max(int(self._style.scanline_glow_px), 0)
+                max(self._scanline_display_px(self._style.scanline_glow_px), 0)
             )
             self._scanline_brightness_spin.setValue(
                 min(max(int(self._style.scanline_brightness_pct), 0), 100)
@@ -1181,15 +1220,9 @@ class PropertyPanel(QWidget):
             self._sync_layout_editor_controls()
             self._sync_subtitle_scheme_controls()
             self._sync_title_controls()
-            if hasattr(self, "_scanline_width_spin"):
-                # 粗细/柔化是像素字段，随输出高度重算；模式、颜色、亮度
-                # 无量纲，不随画布变化。
-                self._scanline_width_spin.setValue(
-                    max(int(style.scanline_width_px), 1)
-                )
-                self._scanline_glow_spin.setValue(
-                    max(int(style.scanline_glow_px), 0)
-                )
+            # 扫字线像素字段存 1080 基准:高度重算不改基准值,但编辑/显示值
+            # 要按新输出高度重新映射(模式、颜色、亮度无量纲,不随画布变化)。
+            self._sync_scanline_size_controls()
             if hasattr(self, "_volume_appearance_mode_combo"):
                 # auto 外观模式的音量柱大小随字号重算，回显要跟着刷新
                 # （其余音量柱字段不随高度变化，复用既有同步最省心）。

@@ -440,14 +440,18 @@ class EffectsPropertyPageBuilder:
         host._scanline_width_spin = self._spin_factory(1, 400, suffix=" px")
         host._scanline_width_spin.setToolTip("扫字线高亮带宽度（以走字锋面为中心）")
         host._scanline_width_spin.valueChanged.connect(
-            lambda value: host._update_style(scanline_width_px=value)
+            lambda value: host._update_style(
+                scanline_width_px=host._scanline_base_px(value)
+            )
         )
         host._scanline_glow_spin = self._spin_factory(0, 200, suffix=" px")
         host._scanline_glow_spin.setToolTip(
             "扫字线字形内柔化范围；半径越大边缘越柔和，不会向字形外扩散"
         )
         host._scanline_glow_spin.valueChanged.connect(
-            lambda value: host._update_style(scanline_glow_px=value)
+            lambda value: host._update_style(
+                scanline_glow_px=host._scanline_base_px(value)
+            )
         )
         host._scanline_brightness_spin = self._spin_factory(0, 100, suffix=" %")
         host._scanline_brightness_spin.setToolTip(

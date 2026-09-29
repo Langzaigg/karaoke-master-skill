@@ -26,6 +26,11 @@ class _Host:
     def _update_style(self, **changes) -> None:
         self.updates.append(changes)
 
+    def _scanline_base_px(self, value: int) -> int:
+        # 真实宿主按当前输出高度把编辑值折算回 1080 基准;桩默认 1080 画布,
+        # 换算为恒等,路由契约测试只关心字段名与数值流向。
+        return value
+
     def _choose_lit_image(self) -> None:
         self.updates.append({"lit_image_path": "chosen"})
 

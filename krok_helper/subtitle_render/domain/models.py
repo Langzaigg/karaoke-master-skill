@@ -1113,7 +1113,9 @@ class Style:
     # 扫字线（Sayatoo 式走字锋面高亮）：仅在 karaoke_anim / reverse_karaoke_anim
     # 为 scanline / utopia_scanline 档位时生效；纯绘制参数，不参与布局推导。
     scanline_width_px: int = 16
-    """扫字线粗细（像素）：以走字锋面为中心的高亮带宽度。"""
+    """扫字线粗细（像素，``SCANLINE_BASE_HEIGHT``=1080 基准）：以走字锋面为
+    中心的高亮带宽度。存储恒为 1080 画布下的值；编辑 spin 显示与渲染消费
+    都按当前输出高度从基准值映射（见 ``scanline_px_for_output``）。"""
 
     scanline_mode: str = "color"
     """扫字线模式：``color`` 单独颜色（``scanline_color`` 填充）；
@@ -1140,7 +1142,8 @@ class Style:
     """底色发光的亮度提升（百分比）；仅 ``scanline_mode == "brighten"`` 时生效。"""
 
     scanline_glow_px: int = 8
-    """扫字线字形内柔化范围；只改变带内透明度，不向字形外扩散。"""
+    """扫字线字形内柔化范围（像素，``SCANLINE_BASE_HEIGHT``=1080 基准，语义
+    同 ``scanline_width_px``）；只改变带内透明度，不向字形外扩散。"""
 
     zoom_pulse_curve_level: int = 1
     """整字放大缓动档位（0~5）：0=线性；1~5 为缓出/缓入多项式阶数，越大峰值
@@ -1716,6 +1719,9 @@ def style_to_dict(style: Style) -> dict:
             }
         else:
             data[item.name] = value
+    # 扫字线像素字段的存储基准标记:值恒为 SCANLINE_BASE_HEIGHT(1080)下的
+    # 基准值。读取端据此区分新旧格式(见 ``style_from_dict`` 的一次性迁移)。
+    data["scanline_px_base"] = SCANLINE_BASE_HEIGHT
     return data
 
 
@@ -2194,7 +2200,29 @@ def style_from_dict(payload: object) -> Style:
         changes["volume_stroke_width"] = changes.get("lit_stroke_width", 2)
         changes["volume_opacity_pct"] = changes.get("lit_opacity_pct", 100)
     _migrate_title_references(changes)
+    _migrate_scanline_px_base(changes, payload)
     return _migrate_ruby_follow_independence(ensure_page_layout_defaults(Style(**changes)))
+
+
+def _migrate_scanline_px_base(changes: dict, payload: dict) -> None:
+    """旧数据迁移：扫字线像素值 → 固定 1080 基准存储。
+
+    v4.3.2 起扫字线粗细/柔化恒存 ``SCANLINE_BASE_HEIGHT``(1080)基准值,
+    ``style_to_dict`` 会写 ``scanline_px_base`` 标记。旧 payload(无标记)
+    里的值是其工程 ``font_reference_height`` 画布下的实画值,读取时一次性
+    折算到 1080 基准——例如 4K(2160)工程里 100px 实画值迁移为基准 50。
+    """
+    if payload.get("scanline_px_base") == SCANLINE_BASE_HEIGHT:
+        return
+    if not any(name in changes for name in _SCANLINE_SIZE_FIELDS):
+        return
+    reference = _int_value(payload.get("font_reference_height"), SCANLINE_BASE_HEIGHT)
+    reference = max(int(reference), 1)
+    if reference == SCANLINE_BASE_HEIGHT:
+        return
+    for name in _SCANLINE_SIZE_FIELDS:
+        if name in changes:
+            changes[name] = scanline_base_px_from_output(changes[name], reference)
 
 
 def _migrate_title_references(changes: dict) -> None:
@@ -2427,12 +2455,51 @@ _TITLE_FONT_VISUAL_SIZE_FIELDS: tuple[str, ...] = (
     "shadow_offset_y",
 )
 
-# 扫字线像素字段（粗细 / 柔化半径）按 N3 ``SizeAndRatio`` 语义跟随
-# ``font_reference_height`` 换算。它们是 Style 上的全局绘制参数，
-# ``SubtitleStyleScheme``（配色方案 / 样式预设）不含这些字段，因此不能并入
-# ``_FONT_VISUAL_SIZE_FIELDS``——``rescale_scheme_font_sizes`` 会按该表对
-# scheme 逐字段 ``getattr``，混入会导致 AttributeError。
+# 扫字线像素字段（粗细 / 柔化半径）采用**固定 1080 基准**存储：内部与存盘
+# 恒为 1080 画布下的值，不随输出高度 rescale——前台（编辑 spin、渲染）按
+# 当前画布高度从基准值映射，任何画布切换都从同一基准重新推导，与切换
+# 历史无关。它们是 Style 上的全局绘制参数，``SubtitleStyleScheme``（配色
+# 方案 / 样式预设）不含这些字段，因此不能并入 ``_FONT_VISUAL_SIZE_FIELDS``
+# ——``rescale_scheme_font_sizes`` 会按该表对 scheme 逐字段 ``getattr``，
+# 混入会导致 AttributeError。
 _SCANLINE_SIZE_FIELDS: tuple[str, ...] = ("scanline_width_px", "scanline_glow_px")
+
+SCANLINE_BASE_HEIGHT = 1080
+"""扫字线像素字段（:data:`_SCANLINE_SIZE_FIELDS`）的固定存储基准高度。"""
+
+
+def _scanline_scaled_px(value: int, source_height: int, target_height: int) -> int:
+    source = max(int(source_height), 1)
+    target = max(int(target_height), 1)
+    value = int(value)
+    if source == target or value == 0:
+        return value
+    return int(round(value * target / source))
+
+
+def scanline_px_for_output(value: int, output_height: int) -> int:
+    """1080 基准的扫字线像素值 → 目标输出高度下的实画值。"""
+    return _scanline_scaled_px(value, SCANLINE_BASE_HEIGHT, output_height)
+
+
+def scanline_base_px_from_output(value: int, output_height: int) -> int:
+    """输出高度下的实画值 → 1080 基准存储值（编辑写回用，反方向换算）。"""
+    return _scanline_scaled_px(value, output_height, SCANLINE_BASE_HEIGHT)
+
+
+def style_with_output_scanline(style: Style, output_height: int) -> Style:
+    """渲染入口用：把基准语义的扫字线像素字段换算为输出高度下的实画值。
+
+    1080 输出（或非法高度）原样返回同一对象，避免等值替换造成对象 churn。
+    """
+    height = int(output_height)
+    if height <= 0 or height == SCANLINE_BASE_HEIGHT:
+        return style
+    return replace(
+        style,
+        scanline_width_px=scanline_px_for_output(style.scanline_width_px, height),
+        scanline_glow_px=scanline_px_for_output(style.scanline_glow_px, height),
+    )
 
 
 def rescale_scheme_font_sizes(
@@ -2470,9 +2537,9 @@ def rescale_font_sizes(style: Style, new_height: int) -> Style:
     ``new_height / font_reference_height`` and truncated toward zero. Optional
     overrides remain ``None`` so their inheritance semantics are preserved.
     Character/layout spacing is handled separately by ``rescale_layout_sizes``.
-    Scanline pixel fields (``_SCANLINE_SIZE_FIELDS``) scale alongside the font
-    visual fields; schemes never carry them, so they are only touched here on
-    the base style.
+    Scanline pixel fields use a fixed ``SCANLINE_BASE_HEIGHT`` storage base and
+    are rescaled at render time instead (see ``style_with_output_scanline``),
+    so they deliberately stay untouched here.
     """
     reference = max(int(style.font_reference_height), 1)
     new_height = int(new_height)
@@ -2503,8 +2570,7 @@ def rescale_font_sizes(style: Style, new_height: int) -> Style:
         for overlay in style.title_overlays
     ]
     changes = {
-        name: scaled(getattr(style, name))
-        for name in _FONT_VISUAL_SIZE_FIELDS + _SCANLINE_SIZE_FIELDS
+        name: scaled(getattr(style, name)) for name in _FONT_VISUAL_SIZE_FIELDS
     }
     return replace(
         style,
