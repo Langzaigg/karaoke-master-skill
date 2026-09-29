@@ -3645,6 +3645,29 @@ class PropertyPanel(QWidget):
         layer_key = self._current_color_layer_key()
         state = deepcopy(getattr(colors, state_key))
         fill = _replace_fill(getattr(state, layer_key), **changes)
+        if (
+            str(changes.get("mode") or "")
+            in {"gradient_horizontal", "gradient_vertical"}
+            and str(fill.start_color) == str(fill.end_color) == str(fill.color)
+        ):
+            # 从「塌缩的单色」（渐变关闭时 legacy 投影把起止折成同色）切入
+            # 渐变：用方案里保存的渐变预置起稿——出厂为 #FF5A6F → #0055FF，
+            # 恢复默认后点渐变能直接看到预置，而不是两端同色的假渐变。
+            preset_start = str(
+                self._scheme_value("fill_gradient_start_color") or fill.color
+            )
+            preset_end = str(
+                self._scheme_value("fill_gradient_end_color") or fill.color
+            )
+            if preset_start != preset_end:
+                fill = _replace_fill(
+                    fill,
+                    start_color=preset_start,
+                    end_color=preset_end,
+                    gradient_stops=[(0, preset_start), (100, preset_end)],
+                    split_top_color=preset_start,
+                    split_bottom_color=preset_end,
+                )
         if "color" in changes:
             fill = _replace_fill(
                 fill,

@@ -4775,8 +4775,9 @@ def test_property_panel_gradient_stop_editor_emits_style(qapp):
     fill = emitted[-1].karaoke_colors.after.text
     assert fill.mode == "gradient_horizontal"
     assert (60.125, "#336699") in fill.gradient_stops
+    # 纯色切入渐变按 legacy 预置起稿（出厂 #FF5A6F → #0055FF）。
     assert fill.start_color == "#FF5A6F"
-    assert fill.end_color == "#FF5A6F"
+    assert fill.end_color == "#0055FF"
 
 
 def test_gradient_stop_json_round_trip_preserves_positions_and_colors():
@@ -10173,3 +10174,55 @@ def test_title_card_layout_materializes_code_default_into_library(qapp):
     assert card.layout_combo.currentText() == "タイトル左上"
     names = [layout.name for layout in panel.subtitle_style.layouts]
     assert "タイトル左上" in names
+
+
+def test_switching_solid_to_gradient_seeds_legacy_preset_colors(qapp):
+    """纯色切入渐变：用 legacy 渐变预置起稿，不再是两端同色的假渐变。"""
+    panel = PropertyPanel()
+    panel.set_style(Style())
+
+    # 模拟在「已唱-文字」格从全色切到横向渐变（与真实 UI 同路径）。
+    panel._fill_mode_combo.setCurrentIndex(
+        panel._fill_mode_combo.findData("gradient_horizontal")
+    )
+
+    colors = panel.subtitle_style.karaoke_colors
+    fill = colors.after.text
+    assert fill.mode == "gradient_horizontal"
+    assert fill.start_color == "#FF5A6F"
+    assert fill.end_color == "#0055FF"
+    assert fill.gradient_stops == [(0, "#FF5A6F"), (100, "#0055FF")]
+
+
+def test_switching_to_gradient_seeds_custom_legacy_preset(qapp):
+    """用户自定的 legacy 渐变字段作为预置来源，优先于出厂值。"""
+    panel = PropertyPanel()
+    panel.set_style(
+        Style(
+            fill_gradient_start_color="#112233",
+            fill_gradient_end_color="#445566",
+        )
+    )
+
+    panel._fill_mode_combo.setCurrentIndex(
+        panel._fill_mode_combo.findData("gradient_vertical")
+    )
+
+    fill = panel.subtitle_style.karaoke_colors.after.text
+    assert fill.mode == "gradient_vertical"
+    assert fill.start_color == "#112233"
+    assert fill.end_color == "#445566"
+
+
+def test_switching_between_gradient_modes_keeps_real_stops(qapp):
+    """已有真实渐变时横向/纵向互切，色标原样保留、不被预置覆盖。"""
+    panel = PropertyPanel()
+    panel.set_style(Style(fill_gradient_enabled=True))
+    # 当前投影已是横向渐变（真实色标）；切到纵向应只换方向、色标原样。
+    panel._fill_mode_combo.setCurrentIndex(
+        panel._fill_mode_combo.findData("gradient_vertical")
+    )
+
+    fill = panel.subtitle_style.karaoke_colors.after.text
+    assert fill.mode == "gradient_vertical"
+    assert (fill.start_color, fill.end_color) == ("#FF5A6F", "#0055FF")
