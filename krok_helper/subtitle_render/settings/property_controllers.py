@@ -480,7 +480,7 @@ def normalize_karaoke_animation(value: object) -> KaraokeAnimation:
 
 
 def normalize_scanline_mode(value: object) -> str:
-    if value in {"color", "brighten"}:
+    if value in {"color", "brighten", "follow_before", "follow_after", "role"}:
         return str(value)
     return "color"
 

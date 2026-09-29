@@ -80,7 +80,13 @@ def test_effects_animation_builder_preserves_options_and_layout(qapp) -> None:
     assert [
         host._scanline_mode_combo.itemData(index)
         for index in range(host._scanline_mode_combo.count())
-    ] == ["color", "brighten"]
+    ] == [
+        "color",
+        "brighten",
+        "follow_before",
+        "follow_after",
+        "role",
+    ]
     # 整字放大速度等级：0（线性）~5 六档下拉，每档带速度说明；默认 1。
     assert [
         host._zoom_pulse_curve_combo.itemData(index)
@@ -90,18 +96,20 @@ def test_effects_animation_builder_preserves_options_and_layout(qapp) -> None:
     assert host._zoom_pulse_curve_combo.itemText(1) == "1级（匀速·默认）"
     assert host._zoom_pulse_curve_combo.itemText(3) == "3级（较快）"
     assert host._zoom_pulse_curve_combo.itemText(5) == "5级（极快）"
-    # 扫字线独占一整行（与出入场动画两栏同宽）；参数永久激活，亮度默认
-    # 隐藏（默认单独颜色模式），宿主回显按模式互换颜色/亮度。
+    # 扫字线独占一整行（与出入场动画两栏同宽）；参数永久激活，亮度与角色
+    # 下拉默认隐藏（默认单独颜色模式），宿主回显按模式互换第三列。
     assert host._scanline_row is not None
     for control in (
         host._scanline_mode_combo,
         host._scanline_width_spin,
         host._scanline_color_btn,
+        host._scanline_role_combo,
         host._scanline_glow_spin,
     ):
         assert control.isEnabled()
     assert not host._scanline_color_btn.isHidden()
     assert host._scanline_brightness_spin.isHidden()
+    assert host._scanline_role_combo.isHidden()
     # 网格行序：唱字对（第 2 行第 1 栏）→ 段首尾区块（第 2 行第 2 栏）
     # → 扫字线整行（第 3 行）。
     items = host._animation_grid._items

@@ -1096,12 +1096,18 @@ std::optional<RenderConfig> parseRenderConfig(const QJsonObject &ir, QString *er
         style, QStringLiteral("scanline_mode"), base.scanlineMode
     );
     if (base.scanlineMode != QStringLiteral("brighten")
-        && base.scanlineMode != QStringLiteral("color")) {
+        && base.scanlineMode != QStringLiteral("color")
+        && base.scanlineMode != QStringLiteral("follow_before")
+        && base.scanlineMode != QStringLiteral("follow_after")
+        && base.scanlineMode != QStringLiteral("role")) {
         base.scanlineMode = QStringLiteral("color");
     }
     base.scanlineColor = stringValue(
         style, QStringLiteral("scanline_color"), base.scanlineColor
     );
+    base.scanlineRoleName = stringValue(
+        style, QStringLiteral("scanline_role_name"), QString()
+    ).trimmed();
     base.scanlineBrightnessPct = std::clamp(
         intValue(
             style,
@@ -1135,6 +1141,41 @@ std::optional<RenderConfig> parseRenderConfig(const QJsonObject &ir, QString *er
     const QJsonObject rubyKaraokeColors = style.value(QStringLiteral("ruby_karaoke_colors")).toObject();
 
     applyMainKaraokeColors(base, mainKaraokeColors);
+    // ``role`` 模式：解析指定来源的「走字后-主文字」填充。保留键
+    // ``__global__`` 取主样式自身（applyMainKaraokeColors 刚填好的
+    // afterFill，含 legacy 回退）；其余名字查 customStyleSchemes。名字悬空
+    // （历史项目/手工 JSON）时归一回 color 模式，渲染端因此只见有效
+    // role 填充，与 Painter 的悬空回退同口径。方案 karaoke_colors 缺失时
+    // 按 refreshLegacyMainFills 的口径回落纯色 fill_color。
+    if (base.scanlineMode == QStringLiteral("role")) {
+        if (base.scanlineRoleName == QStringLiteral("__global__")) {
+            base.scanlineRolePaint = base.afterFill;
+        } else {
+            const QJsonObject roleScheme = base.scanlineRoleName.isEmpty()
+                ? QJsonObject()
+                : cfg.customStyleSchemes.value(base.scanlineRoleName).toObject();
+            if (roleScheme.isEmpty()) {
+                base.scanlineMode = QStringLiteral("color");
+            } else {
+                const QJsonObject roleColors = roleScheme.value(
+                    QStringLiteral("karaoke_colors")
+                ).toObject();
+                if (roleColors.contains(QStringLiteral("after"))) {
+                    base.scanlineRolePaint = karaokeLayerFillFromColors(
+                        roleColors, QStringLiteral("after"),
+                        QStringLiteral("text"), base.scanlineColor
+                    );
+                } else {
+                    base.scanlineRolePaint = solidPaintFill(
+                        stringValue(
+                            roleScheme, QStringLiteral("fill_color"),
+                            base.scanlineColor
+                        )
+                    );
+                }
+            }
+        }
+    }
 
     if (hasRubyKaraokeColors) {
         applyRubyKaraokeColors(base, rubyKaraokeColors);

@@ -290,6 +290,11 @@ struct ResolvedStyle {
     QString scanlineColor = QStringLiteral("#FFFFFF");
     int scanlineBrightnessPct = 60;
     int scanlineGlowPx = 8;
+    // ``role`` 模式：``scanlineRoleName`` 指向来源的「走字后-主文字」填充
+    // （customStyleSchemes 解析）。整条带（含描边）都用这一份填充重绘。
+    // 名字解析失败时 scanlineMode 归一回 ``color``。
+    QString scanlineRoleName;
+    PaintFillSpec scanlineRolePaint;
     // 整字放大缓动档位（0~5，0=线性）来自全局 Style；仅显式选择 zoom_pulse
     // 档位的行会置位 TimingLine::zoomPulseEnabled。
     int zoomPulseCurveLevel = 1;

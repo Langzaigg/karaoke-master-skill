@@ -179,6 +179,7 @@ from krok_helper.subtitle_render.domain.models import (
     SubtitleStyleScheme,
     Style,
     StyleTimingConfig,
+    SCANLINE_GLOBAL_ROLE_KEY,
     TITLE_SCHEME_NAME,
     TitleOverlay,
     TitleTimeWindow,
@@ -1062,7 +1063,8 @@ class PropertyPanel(QWidget):
                     0,
                     self._scanline_mode_combo.findData(
                         self._style.scanline_mode
-                        if self._style.scanline_mode in {"color", "brighten"}
+                        if self._style.scanline_mode
+                        in {"color", "brighten", "role"}
                         else "color"
                     ),
                 )
@@ -1382,21 +1384,61 @@ class PropertyPanel(QWidget):
         self._section_edge_both_check.setEnabled(enabled)
 
     def _sync_scanline_controls(self) -> None:
-        """扫字线参数永久可编辑；模式决定颜色/亮度提升的显示切换。
+        """扫字线参数永久可编辑；模式决定第三列（颜色/亮度/来源）的显示切换。
 
-        单独颜色：显示颜色、隐藏亮度提升；底色发光：隐藏颜色、显示亮度提升。
+        单独颜色：显示颜色；底色发光与跟随字体两档：显示亮度提升（共用
+        参数）；复用配色方案：显示来源下拉。三者共用同一列位，行宽不变。
         """
-        brighten = self._style.scanline_mode == "brighten"
+        mode = self._style.scanline_mode
+        brighten = mode in {"brighten", "follow_before", "follow_after"}
+        role = mode == "role"
         for control in (
             self._scanline_mode_combo,
             self._scanline_width_spin,
             self._scanline_color_btn,
             self._scanline_brightness_spin,
+            self._scanline_role_combo,
             self._scanline_glow_spin,
         ):
             control.setEnabled(True)
-        self._scanline_color_btn.setVisible(not brighten)
+        self._scanline_color_btn.setVisible(not brighten and not role)
         self._scanline_brightness_spin.setVisible(brighten)
+        self._scanline_role_combo.setVisible(role)
+        if role:
+            self._refresh_scanline_role_combo()
+
+    def _refresh_scanline_role_combo(self) -> None:
+        """按当前方案表重建扫字线来源下拉并回显所选条目。
+
+        「全局默认」（主样式自身配色，保留键）与「标题」方案恒在列表前
+        列：没建过任何角色的项目也能立刻选用，下拉永不为空。引用悬空
+        （历史项目/手工 JSON）时保留幽灵条目展示原名，不静默改写样式
+        数据；渲染端按悬空回退单独颜色处理。
+        """
+        if not hasattr(self, "_scanline_role_combo"):
+            return
+        selected = str(getattr(self._style, "scanline_role_name", None) or "")
+        combo = self._scanline_role_combo
+        combo.blockSignals(True)
+        try:
+            combo.clear()
+            entries = [
+                ("全局默认", SCANLINE_GLOBAL_ROLE_KEY),
+                ("标题", TITLE_SCHEME_NAME),
+            ]
+            names = {SCANLINE_GLOBAL_ROLE_KEY, TITLE_SCHEME_NAME}
+            for name in self._role_controller.names:
+                if name not in names:
+                    names.add(name)
+                    entries.append((name, name))
+            if selected and selected not in names:
+                entries.append((selected, selected))
+            for label, value in entries:
+                combo.addItem(label, value)
+            combo.setCurrentIndex(max(0, combo.findData(selected)))
+            combo.setEnabled(bool(combo.count()))
+        finally:
+            combo.blockSignals(False)
 
     def _update_ruby_font_override(self, **changes) -> None:
         changes["ruby_font_follow_main"] = False
@@ -3704,6 +3746,9 @@ class PropertyPanel(QWidget):
             "「自动识别和声」把角色分给文字后，这些文字就按对应方案渲染。"
         )
         self._sync_scheme_combo_width()
+        # 扫字线「复用角色配色」按名字引用角色：角色注册表变化的每个
+        # 入口（加载/合并/新建/改名/删除）都会走到这里，下拉跟着重建。
+        self._refresh_scanline_role_combo()
 
     def _sync_scheme_combo_width(self) -> None:
         """按最长角色名设置下拉框宽度，不占用导航条的全部剩余空间。"""
@@ -4360,6 +4405,22 @@ class PropertyPanel(QWidget):
             return
         if self._route_timing_scope_changes(changes):
             return
+        # 切到「复用配色方案」时补一个默认来源：优先第一个角色（多数项目
+        # 的直觉选择），没有角色的项目落到恒在的「全局默认」；避免模式已
+        # 切而名字仍悬空（渲染回退白色）。
+        if (
+            changes.get("scanline_mode") == "role"
+            and "scanline_role_name" not in changes
+            and not getattr(self._style, "scanline_role_name", None)
+        ):
+            role_names = [
+                name
+                for name in self._role_controller.names
+                if name not in {TITLE_SCHEME_NAME, SCANLINE_GLOBAL_ROLE_KEY}
+            ]
+            changes["scanline_role_name"] = (
+                role_names[0] if role_names else SCANLINE_GLOBAL_ROLE_KEY
+            )
         # 常规样式编辑不再属于「仅标题变化」，复位局部重排 scope。
         self._pending_style_relayout_scope = None
         result = self._style_controller.update(
@@ -4385,9 +4446,12 @@ class PropertyPanel(QWidget):
                         ),
                     )
                 )
-            if {"karaoke_anim", "reverse_karaoke_anim", "scanline_mode"}.intersection(
-                changes
-            ):
+            if {
+                "karaoke_anim",
+                "reverse_karaoke_anim",
+                "scanline_mode",
+                "scanline_role_name",
+            }.intersection(changes):
                 self._sync_scanline_controls()
             if "scanline_color" in changes:
                 # 扫字线颜色不在方案/指示灯的再同步集合里：选色后按钮必须

@@ -80,6 +80,7 @@ TextStyle geometryStyle(TextStyle style) {
         &style.rubyBeforeStrokePaint, &style.rubyAfterStrokePaint,
         &style.rubyBeforeStroke2Paint, &style.rubyAfterStroke2Paint,
         &style.rubyBeforeDecorPaint, &style.rubyAfterDecorPaint,
+        &style.scanlineRolePaint,
     };
     for (PaintStyle *paint : paints) {
         erasePaintRgb(*paint);
@@ -391,6 +392,7 @@ void Direct2DGpuBackend::configure(const RenderScene &scene) {
             &style.rubyBeforeStrokePaint, &style.rubyAfterStrokePaint,
             &style.rubyBeforeStroke2Paint, &style.rubyAfterStroke2Paint,
             &style.rubyBeforeDecorPaint, &style.rubyAfterDecorPaint,
+            &style.scanlineRolePaint,
         };
         for (const PaintStyle *paint : paints) {
             if (paint->mode != "image" || paint->imagePath.empty()) {

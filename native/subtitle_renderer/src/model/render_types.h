@@ -446,10 +446,14 @@ struct TextStyle {
     // the Python host from the line's baked karaoke_anim.
     // ``scanlineMode``: "color" fills the band with ``scanlineColor``;
     // "brighten" keeps each before/after colour's HSV hue and saturation,
-    // raising only its value by ``scanlineBrightness``.
+    // raising only its value by ``scanlineBrightness``; "role" fills the whole
+    // band with ``scanlineRolePaint`` (a role's after-state text fill). The
+    // parser normalises a dangling role name back to "color", so render never
+    // sees "role" without a resolved paint.
     float scanlineWidth = 16.0f;
     std::string scanlineMode = "color";
     RgbaColor scanlineColor{255, 255, 255, 255};
+    PaintStyle scanlineRolePaint;
     float scanlineBrightness = 0.6f;
     float scanlineGlowRadius = 8.0f;
     // Whole-char zoom pulse easing order (0..5; 0 = linear).  Whether the

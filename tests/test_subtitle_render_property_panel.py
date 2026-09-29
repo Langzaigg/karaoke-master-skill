@@ -5925,6 +5925,81 @@ def test_property_panel_animation_controls_emit_style(qapp):
     panel.set_style(Style(karaoke_anim="scanline", scanline_mode="brighten"))
     assert panel._scanline_color_btn.isHidden()
     assert not panel._scanline_brightness_spin.isHidden()
+    # 复用配色方案：第三列换成来源下拉；无引用时切入自动补第一个
+    # 角色。「全局默认」（保留键）与「标题」方案恒在前列。
+    panel.set_roles(["主唱", "和声"])
+    panel.set_style(
+        Style(
+            karaoke_anim="scanline",
+            scanline_mode="color",
+            custom_style_schemes={
+                "主唱": SubtitleStyleScheme(),
+                "和声": SubtitleStyleScheme(),
+            },
+        )
+    )
+    panel._scanline_mode_combo.setCurrentIndex(
+        panel._scanline_mode_combo.findData("role")
+    )
+    assert emitted[-1].scanline_mode == "role"
+    assert emitted[-1].scanline_role_name == "主唱"
+    assert panel._scanline_color_btn.isHidden()
+    assert panel._scanline_brightness_spin.isHidden()
+    assert not panel._scanline_role_combo.isHidden()
+    assert panel._scanline_role_combo.isEnabled()
+    assert [
+        panel._scanline_role_combo.itemData(index)
+        for index in range(panel._scanline_role_combo.count())
+    ] == ["__global__", "标题", "主唱", "和声"]
+    assert panel._scanline_role_combo.itemText(0) == "全局默认"
+    # 换来源：模型跟随；角色注册表变化后下拉重建并保留所选。
+    panel._scanline_role_combo.setCurrentIndex(
+        panel._scanline_role_combo.findData("和声")
+    )
+    assert emitted[-1].scanline_role_name == "和声"
+    panel.set_roles(["主唱", "和声", "独唱"])
+    assert [
+        panel._scanline_role_combo.itemData(index)
+        for index in range(panel._scanline_role_combo.count())
+    ] == ["__global__", "标题", "主唱", "和声", "独唱"]
+    assert panel._scanline_role_combo.currentData() == "和声"
+    # 引用悬空的历史样式：保留幽灵条目展示原名，不静默改数据。
+    panel.set_style(
+        Style(
+            karaoke_anim="scanline",
+            scanline_mode="role",
+            scanline_role_name="幽灵",
+        )
+    )
+    assert panel._scanline_role_combo.currentData() == "幽灵"
+    assert panel._scanline_role_combo.count() == 6
+    # 没有任何角色的项目：下拉仍有「全局默认」和「标题」，切入模式自动
+    # 落全局默认。
+    panel.set_roles([])
+    panel.set_style(Style(karaoke_anim="scanline", scanline_mode="color"))
+    assert panel._scanline_role_combo.count() == 2
+    assert panel._scanline_role_combo.itemData(0) == "__global__"
+    panel._scanline_mode_combo.setCurrentIndex(
+        panel._scanline_mode_combo.findData("role")
+    )
+    assert emitted[-1].scanline_mode == "role"
+    assert emitted[-1].scanline_role_name == "__global__"
+    assert panel._scanline_role_combo.isEnabled()
+    # 跟随字体两档：第三列复用亮度提升（与底色发光同参数），来源/颜色隐藏。
+    panel._scanline_mode_combo.setCurrentIndex(
+        panel._scanline_mode_combo.findData("follow_after")
+    )
+    assert emitted[-1].scanline_mode == "follow_after"
+    assert panel._scanline_color_btn.isHidden()
+    assert not panel._scanline_brightness_spin.isHidden()
+    assert panel._scanline_role_combo.isHidden()
+    panel._scanline_brightness_spin.setValue(25)
+    assert emitted[-1].scanline_brightness_pct == 25
+    panel._scanline_mode_combo.setCurrentIndex(
+        panel._scanline_mode_combo.findData("follow_before")
+    )
+    assert emitted[-1].scanline_mode == "follow_before"
+    assert not panel._scanline_brightness_spin.isHidden()
 
     panel._entry_anim_combo.setCurrentIndex(
         panel._entry_anim_combo.findData("char_fade")

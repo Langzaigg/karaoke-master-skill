@@ -4402,8 +4402,16 @@ ProbeResult Direct2DGpuBackend::renderFrameInternal(
             && !mainWipeComplete
             && hasAfterWipe;
         // 底色发光保留 before/after 两侧各自的色相和饱和度，只提高 HSV
-        // 的 V；单独颜色模式仍使用用户指定的统一颜色。
+        // 的 V；单独颜色模式仍使用用户指定的统一颜色；跟随字体两档与
+        // 底色发光同一通路（当前行实际配色、全层重绘、共用提亮），但整
+        // 条带固定用走字前/走字后那一态；角色配色模式整条带用
+        // scanlineRolePaint（来源的「走字后-主文字」填充）且只重绘字形
+        // 填充层（描边层跳过，与 Painter 的 role 分支同口径）。
         const bool scanlineBrighten = style.scanlineMode == "brighten";
+        const bool scanlineFollowBefore = style.scanlineMode == "follow_before";
+        const bool scanlineFollowAfter = style.scanlineMode == "follow_after";
+        const bool scanlineFollows = scanlineFollowBefore || scanlineFollowAfter;
+        const bool scanlineRole = style.scanlineMode == "role";
         const float scanlineAlpha = scanlineBrighten
             ? (style.scanlineBrightness > 0.0f ? 1.0f : 0.0f)
             : 1.0f;
@@ -4500,14 +4508,136 @@ ProbeResult Direct2DGpuBackend::renderFrameInternal(
             );
         };
         const auto scanlinePaintFor = [&](const PaintStyle &source) {
-            return scanlineBrighten
+            if (scanlineRole) {
+                return style.scanlineRolePaint;
+            }
+            return (scanlineBrighten || scanlineFollows)
                 ? brightenPaintHsvValue(source, scanlineBrightness)
                 : solidPaint(scanlineColorValue);
         };
         const auto scanlineColorFor = [&](const RgbaColor &source) {
-            return scanlineBrighten
+            if (scanlineRole) {
+                return style.scanlineRolePaint.color;
+            }
+            return (scanlineBrighten || scanlineFollows)
                 ? brightenHsvValue(source, scanlineBrightness)
                 : scanlineColorValue;
+        };
+        // Continuous feather for the scan-line band: a per-pixel smoothstep
+        // mask rasterised once with an ordered 4x4 dither. A gradient-brush
+        // mask quantises to 8 bits in hardware; on gentle falloff slopes the
+        // plateaus show up as vertical banding. Dithering breaks the plateaus
+        // into high-frequency texture the eye ignores. One small bitmap per
+        // line per frame (band size, ~tens of microseconds) keeps the cost
+        // negligible, and a 1:1 bitmap-brush alignment avoids any filtering.
+        const auto scanlineMaskBrush = [&](
+            const D2D1_RECT_F &maskRect, float edge
+        ) -> Microsoft::WRL::ComPtr<ID2D1BitmapBrush> {
+            // Recursively built 16x16 Bayer table (values 0..255), generated
+            // once per process: pattern periodicity 16 px stays below the
+            // eye's structure threshold on the gentlest falloff slopes.
+            struct Bayer16 {
+                float values[16][16];
+                Bayer16() {
+                    float m[256] = {0.0f};
+                    const float base[2][2] = {{0.0f, 2.0f}, {3.0f, 1.0f}};
+                    int n = 1;
+                    while (n < 16) {
+                        float next[32][32];
+                        for (int i = 0; i < n; ++i) {
+                            for (int j = 0; j < n; ++j) {
+                                next[2 * i][2 * j] = 4 * m[i * n + j] + base[0][0];
+                                next[2 * i][2 * j + 1] = 4 * m[i * n + j] + base[0][1];
+                                next[2 * i + 1][2 * j] = 4 * m[i * n + j] + base[1][0];
+                                next[2 * i + 1][2 * j + 1] = 4 * m[i * n + j] + base[1][1];
+                            }
+                        }
+                        n *= 2;
+                        for (int i = 0; i < n; ++i) {
+                            for (int j = 0; j < n; ++j) {
+                                m[i * n + j] = next[i][j];
+                            }
+                        }
+                    }
+                    for (int i = 0; i < 16; ++i) {
+                        for (int j = 0; j < 16; ++j) {
+                            values[i][j] = m[i * 16 + j] / 256.0f - 0.5f;
+                        }
+                    }
+                }
+            };
+            static const Bayer16 kBayer;
+            const float softness = std::min(
+                std::max(style.scanlineGlowRadius, 0.0f), scanlineHalfWidth
+            );
+            const float core = scanlineHalfWidth - softness;
+            const UINT32 maskWidth = static_cast<UINT32>(
+                std::max(std::ceil(maskRect.right - maskRect.left), 1.0f)
+            );
+            const UINT32 maskHeight = static_cast<UINT32>(
+                std::max(std::ceil(maskRect.bottom - maskRect.top), 1.0f)
+            );
+            std::vector<std::uint8_t> pixels(
+                static_cast<std::size_t>(maskWidth) * maskHeight * 4, 0
+            );
+            for (UINT32 y = 0; y < maskHeight; ++y) {
+                for (UINT32 x = 0; x < maskWidth; ++x) {
+                    const float distance = std::abs(
+                        static_cast<float>(x) + 0.5f
+                        + maskRect.left - edge
+                    );
+                    float strength = 1.0f;
+                    if (softness > 0.0f && distance > core) {
+                        const float progress = std::clamp(
+                            (scanlineHalfWidth - distance) / softness, 0.0f, 1.0f
+                        );
+                        strength = progress * progress * (3.0f - 2.0f * progress);
+                    }
+                    const float dithered = strength
+                        + (kBayer.values[y & 15][x & 15]) / 255.0f;
+                    const auto value = static_cast<std::uint8_t>(std::clamp(
+                        std::lround(dithered * 255.0f), 0L, 255L
+                    ));
+                    std::uint8_t *px = &pixels[
+                        (static_cast<std::size_t>(y) * maskWidth + x) * 4
+                    ];
+                    px[0] = value;
+                    px[1] = value;
+                    px[2] = value;
+                    px[3] = value;
+                }
+            }
+            const D2D1_BITMAP_PROPERTIES bitmapProps = D2D1::BitmapProperties(
+                D2D1_PIXEL_FORMAT{
+                    DXGI_FORMAT_B8G8R8A8_UNORM,
+                    D2D1_ALPHA_MODE_PREMULTIPLIED,
+                }
+            );
+            Microsoft::WRL::ComPtr<ID2D1Bitmap> bitmap;
+            checkHr(
+                context->CreateBitmap(
+                    D2D1::SizeU(maskWidth, maskHeight), pixels.data(),
+                    maskWidth * 4, bitmapProps, &bitmap
+                ),
+                "ID2D1DeviceContext::CreateBitmap(scanline mask)",
+                device_
+            );
+            const D2D1_BITMAP_BRUSH_PROPERTIES brushProps = D2D1::BitmapBrushProperties(
+                D2D1_EXTEND_MODE_CLAMP, D2D1_EXTEND_MODE_CLAMP,
+                D2D1_BITMAP_INTERPOLATION_MODE_NEAREST_NEIGHBOR
+            );
+            Microsoft::WRL::ComPtr<ID2D1BitmapBrush> brush;
+            checkHr(
+                context->CreateBitmapBrush(
+                    bitmap.Get(), &brushProps, nullptr, &brush
+                ),
+                "ID2D1RenderTarget::CreateBitmapBrush(scanline mask)",
+                device_
+            );
+            brush->SetTransform(
+                D2D1::Matrix3x2F::Translation(maskRect.left, maskRect.top)
+            );
+            return brush;
         };
         const auto pushScanlineStateClip = [&](float edge, bool after) {
             pushAxisAlignedClip(
@@ -5771,8 +5901,11 @@ ProbeResult Direct2DGpuBackend::renderFrameInternal(
         drawMainLayer(2);
         }
 
-        // Scan-line sweep on the main text. Feather slices are clipped to the
-        // glyph geometry, so no rectangular halo reaches transparent gaps.
+        // Scan-line sweep on the main text, kept strictly inside the glyph
+        // geometry. Plain-wipe lines go through the adjustment-layer composite
+        // (continuous feather crossfade, same contract as the Painter);
+        // utopia lines keep the per-slice overlay -- a line-level mask cannot
+        // follow each glyph's transformed front.
         if (scanlineActive && scanlineAlpha > 0.0f) {
             if (scanlineMainGlow.blur != nullptr) {
                 drawScanlineGlowLayer(scanlineMainGlow);
@@ -5781,75 +5914,231 @@ ProbeResult Direct2DGpuBackend::renderFrameInternal(
             sharedInstanceTransformActive = false;
             const float scanlineSolidPad = std::max(style.strokeWidth, 0.0f)
                 + std::max(style.stroke2Width, 0.0f) + 4.0f;
-            for (std::size_t charIndex = 0; charIndex < line->chars.size(); ++charIndex) {
-                const auto band = scanlineCharBand(charIndex);
-                ID2D1Geometry *geometry = charGeometryAt(charIndex);
-                if (!band.has_value() || geometry == nullptr) {
-                    continue;
-                }
-                const Impl::CachedChar &ch = line->chars[charIndex];
-                if (!rectsOverlap(
-                        band->first,
-                        expandedRect(
-                            D2D1::RectF(ch.left, ch.top, ch.right, ch.bottom),
-                            scanlineSolidPad
-                        )
-                    )) {
-                    continue;
-                }
-                const TextStyle &charStyle = ch.styleIndex >= 0
-                    && ch.styleIndex < static_cast<int>(scene.charStyles.size())
-                    ? scene.charStyles[static_cast<std::size_t>(ch.styleIndex)]
-                    : style;
-                const auto featherSlices = scanlineFeatherSlices(band->second);
-                for (bool after : {false, true}) {
-                    for (int layer = 0; layer < 3; ++layer) {
-                        const PaintStyle &sourcePaint = layer == 0
-                            ? (after ? charStyle.afterStroke2Paint : charStyle.beforeStroke2Paint)
-                            : (layer == 1
-                                ? (after ? charStyle.afterStrokePaint : charStyle.beforeStrokePaint)
-                                : (after ? charStyle.afterFillPaint : charStyle.beforeFillPaint));
-                        const RgbaColor &sourceColor = layer == 0
-                            ? (after ? charStyle.afterStroke2 : charStyle.beforeStroke2)
-                            : (layer == 1
-                                ? (after ? charStyle.afterStroke : charStyle.beforeStroke)
-                                : (after ? charStyle.afterFill : charStyle.beforeFill));
-                        if ((layer == 0 && charStyle.stroke2Width <= 0.0f)
-                            || (layer == 1 && charStyle.strokeWidth <= 0.0f)) {
-                            continue;
-                        }
-                        const PaintStyle paint = scanlinePaintFor(sourcePaint);
-                        const RgbaColor color = scanlineColorFor(sourceColor);
-                        Microsoft::WRL::ComPtr<ID2D1Brush> brush = paintBrush(
-                            paint, mainPaintBounds(paint, ch.styleIndex), color
-                        );
-                        for (const auto &[sliceRect, sliceAlpha] : featherSlices) {
-                            brush->SetOpacity(
-                                globalOpacity * characterOpacityAt(charIndex)
-                                    * scanlineAlpha * sliceAlpha
-                            );
-                            pushAxisAlignedClip(
-                                sliceRect, D2D1_ANTIALIAS_MODE_PER_PRIMITIVE
-                            );
-                            pushScanlineStateClip(band->second, after);
-                            if (layer == 0) {
-                                context->DrawGeometry(
-                                    geometry, brush.Get(),
-                                    std::max(charStyle.strokeWidth, 0.0f)
-                                        + charStyle.stroke2Width
-                                );
-                            } else if (layer == 1) {
-                                context->DrawGeometry(
-                                    geometry, brush.Get(), charStyle.strokeWidth
-                                );
-                            } else {
-                                context->FillGeometry(geometry, brush.Get());
+            const auto drawMainSlices = [&]() {
+                for (std::size_t charIndex = 0; charIndex < line->chars.size(); ++charIndex) {
+                    const auto band = scanlineCharBand(charIndex);
+                    ID2D1Geometry *geometry = charGeometryAt(charIndex);
+                    if (!band.has_value() || geometry == nullptr) {
+                        continue;
+                    }
+                    const Impl::CachedChar &ch = line->chars[charIndex];
+                    if (!rectsOverlap(
+                            band->first,
+                            expandedRect(
+                                D2D1::RectF(ch.left, ch.top, ch.right, ch.bottom),
+                                scanlineSolidPad
+                            )
+                        )) {
+                        continue;
+                    }
+                    const TextStyle &charStyle = ch.styleIndex >= 0
+                        && ch.styleIndex < static_cast<int>(scene.charStyles.size())
+                        ? scene.charStyles[static_cast<std::size_t>(ch.styleIndex)]
+                        : style;
+                    const auto featherSlices = scanlineFeatherSlices(band->second);
+                    for (bool after : {false, true}) {
+                        const bool sourceAfter = scanlineFollows
+                            ? scanlineFollowAfter
+                            : after;
+                        for (int layer = 0; layer < 3; ++layer) {
+                            const PaintStyle &sourcePaint = layer == 0
+                                ? (sourceAfter ? charStyle.afterStroke2Paint : charStyle.beforeStroke2Paint)
+                                : (layer == 1
+                                    ? (sourceAfter ? charStyle.afterStrokePaint : charStyle.beforeStrokePaint)
+                                    : (sourceAfter ? charStyle.afterFillPaint : charStyle.beforeFillPaint));
+                            const RgbaColor &sourceColor = layer == 0
+                                ? (sourceAfter ? charStyle.afterStroke2 : charStyle.beforeStroke2)
+                                : (layer == 1
+                                    ? (sourceAfter ? charStyle.afterStroke : charStyle.beforeStroke)
+                                    : (sourceAfter ? charStyle.afterFill : charStyle.beforeFill));
+                            if ((layer == 0 && charStyle.stroke2Width <= 0.0f)
+                                || (layer == 1 && charStyle.strokeWidth <= 0.0f)) {
+                                continue;
                             }
-                            context->PopAxisAlignedClip();
-                            context->PopAxisAlignedClip();
+                            const PaintStyle paint = scanlinePaintFor(sourcePaint);
+                            const RgbaColor color = scanlineColorFor(sourceColor);
+                            Microsoft::WRL::ComPtr<ID2D1Brush> brush = paintBrush(
+                                paint, mainPaintBounds(paint, ch.styleIndex), color
+                            );
+                            for (const auto &[sliceRect, sliceAlpha] : featherSlices) {
+                                brush->SetOpacity(
+                                    globalOpacity * characterOpacityAt(charIndex)
+                                        * scanlineAlpha * sliceAlpha
+                                );
+                                pushAxisAlignedClip(
+                                    sliceRect, D2D1_ANTIALIAS_MODE_PER_PRIMITIVE
+                                );
+                                pushScanlineStateClip(band->second, after);
+                                if (layer == 0) {
+                                    context->DrawGeometry(
+                                        geometry, brush.Get(),
+                                        std::max(charStyle.strokeWidth, 0.0f)
+                                            + charStyle.stroke2Width
+                                    );
+                                } else if (layer == 1) {
+                                    context->DrawGeometry(
+                                        geometry, brush.Get(), charStyle.strokeWidth
+                                    );
+                                } else {
+                                    context->FillGeometry(geometry, brush.Get());
+                                }
+                                context->PopAxisAlignedClip();
+                                context->PopAxisAlignedClip();
+                            }
                         }
                     }
                 }
+            };
+            if (useUtopiaTransition) {
+                drawMainSlices();
+            } else {
+                // The repaint is opaque inside a dithered-mask D2D layer;
+                // the mask owns the band falloff (no per-slice alpha).
+                const float bandLeft = wipeEdge - scanlineHalfWidth;
+                const float bandRight = wipeEdge + scanlineHalfWidth;
+                const D2D1_RECT_F maskRect = D2D1::RectF(
+                    bandLeft - scanlineSolidPad,
+                    line->bounds.top - scanlineSolidPad,
+                    bandRight + scanlineSolidPad,
+                    line->bounds.bottom + scanlineSolidPad
+                );
+                Microsoft::WRL::ComPtr<ID2D1BitmapBrush> maskBrush =
+                    scanlineMaskBrush(maskRect, wipeEdge);
+                const D2D1_LAYER_PARAMETERS layerParams = {
+                    maskRect,
+                    nullptr,
+                    D2D1_ANTIALIAS_MODE_PER_PRIMITIVE,
+                    D2D1::Matrix3x2F::Identity(),
+                    1.0f,
+                    maskBrush.Get(),
+                    D2D1_LAYER_OPTIONS_NONE,
+                };
+                context->PushLayer(&layerParams, nullptr);
+                [&]() {
+                        for (std::size_t charIndex = 0;
+                             charIndex < line->chars.size(); ++charIndex) {
+                            const auto band = scanlineCharBand(charIndex);
+                            ID2D1Geometry *geometry = charGeometryAt(charIndex);
+                            if (!band.has_value() || geometry == nullptr) {
+                                continue;
+                            }
+                            const Impl::CachedChar &ch = line->chars[charIndex];
+                            if (!rectsOverlap(
+                                    band->first,
+                                    expandedRect(
+                                        D2D1::RectF(
+                                            ch.left, ch.top, ch.right, ch.bottom
+                                        ),
+                                        scanlineSolidPad
+                                    )
+                                )) {
+                                continue;
+                            }
+                            const TextStyle &charStyle = ch.styleIndex >= 0
+                                && ch.styleIndex
+                                    < static_cast<int>(scene.charStyles.size())
+                                ? scene.charStyles[
+                                      static_cast<std::size_t>(ch.styleIndex)
+                                  ]
+                                : style;
+                            // Solid/follow/role repaint one uniform colour:
+                            // draw it once with no front split -- two
+                            // complementary antialiased half-plane clips
+                            // seam at the front (25% coverage loss) and on a
+                            // flat band that seam reads as a hard line.
+                            // Brighten keeps both halves (different colours)
+                            // with the clips overlapping the front by 1 px so
+                            // the later half repaints the earlier half's
+                            // antialiased edge away.
+                            const bool scanlineUniform = !scanlineBrighten;
+                            for (int pass = 0; pass < (scanlineUniform ? 1 : 2);
+                                 ++pass) {
+                                const bool after = pass == 1;
+                                const bool sourceAfter = scanlineFollows
+                                    ? scanlineFollowAfter
+                                    : after;
+                                for (int layer = 0; layer < 3; ++layer) {
+                                    const PaintStyle &sourcePaint = layer == 0
+                                        ? (sourceAfter
+                                               ? charStyle.afterStroke2Paint
+                                               : charStyle.beforeStroke2Paint)
+                                        : (layer == 1
+                                              ? (sourceAfter
+                                                     ? charStyle.afterStrokePaint
+                                                     : charStyle.beforeStrokePaint)
+                                              : (sourceAfter
+                                                     ? charStyle.afterFillPaint
+                                                     : charStyle.beforeFillPaint));
+                                    const RgbaColor &sourceColor = layer == 0
+                                        ? (sourceAfter
+                                               ? charStyle.afterStroke2
+                                               : charStyle.beforeStroke2)
+                                        : (layer == 1
+                                              ? (sourceAfter
+                                                     ? charStyle.afterStroke
+                                                     : charStyle.beforeStroke)
+                                              : (sourceAfter
+                                                     ? charStyle.afterFill
+                                                     : charStyle.beforeFill));
+                                    if ((layer == 0
+                                            && charStyle.stroke2Width <= 0.0f)
+                                        || (layer == 1
+                                            && charStyle.strokeWidth <= 0.0f)) {
+                                        continue;
+                                    }
+                                    const PaintStyle paint =
+                                        scanlinePaintFor(sourcePaint);
+                                    const RgbaColor color =
+                                        scanlineColorFor(sourceColor);
+                                    Microsoft::WRL::ComPtr<ID2D1Brush> brush =
+                                        paintBrush(
+                                            paint,
+                                            mainPaintBounds(paint, ch.styleIndex),
+                                            color
+                                        );
+                                    brush->SetOpacity(
+                                        globalOpacity
+                                            * characterOpacityAt(charIndex)
+                                            * scanlineAlpha
+                                    );
+                                    pushAxisAlignedClip(
+                                        band->first,
+                                        D2D1_ANTIALIAS_MODE_PER_PRIMITIVE
+                                    );
+                                    if (!scanlineUniform) {
+                                        pushScanlineStateClip(
+                                            band->second
+                                                - (after ? 1.0f : -1.0f),
+                                            after
+                                        );
+                                    }
+                                    if (layer == 0) {
+                                        context->DrawGeometry(
+                                            geometry, brush.Get(),
+                                            std::max(
+                                                charStyle.strokeWidth, 0.0f
+                                            )
+                                                + charStyle.stroke2Width
+                                        );
+                                    } else if (layer == 1) {
+                                        context->DrawGeometry(
+                                            geometry, brush.Get(),
+                                            charStyle.strokeWidth
+                                        );
+                                    } else {
+                                        context->FillGeometry(
+                                            geometry, brush.Get()
+                                        );
+                                    }
+                                    if (!scanlineUniform) {
+                                        context->PopAxisAlignedClip();
+                                    }
+                                    context->PopAxisAlignedClip();
+                                }
+                            }
+                        }
+                }();
+                context->PopLayer();
             }
         }
         auto drawRubyStack = [&](std::size_t rubyIndex, const Impl::CachedRuby &ruby, bool after) {
@@ -6151,22 +6440,26 @@ ProbeResult Direct2DGpuBackend::renderFrameInternal(
                         : (band.left + band.right) * 0.5f;
                     const auto featherSlices = scanlineFeatherSlices(edge);
                     for (bool after : {false, true}) {
+                        // 跟随字体：整条带固定用一态（与主文字循环同口径）。
+                        const bool sourceAfter = scanlineFollows
+                            ? scanlineFollowAfter
+                            : after;
                         for (int layer = 0; layer < 3; ++layer) {
                             const PaintStyle &sourcePaint = layer == 0
-                                ? (after ? rubyStyle.rubyAfterStroke2Paint
+                                ? (sourceAfter ? rubyStyle.rubyAfterStroke2Paint
                                          : rubyStyle.rubyBeforeStroke2Paint)
                                 : (layer == 1
-                                    ? (after ? rubyStyle.rubyAfterStrokePaint
+                                    ? (sourceAfter ? rubyStyle.rubyAfterStrokePaint
                                              : rubyStyle.rubyBeforeStrokePaint)
-                                    : (after ? rubyStyle.rubyAfterFillPaint
+                                    : (sourceAfter ? rubyStyle.rubyAfterFillPaint
                                              : rubyStyle.rubyBeforeFillPaint));
                             const RgbaColor &sourceColor = layer == 0
-                                ? (after ? rubyStyle.rubyAfterStroke2
+                                ? (sourceAfter ? rubyStyle.rubyAfterStroke2
                                          : rubyStyle.rubyBeforeStroke2)
                                 : (layer == 1
-                                    ? (after ? rubyStyle.rubyAfterStroke
+                                    ? (sourceAfter ? rubyStyle.rubyAfterStroke
                                              : rubyStyle.rubyBeforeStroke)
-                                    : (after ? rubyStyle.rubyAfterFill
+                                    : (sourceAfter ? rubyStyle.rubyAfterFill
                                              : rubyStyle.rubyBeforeFill));
                             if ((layer == 0 && rubyStyle.rubyStroke2Width <= 0.0f)
                                 || (layer == 1 && rubyStyle.rubyStrokeWidth <= 0.0f)) {

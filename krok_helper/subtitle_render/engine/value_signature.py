@@ -86,6 +86,7 @@ _LYRIC_LAYOUT_EXCLUDED_STYLE_FIELDS = _LYRIC_LAYOUT_TITLE_ONLY_EXCLUDED_STYLE_FI
     "scanline_width_px",
     "scanline_mode",
     "scanline_color",
+    "scanline_role_name",
     "scanline_brightness_pct",
     "scanline_glow_px",
     "zoom_pulse_curve_level",

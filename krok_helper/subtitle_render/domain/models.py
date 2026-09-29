@@ -202,6 +202,13 @@ TITLE_SCHEME_NAME = "标题"
 TITLE_LAYOUT_NAME = "タイトル左上"
 """默认标题布局名（对齐 N3 出厂布局预设 index 4）。"""
 
+SCANLINE_GLOBAL_ROLE_KEY = "__global__"
+"""``scanline_role_name`` 的保留键：全局默认来源（主样式自身配色）。
+
+与角色/「标题」方案名（``custom_style_schemes`` 的键）区分开，用户自建
+同名角色不会与它冲突；渲染端据此走主样式自身的走字后文字填充。
+"""
+
 
 @dataclass
 class TitleTimeWindow:
@@ -1111,10 +1118,23 @@ class Style:
     scanline_mode: str = "color"
     """扫字线模式：``color`` 单独颜色（``scanline_color`` 填充）；
     ``brighten`` 底色发光——分别保留锋面两侧原有前后色的 HSV 色相与饱和度，
-    只提高明度；提升幅度由 ``scanline_brightness_pct`` 控制。"""
+    只提高明度；提升幅度由 ``scanline_brightness_pct`` 控制；
+    ``follow_before`` / ``follow_after`` 跟随字体——与底色发光同一条通路
+    （当前行实际配色、全层重绘、共用亮度提升），但整条高亮带固定用
+    走字前 / 走字后那一态的颜色，而不是锋面两侧各用各的；
+    ``role`` 复用配色方案——整条高亮带用 ``scanline_role_name`` 指定来源
+    （``__global__`` 全局默认 / 角色或「标题」方案）的「走字后-主文字」
+    填充（支持渐变/拼色/图片），仅重绘字形填充层。"""
 
     scanline_color: str = "#FFFFFF"
     """扫字线高亮颜色（#RRGGBB）；仅 ``scanline_mode == "color"`` 时生效。"""
+
+    scanline_role_name: Optional[str] = None
+    """复用配色方案模式下引用的来源名：保留键 ``__global__`` 表示全局默认
+    （主样式自身的走字后文字填充），其余为 ``custom_style_schemes`` 的键
+    （角色名或「标题」）；仅 ``scanline_mode == "role"`` 时生效。来源改名/
+    删除时由 ``roleReferencesRemapped`` 维护链同步改写；渲染时名字查不到
+    则回退 ``color`` 模式的 ``scanline_color``。"""
 
     scanline_brightness_pct: int = 60
     """底色发光的亮度提升（百分比）；仅 ``scanline_mode == "brighten"`` 时生效。"""
@@ -2077,8 +2097,19 @@ def style_from_dict(payload: object) -> Style:
             )
         elif key == "scanline_mode":
             changes[key] = (
-                value if value in {"color", "brighten"} else defaults.scanline_mode
+                value
+                if value in {
+                    "color",
+                    "brighten",
+                    "follow_before",
+                    "follow_after",
+                    "role",
+                }
+                else defaults.scanline_mode
             )
+        elif key == "scanline_role_name":
+            parsed_role_name = str(value).strip() if value else ""
+            changes[key] = parsed_role_name or None
         elif key == "section_head_anim":
             changes[key] = (
                 value
@@ -2976,6 +3007,26 @@ def normalize_title_char_role_labels(
             ]
         )
     return normalized
+
+
+def remap_scanline_role_reference(
+    style: "Style", mapping: dict[str, Optional[str]]
+) -> Optional["Style"]:
+    """Rename or clear the scan-line role reference (``scanline_role_name``).
+
+    Deleting the referenced role also resets ``scanline_mode`` to ``color``：
+    不留一个引用悬空的 role 模式（渲染端虽会回退白色，但 UI 下拉会假装
+    选中第一项）。Returns ``None`` when the reference is absent or untouched,
+    so callers can skip the style write.
+    """
+
+    name = style.scanline_role_name
+    if name is None or name not in mapping:
+        return None
+    target = mapping.get(name)
+    if target is None:
+        return replace(style, scanline_mode="color", scanline_role_name=None)
+    return replace(style, scanline_role_name=target)
 
 
 def remap_title_char_role_labels(

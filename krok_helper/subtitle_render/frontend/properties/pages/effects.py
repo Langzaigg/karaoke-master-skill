@@ -407,15 +407,34 @@ class EffectsPropertyPageBuilder:
         for label, value in (
             ("单独颜色", "color"),
             ("底色发光", "brighten"),
+            ("跟随字体·走字前", "follow_before"),
+            ("跟随字体·走字后", "follow_after"),
+            ("复用配色方案", "role"),
         ):
             host._scanline_mode_combo.addItem(label, value)
         host._scanline_mode_combo.setToolTip(
             "单独颜色：高亮带用设定颜色填充；"
-            "底色发光：保留锋面两侧原有前后色的色相和饱和度，只提高 HSV 明度"
+            "底色发光：保留锋面两侧原有前后色的色相和饱和度，只提高 HSV 明度；"
+            "跟随字体·走字前/后：与底色发光同一通路，但整条高亮带固定用当前行"
+            "实际配色的走字前/走字后颜色（可再提亮，0 = 原色）；"
+            "复用配色方案：整条高亮带用所选来源（全局默认/「标题」/角色方案）"
+            "「走字后-主文字」的填充（支持渐变/拼色/图片），仅重绘字形填充层"
         )
         host._scanline_mode_combo.currentIndexChanged.connect(
             lambda _index: host._update_style(
                 scanline_mode=host._scanline_mode_combo.currentData()
+            )
+        )
+        host._scanline_role_combo = WheelFocusedComboBox(section)
+        compact_property_control(host._scanline_role_combo)
+        host._scanline_role_combo.setToolTip(
+            "复用配色方案模式下引用的来源（全局默认/「标题」方案或角色方案）；"
+            "在「角色」卡片编辑该来源「走字后-主文字」的填充方式，"
+            "扫字线即可使用渐变/拼色等效果"
+        )
+        host._scanline_role_combo.currentIndexChanged.connect(
+            lambda _index: host._update_style(
+                scanline_role_name=host._scanline_role_combo.currentData()
             )
         )
         host._scanline_width_spin = self._spin_factory(1, 400, suffix=" px")
@@ -432,7 +451,8 @@ class EffectsPropertyPageBuilder:
         )
         host._scanline_brightness_spin = self._spin_factory(0, 100, suffix=" %")
         host._scanline_brightness_spin.setToolTip(
-            "底色发光的亮度提升程度；0 = 不提亮，100 = 提到纯白"
+            "底色发光/跟随字体的亮度提升程度；0 = 不提亮（跟随字体时为原色），"
+            "100 = 提到纯白"
         )
         host._scanline_brightness_spin.valueChanged.connect(
             lambda value: host._update_style(scanline_brightness_pct=value)
@@ -446,6 +466,7 @@ class EffectsPropertyPageBuilder:
             host._scanline_width_spin,
             host._scanline_color_btn,
             host._scanline_brightness_spin,
+            host._scanline_role_combo,
             host._scanline_glow_spin,
         )
         host._zoom_pulse_curve_combo = WheelFocusedComboBox(section)
@@ -549,7 +570,7 @@ class EffectsPropertyPageBuilder:
         )
         host._animation_grid.add_widget(host._section_edge_row)
         host._animation_grid.add_field(
-            "扫字线 / 模式 · 粗细 · 颜色/亮度 · 柔化半径",
+            "扫字线 / 模式 · 粗细 · 颜色/亮度/角色 · 柔化半径",
             host._scanline_row,
         )
         host._animation_grid.add_field("整字放大速度等级", host._zoom_pulse_curve_combo)
@@ -752,12 +773,13 @@ class EffectsPropertyPageBuilder:
         width_spin: Any,
         color_button: QWidget,
         brightness_spin: Any,
+        role_combo: Any,
         glow_spin: Any,
     ) -> QWidget:
-        """扫字线参数单行：模式 · 粗细 · 颜色/亮度提升 · 柔化半径。
+        """扫字线参数单行：模式 · 粗细 · 颜色/亮度/来源 · 柔化半径。
 
-        控件全部常驻；模式切换只换启用态（颜色 ↔ 亮度提升），不隐藏、
-        不移位。
+        控件全部常驻；模式切换只换第三列的显示项（颜色 ↔ 亮度提升 ↔
+        来源下拉；跟随字体两档复用亮度提升），不隐藏其他列、不移位。
         """
 
         row = QWidget(parent)
@@ -768,10 +790,13 @@ class EffectsPropertyPageBuilder:
         row_layout.addWidget(width_spin, 2)
         row_layout.addWidget(color_button, 2)
         row_layout.addWidget(brightness_spin, 2)
+        row_layout.addWidget(role_combo, 2)
         row_layout.addWidget(glow_spin, 2)
-        # 参数永久可编辑；宿主按模式回显：单独颜色显示颜色/隐藏亮度，
-        # 底色发光隐藏颜色/显示亮度（同一列位互换，行宽不变）。
+        # 参数永久可编辑；宿主按模式回显：单独颜色显示颜色，底色发光与
+        # 跟随字体两档显示亮度提升，复用配色方案显示来源下拉
+        # （同一列位互换，行宽不变）。
         brightness_spin.hide()
+        role_combo.hide()
         return row
 
     @staticmethod

@@ -159,9 +159,20 @@ void applyGpuResolvedStyle(
     target.scanlineWidth = static_cast<float>(
         std::max(source.scanlineWidthPx, 1) * scale
     );
-    target.scanlineMode = source.scanlineMode == QStringLiteral("brighten")
-        ? "brighten"
-        : "color";
+    if (source.scanlineMode == QStringLiteral("brighten")) {
+        target.scanlineMode = "brighten";
+    } else if (source.scanlineMode == QStringLiteral("follow_before")) {
+        target.scanlineMode = "follow_before";
+    } else if (source.scanlineMode == QStringLiteral("follow_after")) {
+        target.scanlineMode = "follow_after";
+    } else if (source.scanlineMode == QStringLiteral("role")) {
+        target.scanlineMode = "role";
+        target.scanlineRolePaint = gpuPaint(
+            source.scanlineRolePaint, source.scanlineColor
+        );
+    } else {
+        target.scanlineMode = "color";
+    }
     target.scanlineColor = gpuColor(source.scanlineColor, source.scanlineColor);
     target.scanlineBrightness = std::clamp(
         static_cast<float>(source.scanlineBrightnessPct) / 100.0f, 0.0f, 1.0f

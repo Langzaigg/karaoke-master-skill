@@ -321,6 +321,7 @@ from krok_helper.subtitle_render.domain.models import (
     migrate_spacing_bindings_to_used_layouts,
     migrate_title_guide_symbols,
     normalize_title_char_role_labels,
+    remap_scanline_role_reference,
     remap_title_char_role_labels,
     rescale_font_sizes,
     rescale_layout_sizes,
@@ -574,6 +575,7 @@ _RENDER_ONLY_ANIM_STYLE_FIELDS: frozenset[str] = frozenset({
     "scanline_width_px",
     "scanline_mode",
     "scanline_color",
+    "scanline_role_name",
     "scanline_brightness_pct",
     "scanline_glow_px",
 })
@@ -4337,6 +4339,13 @@ class SubtitleRenderWindow(QWidget):
                 overlays_remap_changed |= title_changed
             if overlays_remap_changed:
                 style = replace(style, title_overlays=remapped_overlays)
+                self._style = style
+                role_remap_applied = True
+            scanline_style = remap_scanline_role_reference(style, role_remap)
+            if scanline_style is not None:
+                # 扫字线「复用角色配色」按名字引用角色：改名连带改写，删除
+                # 连模式一起回退「单独颜色」（见 remap_scanline_role_reference）。
+                style = scanline_style
                 self._style = style
                 role_remap_applied = True
             if not role_remap_applied:

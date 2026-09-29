@@ -11,7 +11,7 @@ import pytest
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PyQt6.QtCore import QRectF  # noqa: E402
-from PyQt6.QtGui import QImage, QPainter, QPainterPath  # noqa: E402
+from PyQt6.QtGui import QColor, QImage, QPainter, QPainterPath  # noqa: E402
 from PyQt6.QtWidgets import QApplication  # noqa: E402
 
 from krok_helper.subtitle_render.domain.models import (  # noqa: E402
@@ -348,6 +348,9 @@ def test_scanline_softness_stays_inside_glyph_geometry() -> None:
     path.addRect(QRectF(30, 10, 40, 40))
     painter = QPainter(image)
     try:
+        # 调整层语义：先画原始字形（真实链路里扫字线永远叠在已画内容上），
+        # 否则空画布上无内容可调，高亮 alpha 恒为 0。
+        painter.fillPath(path, QColor("#806050"))
         paint_scanline_strip(
             painter,
             path,
@@ -681,3 +684,400 @@ def test_gpu_utopia_scanline_paints_front_band(monkeypatch) -> None:
     base = gpu_frames(_scanline_style(karaoke_anim="utopia"), 500)
     scan = gpu_frames(_scanline_style(karaoke_anim="utopia_scanline"), 500)
     assert _visible_diff(base, scan) > 50
+
+
+# ---------------------------------------------------------------------------
+# 复用角色配色（role 模式）
+# ---------------------------------------------------------------------------
+
+from krok_helper.subtitle_render.domain.models import (  # noqa: E402
+    remap_scanline_role_reference,
+)
+from krok_helper.subtitle_render.domain.paint import (  # noqa: E402
+    KaraokeColorState,
+    KaraokeColors,
+    _paint_fill,
+)
+from krok_helper.subtitle_render.engine.render.elements.horizontal.scanline import (  # noqa: E402
+    scanline_params_for_style,
+    scanline_role_fill,
+)
+
+
+def _gradient_fill() -> "object":
+    return _paint_fill("#FF0040", mode="gradient_horizontal", end="#0040FF")
+
+
+def _role_scheme_style(**changes) -> Style:
+    """带一个「锋面」角色的样式：走字后-主文字为横向渐变。"""
+
+    gradient = _gradient_fill()
+    scheme = SubtitleStyleScheme(
+        karaoke_colors=KaraokeColors(
+            before=KaraokeColorState(text=_paint_fill("#303030")),
+            after=KaraokeColorState(text=gradient),
+        )
+    )
+    base = dict(
+        karaoke_anim="scanline",
+        scanline_mode="role",
+        scanline_role_name="锋面",
+        custom_style_schemes={
+            "锋面": scheme,
+            "标题": SubtitleStyleScheme(),
+        },
+    )
+    base.update(changes)
+    return _scanline_style(**base)
+
+
+def test_scanline_role_mode_round_trip() -> None:
+    style = _role_scheme_style()
+    restored = style_from_dict(style_to_dict(style))
+    assert restored.scanline_mode == "role"
+    assert restored.scanline_role_name == "锋面"
+    # 跟随字体两档同样进出序列化。
+    for mode in ("follow_before", "follow_after"):
+        follow = style_from_dict(style_to_dict(_scanline_style(scanline_mode=mode)))
+        assert follow.scanline_mode == mode
+    # 非法模式回落 color；空串/缺失名字归 None。
+    assert style_from_dict({"scanline_mode": "wat"}).scanline_mode == "color"
+    assert style_from_dict({"scanline_role_name": ""}).scanline_role_name is None
+    assert style_from_dict({"scanline_role_name": "  "}).scanline_role_name is None
+    # 悬空名字（历史项目/手工 JSON）原样保留：清洗交给渲染端回退与
+    # remap 维护链，加载端不静默改数据。
+    assert (
+        style_from_dict({"scanline_mode": "role", "scanline_role_name": "幽灵"})
+        .scanline_role_name
+        == "幽灵"
+    )
+    # 全局默认保留键原样保留。
+    assert (
+        style_from_dict(
+            {"scanline_mode": "role", "scanline_role_name": "__global__"}
+        ).scanline_role_name
+        == "__global__"
+    )
+
+
+def test_scanline_role_fill_resolves_after_text() -> None:
+    fill = scanline_role_fill(_role_scheme_style())
+    assert fill is not None
+    assert fill.mode == "gradient_horizontal"
+    assert fill.start_color == "#FF0040"
+    assert fill.end_color == "#0040FF"
+
+    # karaoke_colors 缺失的方案：与 effective_karaoke_colors 的 legacy 回退
+    # 同口径，走字后文字取 fill_color 纯色。
+    legacy = SubtitleStyleScheme(fill_color="#0A6CFF", karaoke_colors=None)
+    legacy_fill = scanline_role_fill(
+        _role_scheme_style(
+            custom_style_schemes={
+                "锋面": legacy,
+                "标题": SubtitleStyleScheme(),
+            }
+        )
+    )
+    assert legacy_fill is not None
+    assert legacy_fill.mode == "solid"
+    assert legacy_fill.color == "#0A6CFF"
+
+    # 名字悬空 / 空 / 非 role 模式：无填充，渲染回退单独颜色。
+    assert scanline_role_fill(_role_scheme_style(scanline_role_name="不存在")) is None
+    assert scanline_role_fill(_role_scheme_style(scanline_role_name=None)) is None
+    assert (
+        scanline_role_fill(_role_scheme_style(scanline_mode="color", scanline_color="#00FF00"))
+        is None
+    )
+    # 「标题」方案是合法来源：没建过任何角色的项目也能复用它（下拉恒有
+    # 该项；karaoke_colors 缺省时按 legacy 口径回落 fill_color 纯色）。
+    title_fill = scanline_role_fill(
+        _role_scheme_style(
+            scanline_role_name="标题",
+            custom_style_schemes={
+                "标题": SubtitleStyleScheme(),
+                "锋面": SubtitleStyleScheme(),
+            },
+        )
+    )
+    assert title_fill is not None
+    assert title_fill.mode == "solid"
+    assert title_fill.color == SubtitleStyleScheme().fill_color
+    # 全局默认保留键：取主样式自身的走字后文字填充（legacy 回退 fill_color）。
+    global_fill = scanline_role_fill(
+        _role_scheme_style(scanline_role_name="__global__")
+    )
+    assert global_fill is not None
+    assert global_fill.mode == "solid"
+    assert global_fill.color == Style().fill_color
+    # params 悬空回退：mode 仍标 role 但 is_role 为 False，走 solid 单色。
+    params = scanline_params_for_style(
+        _role_scheme_style(scanline_role_name="不存在", scanline_color="#00FF00")
+    )
+    assert params.mode == "role"
+    assert params.is_role is False
+
+
+def test_scanline_role_uniform_state_paints_whole_stack() -> None:
+    """role 取来源走字后-主文字一份填充，全层（含描边）统一用它重绘。"""
+
+    from krok_helper.subtitle_render.engine.render.elements.horizontal.scanline import (
+        _uniform_scanline_state,
+    )
+
+    fill = _gradient_fill()
+    state = _uniform_scanline_state(fill)
+    assert state.text is fill
+    assert state.stroke is fill
+    assert state.stroke2 is fill
+    assert state.shadow is fill
+
+
+def test_painter_scanline_role_mode_paints_role_fill(qapp) -> None:
+    track = _wiping_track()
+    base = _frame_bytes(track, _scanline_style(karaoke_anim="none"), 500)
+    color = _frame_bytes(track, _scanline_style(karaoke_anim="scanline"), 500)
+    role = _frame_bytes(track, _role_scheme_style(), 500)
+
+    # 角色渐变填充的锋面带可见，且与单独颜色（青 #40E0FF）画面不同。
+    assert _visible_diff(base, role) > 50
+    assert _visible_diff(color, role) > 50
+
+    # 名字悬空：回退单独颜色，与 color 模式逐像素一致。
+    dangling = _frame_bytes(track, _role_scheme_style(scanline_role_name="不存在"), 500)
+    assert _visible_diff(color, dangling) == 0
+
+
+def test_remap_scanline_role_reference_follows_rename_and_delete() -> None:
+    style = _role_scheme_style()
+
+    # 未引用被改名的角色：不动。
+    assert remap_scanline_role_reference(style, {"别人": "新名"}) is None
+
+    # 改名：只改名字，模式保持 role。
+    renamed = remap_scanline_role_reference(style, {"锋面": "新锋面"})
+    assert renamed is not None
+    assert renamed.scanline_mode == "role"
+    assert renamed.scanline_role_name == "新锋面"
+
+    # 删除：名字与模式一起回退单独颜色，不留悬空 role 模式。
+    deleted = remap_scanline_role_reference(style, {"锋面": None})
+    assert deleted is not None
+    assert deleted.scanline_mode == "color"
+    assert deleted.scanline_role_name is None
+
+    # 名字为空（历史悬空）时删除映射同样清干净模式。
+    dangling = _role_scheme_style(scanline_role_name=None)
+    assert remap_scanline_role_reference(dangling, {"锋面": None}) is None
+
+
+def test_gpu_scanline_role_mode_uses_role_fill(monkeypatch) -> None:
+    """GPU 口径：role 模式用角色渐变填充画锋面带，悬空回退单独颜色。"""
+
+    pytest.importorskip("PyQt6.QtWidgets")
+    from krok_helper.subtitle_render.native.backend import (
+        NativeRendererProcess,
+        SharedFrameRingReader,
+        resolve_native_renderer_path,
+    )
+
+    renderer_path = resolve_native_renderer_path()
+    if renderer_path is None:
+        pytest.skip("native renderer sidecar not built")
+    monkeypatch.setenv("QT_QPA_PLATFORM", "offscreen")
+    QApplication.instance() or QApplication([])
+
+    track = _wiping_track()
+
+    def gpu_frames(style: Style, t_ms: int) -> bytes:
+        with NativeRendererProcess(renderer_path, response_timeout_s=60.0) as renderer:
+            renderer.configure_gpu(
+                track, style, width=640, height=360, fps=60, force_warp=True
+            )
+            event = renderer.render_gpu_frame(t_ms, force_warp=True, frame_index=0)
+            reader = SharedFrameRingReader.from_event(event)
+            try:
+                reader.attach()
+                image = reader.read_qimage(event).convertToFormat(
+                    QImage.Format.Format_RGBA8888
+                )
+                bits = image.constBits()
+                bits.setsize(image.sizeInBytes())
+                return bytes(bits)
+            finally:
+                reader.close()
+
+    base = gpu_frames(_scanline_style(karaoke_anim="none"), 500)
+    color = gpu_frames(_scanline_style(karaoke_anim="scanline"), 500)
+    role = gpu_frames(_role_scheme_style(), 500)
+    dangling = gpu_frames(_role_scheme_style(scanline_role_name="不存在"), 500)
+
+    assert _visible_diff(base, role) > 50
+    assert _visible_diff(color, role) > 50
+    # 悬空名字：sidecar 端归一回 color 模式，与单独颜色逐像素一致。
+    assert _visible_diff(color, dangling) == 0
+
+
+def test_painter_scanline_follow_modes_paint_fixed_state(qapp) -> None:
+    """跟随字体两档：与底色发光同通路，整带固定用一态且有可见差异。"""
+
+    track = _wiping_track()
+    base = _frame_bytes(track, _scanline_style(karaoke_anim="none"), 500)
+    follow_before = _frame_bytes(
+        track, _scanline_style(karaoke_anim="scanline", scanline_mode="follow_before"), 500
+    )
+    follow_after = _frame_bytes(
+        track, _scanline_style(karaoke_anim="scanline", scanline_mode="follow_after"), 500
+    )
+    brighten = _frame_bytes(
+        track,
+        _scanline_style(
+            karaoke_anim="scanline",
+            scanline_mode="brighten",
+            scanline_brightness_pct=0,
+        ),
+        500,
+    )
+    # 两档各自可见（锋面前侧被提前染成后色 / 后侧暂回前色）。
+    assert _visible_diff(base, follow_before) > 50
+    assert _visible_diff(base, follow_after) > 50
+    # 两档互相不同（前后态颜色不同），也与提亮档不同。
+    assert _visible_diff(follow_before, follow_after) > 50
+    assert _visible_diff(follow_before, brighten) > 50
+    assert _visible_diff(follow_after, brighten) > 50
+    # 底色发光 0 提亮 = 无差异基线（对照：follow 0 提亮仍有差异）。
+    assert _visible_diff(base, brighten) == 0
+    # 提亮参数对 follow 生效（与底色发光共用）。默认 after 色 #FF5A6F 的
+    # HSV 明度已满（提亮数学上无效），这里换暗色 after 才能量化提亮。
+    dim_after_colors = KaraokeColors(
+        before=KaraokeColorState(text=_paint_fill("#201030")),
+        after=KaraokeColorState(text=_paint_fill("#802050")),
+    )
+    follow_dim = _frame_bytes(
+        track,
+        _scanline_style(
+            karaoke_anim="scanline",
+            scanline_mode="follow_after",
+            scanline_brightness_pct=0,
+            karaoke_colors=dim_after_colors,
+        ),
+        500,
+    )
+    follow_dim_lifted = _frame_bytes(
+        track,
+        _scanline_style(
+            karaoke_anim="scanline",
+            scanline_mode="follow_after",
+            scanline_brightness_pct=80,
+            karaoke_colors=dim_after_colors,
+        ),
+        500,
+    )
+    assert _visible_diff(follow_dim, follow_dim_lifted) > 50
+
+
+def test_gpu_scanline_follow_and_global_role_modes(monkeypatch) -> None:
+    """GPU 口径：跟随字体固定一态；role 模式 __global__ 取主样式后色。"""
+
+    pytest.importorskip("PyQt6.QtWidgets")
+    from krok_helper.subtitle_render.native.backend import (
+        NativeRendererProcess,
+        SharedFrameRingReader,
+        resolve_native_renderer_path,
+    )
+
+    renderer_path = resolve_native_renderer_path()
+    if renderer_path is None:
+        pytest.skip("native renderer sidecar not built")
+    monkeypatch.setenv("QT_QPA_PLATFORM", "offscreen")
+    QApplication.instance() or QApplication([])
+
+    track = _wiping_track()
+
+    def gpu_frames(style: Style, t_ms: int) -> bytes:
+        with NativeRendererProcess(renderer_path, response_timeout_s=60.0) as renderer:
+            renderer.configure_gpu(
+                track, style, width=640, height=360, fps=60, force_warp=True
+            )
+            event = renderer.render_gpu_frame(t_ms, force_warp=True, frame_index=0)
+            reader = SharedFrameRingReader.from_event(event)
+            try:
+                reader.attach()
+                image = reader.read_qimage(event).convertToFormat(
+                    QImage.Format.Format_RGBA8888
+                )
+                bits = image.constBits()
+                bits.setsize(image.sizeInBytes())
+                return bytes(bits)
+            finally:
+                reader.close()
+
+    base = gpu_frames(_scanline_style(karaoke_anim="none"), 500)
+    follow_before = gpu_frames(
+        _scanline_style(karaoke_anim="scanline", scanline_mode="follow_before"), 500
+    )
+    follow_after = gpu_frames(
+        _scanline_style(karaoke_anim="scanline", scanline_mode="follow_after"), 500
+    )
+    assert _visible_diff(base, follow_before) > 50
+    assert _visible_diff(base, follow_after) > 50
+    assert _visible_diff(follow_before, follow_after) > 50
+
+    # role + 全局默认：整带用主样式走字后文字填充。零描边样式下与
+    # follow_after 同构（同源配色、同为仅填充层），可逐像素对齐；默认
+    # 描边下 follow_after 还重绘带内描边，两者必有差异。
+    global_role = gpu_frames(
+        _role_scheme_style(
+            scanline_role_name="__global__",
+            stroke_width_px=0,
+            stroke2_enabled=False,
+        ),
+        500,
+    )
+    follow_after_plain = gpu_frames(
+        _scanline_style(
+            karaoke_anim="scanline",
+            scanline_mode="follow_after",
+            scanline_brightness_pct=0,
+            stroke_width_px=0,
+            stroke2_enabled=False,
+        ),
+        500,
+    )
+    assert _visible_diff(base, global_role) > 50
+    assert _visible_diff(follow_after_plain, global_role) == 0
+
+
+def test_painter_brighten_never_reduces_band_opacity(qapp) -> None:
+    """半透明走字后色：提亮/跟随的羽化调整不得把带内压得更透明。
+
+    回归 2026-09：精确 lerp 曾把带内 alpha 拉到重绘层自己的 alpha（如
+    #80xxxxxx 的 0x80），而原始画面由多层合成为不透明——带内出现一条
+    比周围更透明的「沟」。调整层语义：alpha 恒等于原画面。
+    """
+
+    track = _wiping_track()
+    base = _scanline_style(
+        karaoke_colors=KaraokeColors(
+            before=KaraokeColorState(text=_paint_fill("#303030")),
+            after=KaraokeColorState(text=_paint_fill("#80307060")),
+        ),
+    )
+
+    def frame(style: Style) -> np.ndarray:
+        return np.frombuffer(
+            _frame_bytes(track, style, 500), dtype=np.uint8
+        ).reshape(450, 800, 4).astype(int)
+
+    ref = frame(replace(base, karaoke_anim="none"))
+    for mode in ("brighten", "follow_after", "follow_before"):
+        scan = frame(
+            replace(
+                base,
+                karaoke_anim="scanline",
+                scanline_mode=mode,
+                scanline_brightness_pct=60,
+            )
+        )
+        drops = int(((scan[:, :, 3] - ref[:, :, 3]) < -10).sum())
+        assert drops == 0, f"{mode}: band lost opacity on {drops} pixels"
