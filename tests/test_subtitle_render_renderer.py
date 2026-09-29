@@ -1520,8 +1520,10 @@ def test_compute_content_bands_splits_title_and_lyrics(qapp, tmp_path):
     first_top, first_h = bands[0]
     last_top, _last_h = bands[-1]
     assert first_top < 200
-    # 380：歌词条带顶随阴影剪影 pad（描边半宽 + 偏移）略上移。
-    assert last_top > 380
+    # 歌词条带顶：默认「强制顶底(N3)」关闭后孤行停在天然行位（T1），
+    # 720p/48px 下约 332..346（含阴影剪影 pad 与安全边；开启开关则贴底约 455+）。
+    # 阈值取 300：确认条带仍在下半区且与标题带之间留有明显空白。
+    assert last_top > 300
     assert last_top - (first_top + first_h) > renderer._BAND_MERGE_GAP_PX
 
 

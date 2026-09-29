@@ -922,6 +922,25 @@ def _compute_content_bands(
     return bands
 
 
+# 方案 B 的整帧 scratch（按尺寸缓存，避免逐帧分配；线程本地，兼容多进程 worker）。
+_BAND_SCRATCH_LOCAL = threading.local()
+
+
+def _band_full_frame_scratch(width: int, height: int, fmt: QImage.Format) -> QImage:
+    """Return a reusable full-canvas scratch image for band slicing."""
+
+    cache = getattr(_BAND_SCRATCH_LOCAL, "image", None)
+    if (
+        cache is None
+        or cache.width() != width
+        or cache.height() != height
+        or cache.format() != fmt
+    ):
+        cache = QImage(width, height, fmt)
+        _BAND_SCRATCH_LOCAL.image = cache
+    return cache
+
+
 def _paint_overlay_bands(
     buffer: QImage,
     track: TimingTrack,
@@ -937,32 +956,43 @@ def _paint_overlay_bands(
 ) -> None:
     """把整帧字幕布局画进竖向打包的 ``buffer``（高 = 各 band 高之和）。
 
-    每条 band 占 buffer 里 ``[packed_off, packed_off + height)``，画笔裁到该槽位、
-    上移 ``band_top - packed_off``，于是只有该 band 的原始行落进对应槽位。
+    渲染方式与整帧路径完全一致：先把整帧画进全尺寸 scratch，再把各 band 的
+    原始行区间逐段拷进对应槽位 ``[packed_off, packed_off + height)``。此前
+    的实现在同一 painter 上逐带 clip+translate 复用 ``paint_frame_to_painter``，
+    跨带共享的布局/碰撞缓存会让个别装饰层落到错误行位（「强制顶底(N3)」
+    关闭时贴底行出现幻影墨迹，2026-09），违反预览与导出严格一致的口径；
+    先渲后切按构造保证 band 输出恒等于整帧渲染的对应行，同时省掉每带一次
+    的全量绘制（N 带场景每帧只画一遍）。
     """
     buffer.fill(transparent)
+    scratch = _band_full_frame_scratch(logical_w, logical_h, buffer.format())
+    scratch.fill(transparent)
+    paint_frame(
+        scratch, track, t_ms, style, list(extra_tracks), duration_ms=duration_ms
+    )
     offsets = _packed_offsets(bands)
-    painter = QPainter(buffer)
-    try:
-        for (band_top, band_h), packed_off in zip(bands, offsets):
-            painter.save()
-            try:
-                painter.setClipRect(0, packed_off, logical_w, band_h)
-                painter.translate(0, packed_off - band_top)
-                paint_frame_to_painter(
-                    painter,
-                    logical_w,
-                    logical_h,
-                    track,
-                    t_ms,
-                    style,
-                    list(extra_tracks),
-                    duration_ms=duration_ms,
-                )
-            finally:
-                painter.restore()
-    finally:
-        painter.end()
+    # 按行区间做内存拷贝而非 drawImage：Qt 栅格化在两个 RGBA8888 图之间
+    # 复制会走一遍预乘/反预乘往返，alpha=1 的抗锯齿边缘像素 RGB 会掉 1 级，
+    # 破坏与整帧路径的逐位一致。
+    scratch_bits = scratch.constBits()
+    scratch_bits.setsize(scratch.sizeInBytes())
+    buffer_bits = buffer.bits()
+    buffer_bits.setsize(buffer.sizeInBytes())
+    src = np.frombuffer(scratch_bits, dtype=np.uint8)
+    dst = np.frombuffer(buffer_bits, dtype=np.uint8)
+    s_bpl = scratch.bytesPerLine()
+    b_bpl = buffer.bytesPerLine()
+    for (band_top, band_h), packed_off in zip(bands, offsets):
+        if s_bpl == b_bpl:
+            dst[packed_off * b_bpl : (packed_off + band_h) * b_bpl] = src[
+                band_top * s_bpl : (band_top + band_h) * s_bpl
+            ]
+        else:
+            row_bytes = min(s_bpl, b_bpl)
+            for r in range(band_h):
+                dst[(packed_off + r) * b_bpl : (packed_off + r) * b_bpl + row_bytes] = src[
+                    (band_top + r) * s_bpl : (band_top + r) * s_bpl + row_bytes
+                ]
 
 
 def _frame_bytes_bands(
