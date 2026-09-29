@@ -92,6 +92,7 @@ from krok_helper.subtitle_render.domain.models import (  # noqa: E402
     TimingLine,
     TimingTrack,
     TitleOverlay,
+    TitleTimeWindow,
     effective_karaoke_animation,
     ensure_page_layout_defaults,
     paint_fill_from_dict,
@@ -367,6 +368,41 @@ def test_title_overlay_controller_migrates_roles_and_normalizes_mode():
     assert edited.title_overlays[0].char_role_labels == [["A角色", None, "B角色"]]
     assert edited.title_overlays[0].show_mode == "whole"
     assert controller.current(Style()) == TitleOverlay()
+
+
+def test_new_title_time_segment_uses_remembered_fades(qapp):
+    """「＋ 添加时间段」的淡入淡出沿用应用偏好记忆，不再退回 500/500。"""
+    panel = PropertyPanel()
+    panel.set_title_window_fade_provider(lambda: (800, 700))
+    panel.set_style(Style(title_overlays=[TitleOverlay(
+        show_mode="custom",
+        fade_in_ms=250,
+        fade_out_ms=180,
+        custom_windows=[TitleTimeWindow(0, 60_000)],
+    )]))
+
+    panel._on_title_card_window_added(0)
+
+    windows = panel._style.title_overlays[0].custom_windows
+    assert len(windows) == 2
+    assert (windows[1].fade_in_ms, windows[1].fade_out_ms) == (800, 700)
+
+
+def test_new_title_time_segment_falls_back_to_entry_fades(qapp):
+    """未注入记忆（测试/独立使用面板）时回落条目自身的淡入淡出值。"""
+    panel = PropertyPanel()
+    panel.set_style(Style(title_overlays=[TitleOverlay(
+        show_mode="custom",
+        fade_in_ms=250,
+        fade_out_ms=180,
+        custom_windows=[TitleTimeWindow(0, 60_000)],
+    )]))
+
+    panel._on_title_card_window_added(0)
+
+    windows = panel._style.title_overlays[0].custom_windows
+    assert len(windows) == 2
+    assert (windows[1].fade_in_ms, windows[1].fade_out_ms) == (250, 180)
 
 
 def test_property_style_controller_routes_and_normalizes_edits():

@@ -92,6 +92,12 @@ TITLE_FADE_FIELDS = (
     "tail_fade_in_ms",
     "tail_fade_out_ms",
 )
+"""标题「淡入淡出时长」记忆字段（四档开头/片尾行）。
+
+自定义时间段的淡入淡出编辑也写回这份习惯（新建时间段直接沿用）；它的
+**时间**才逐曲，不在此列。``tail_*`` 是 ``Optional``，``None`` 表示"跟随
+开头"，原样记住。
+"""
 TITLE_TIMING_FIELDS = (
     "show_mode",
     "head_offset_ms",
@@ -101,8 +107,9 @@ TITLE_TIMING_FIELDS = (
 )
 """标题「显示时段」里跟着用户习惯走的字段。
 
-自定义时间段窗口是逐曲的，不在此列；``tail_duration_ms`` 是 ``Optional``，
-``None`` 表示"跟随开头"，原样记住。
+自定义时间段的**时间**（开始/结束）是逐曲的，不在此列——新建条目/时间段
+时按工程时长现铺；``tail_duration_ms`` 是 ``Optional``，``None`` 表示
+"跟随开头"，原样记住。
 """
 _TITLE_SHOW_MODES = frozenset({"custom", "whole", "head", "tail", "head_tail"})
 DEFAULT_AUTO_SAVE_INTERVAL_MINUTES = 5

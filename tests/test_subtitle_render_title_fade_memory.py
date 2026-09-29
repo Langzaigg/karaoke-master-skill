@@ -5,8 +5,9 @@
 存在同一处（``new_project_defaults``）。
 
 尾段那两项是 ``Optional``：``None`` 表示"跟随开头"，是合法取值，不能在存取
-过程里被当成缺省丢掉。自定义时间段窗口是逐曲的，不记 —— 新建条目时按工程
-时长现铺。
+过程里被当成缺省丢掉。自定义时间段的**时间**（开始/结束）是逐曲的，不记
+—— 新建条目/时间段时按工程时长现铺；但它的**淡入淡出**同样是习惯，写回
+同一份记忆（新建时间段直接沿用）。
 """
 
 from __future__ import annotations
@@ -23,7 +24,10 @@ from PyQt6.QtWidgets import QApplication  # noqa: E402
 from krok_helper.subtitle_render.frontend.main_window import (  # noqa: E402
     SubtitleRenderWindow,
 )
-from krok_helper.subtitle_render.domain.models import TitleOverlay  # noqa: E402
+from krok_helper.subtitle_render.domain.models import (  # noqa: E402
+    TitleOverlay,
+    TitleTimeWindow,
+)
 
 
 class _Recorder:
@@ -359,3 +363,89 @@ def test_garbage_timing_falls_back_field_by_field(make_window, settings) -> None
     assert title.scheme_name is None
     assert title.enabled is True
     assert title.fade_in_ms == 250
+
+
+def test_editing_a_custom_window_fade_updates_the_app_default(make_window) -> None:
+    """自定义时间段里改淡入淡出也是习惯，写回同一份应用记忆。"""
+    window = make_window()
+    # 播种：切入自定义模式，预填窗口（淡入淡出还是出厂值）。
+    _edit_title(
+        window,
+        show_mode="custom",
+        custom_windows=[TitleTimeWindow(0, 60_000, 300, 300)],
+    )
+    # 编辑：把窗口淡入淡出调成习惯值。
+    _edit_title(
+        window,
+        custom_windows=[TitleTimeWindow(0, 60_000, 800, 700)],
+    )
+
+    app_title = window._app_default_style.title_overlays[0]
+    assert app_title.fade_in_ms == 800
+    assert app_title.fade_out_ms == 700
+
+
+def test_editing_only_window_times_keeps_the_remembered_fades(make_window) -> None:
+    """改窗口的起止时间不是改淡入淡出习惯，记忆保持。"""
+    window = make_window()
+    _edit_title(
+        window,
+        show_mode="custom",
+        custom_windows=[TitleTimeWindow(0, 60_000, 800, 700)],
+    )
+
+    _edit_title(
+        window,
+        custom_windows=[TitleTimeWindow(5_000, 90_000, 800, 700)],
+    )
+
+    app_title = window._app_default_style.title_overlays[0]
+    assert app_title.fade_in_ms == 800
+    assert app_title.fade_out_ms == 700
+
+
+def test_unrelated_title_edits_keep_the_window_fade_habit(make_window) -> None:
+    """改显示模式等无关偏好不把淡入淡出习惯冲回条目旧值。"""
+    window = make_window()
+    _edit_title(
+        window,
+        show_mode="custom",
+        custom_windows=[TitleTimeWindow(0, 60_000, 800, 700)],
+    )
+
+    _edit_title(window, show_mode="whole")
+
+    app_title = window._app_default_style.title_overlays[0]
+    assert app_title.fade_in_ms == 800
+    assert app_title.fade_out_ms == 700
+
+
+def test_a_new_time_segment_starts_from_the_remembered_fades(
+    make_window, settings
+) -> None:
+    """真正要的效果：下次打开，「＋ 添加时间段」直接带上习惯的淡入淡出。"""
+    first = make_window()
+    _edit_title(
+        first,
+        show_mode="custom",
+        custom_windows=[TitleTimeWindow(0, 60_000, 300, 300)],
+    )
+    _edit_title(
+        first,
+        custom_windows=[TitleTimeWindow(0, 60_000, 800, 700)],
+    )
+    first._save_persisted_state()
+
+    second = make_window()
+    assert second._remembered_title_window_fades() == (800, 700)
+
+    _edit_title(
+        second,
+        show_mode="custom",
+        custom_windows=[TitleTimeWindow(0, 60_000, 800, 700)],
+    )
+    second._property_panel._on_title_card_window_added(0)
+
+    windows = second._style.title_overlays[0].custom_windows
+    assert len(windows) == 2
+    assert (windows[1].fade_in_ms, windows[1].fade_out_ms) == (800, 700)

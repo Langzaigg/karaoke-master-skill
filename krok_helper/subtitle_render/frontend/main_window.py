@@ -432,10 +432,10 @@ RENDER_WORKER_OPTIONS = (0, 4, 8, 12, 16)
 
 
 #: 标题里跟着"用户习惯"走的字段。除条目名、标题文字、逐字角色、自定义
-#: 时间段（逐曲）和字体/颜色/锚点（渲染时由 ``scheme_name`` + ``layout_index``
-#: 推导的解析结果）之外，剩下的全部记忆 —— 改一次就该一直沿用，每开一个
-#: 新项目重设一遍 300 → 250、「自定义」→「全程显示」很烦。尾段那两项是
-#: ``Optional``：``None`` 表示"跟随开头"，原样记住即可。
+#: 时间段的时间（逐曲）和字体/颜色/锚点（渲染时由 ``scheme_name`` +
+#: ``layout_index`` 推导的解析结果）之外，剩下的全部记忆 —— 改一次就该一直
+#: 沿用，每开一个新项目重设一遍 300 → 250、「自定义」→「全程显示」很烦。
+#: 尾段那两项是 ``Optional``：``None`` 表示"跟随开头"，原样记住即可。
 _TITLE_PREFERENCE_FIELDS = (
     "enabled",
     "layout_index",
@@ -452,6 +452,8 @@ _TITLE_PREFERENCE_FIELDS = (
 )
 
 #: 上面那几项里，纯粹的时长字段（``enabled`` / ``layout_index`` 另有存取方式）。
+#: 自定义时间段的淡入淡出编辑也写回这份习惯（见 ``_edited_window_fades``），
+#: 新建时间段直接沿用。
 _TITLE_FADE_FIELDS = (
     "fade_in_ms",
     "fade_out_ms",
@@ -459,8 +461,8 @@ _TITLE_FADE_FIELDS = (
     "tail_fade_out_ms",
 )
 
-#: 显示时段的字段（模式 + 时间偏移 + 显示时长）；自定义时间段窗口是逐曲
-#: 的，不记——新建条目时按工程时长现铺。
+#: 显示时段的字段（模式 + 时间偏移 + 显示时长）；自定义时间段的**时间**是
+#: 逐曲的，不记——新建条目/时间段时按工程时长现铺（淡入淡出除外，见上）。
 _TITLE_TIMING_FIELDS = (
     "show_mode",
     "head_offset_ms",
@@ -489,6 +491,29 @@ def _edited_title_index(previous: Style, current: Style) -> Optional[int]:
     if len(current_overlays) > len(previous_overlays):
         return len(previous_overlays)
     return None
+
+
+def _edited_window_fades(
+    previous_title: TitleOverlay, current_title: TitleOverlay
+) -> dict[str, int]:
+    """自定义时间段里发生变化的淡入淡出（写回用户习惯用）。
+
+    逐窗口比较淡入/淡出（新增的窗口视为用户刚设的值一并采纳）；时间
+    （开始/结束）逐曲，不参与。返回只含变化字段的 ``{字段名: 新值}``，
+    没有变化时为空 dict。
+    """
+    changed: dict[str, int] = {}
+    for before, after in zip(
+        previous_title.custom_windows, current_title.custom_windows
+    ):
+        if before.fade_in_ms != after.fade_in_ms:
+            changed["fade_in_ms"] = max(int(after.fade_in_ms), 0)
+        if before.fade_out_ms != after.fade_out_ms:
+            changed["fade_out_ms"] = max(int(after.fade_out_ms), 0)
+    for after in current_title.custom_windows[len(previous_title.custom_windows):]:
+        changed["fade_in_ms"] = max(int(after.fade_in_ms), 0)
+        changed["fade_out_ms"] = max(int(after.fade_out_ms), 0)
+    return changed
 
 
 # 纯上色字段：只决定用什么颜色画，不影响字形几何、行宽或演唱时间。
@@ -2637,6 +2662,9 @@ class SubtitleRenderWindow(QWidget):
         self._property_panel.styleChanged.connect(self._apply_style)
         self._property_panel.trackTimingChanged.connect(self._on_track_timing_changed)
         self._property_panel.set_title_window_provider(self._derive_title_windows)
+        self._property_panel.set_title_window_fade_provider(
+            self._remembered_title_window_fades
+        )
         self._property_panel.set_title_entry_defaults_provider(
             self._new_title_entry_defaults
         )
@@ -4777,6 +4805,11 @@ class SubtitleRenderWindow(QWidget):
                 )) is not None
             }
         )
+
+    def _remembered_title_window_fades(self) -> tuple[int, int]:
+        """新建自定义时间段的默认淡入淡出（应用偏好记忆的标题淡入淡出）。"""
+        preferred = self._preferred_title_for_preferences(self._app_default_style)
+        return int(preferred.fade_in_ms), int(preferred.fade_out_ms)
 
     def _replace_active_title_overlay(self, title: TitleOverlay) -> None:
         index = self._active_title_index
@@ -7910,6 +7943,11 @@ class SubtitleRenderWindow(QWidget):
                 title.scheme_name,
                 *(getattr(title, name) for name in _TITLE_FADE_FIELDS),
                 *(getattr(title, name) for name in _TITLE_TIMING_FIELDS),
+                # 自定义时间段的淡入淡出也是习惯（时间逐曲，不进签名）。
+                tuple(
+                    (int(item.fade_in_ms), int(item.fade_out_ms))
+                    for item in title.custom_windows
+                ),
             )
 
         edited_index = _edited_title_index(previous, current)
@@ -7945,6 +7983,24 @@ class SubtitleRenderWindow(QWidget):
                 self._app_default_style, layout_name
             )
             source_title = current_title if title_preference_changed else app_title
+            # 淡入淡出只记"这次真的改过的"：无关编辑（改模式、删窗口）不把
+            # 习惯冲回条目旧值。四档字段与自定义时间段共用同一份习惯——
+            # 后者的编辑经由 _edited_window_fades 写回同名字段。
+            fade_fields = {
+                name: getattr(app_title, name) for name in _TITLE_FADE_FIELDS
+            }
+            if title_preference_changed:
+                fade_fields.update(
+                    {
+                        name: getattr(current_title, name)
+                        for name in _TITLE_FADE_FIELDS
+                        if getattr(previous_title, name)
+                        != getattr(current_title, name)
+                    }
+                )
+                fade_fields.update(
+                    _edited_window_fades(previous_title, current_title)
+                )
             self._app_default_style = replace(
                 self._app_default_style,
                 title_overlays=[
@@ -7957,10 +8013,7 @@ class SubtitleRenderWindow(QWidget):
                         ),
                         layout_index=app_layout_index,
                         scheme_name=source_title.scheme_name,
-                        **{
-                            name: getattr(source_title, name)
-                            for name in _TITLE_FADE_FIELDS
-                        },
+                        **fade_fields,
                         **{
                             name: getattr(source_title, name)
                             for name in _TITLE_TIMING_FIELDS

@@ -695,6 +695,7 @@ class PropertyPanel(QWidget):
         self._title_timecode_factory = _TimecodeEdit
         self._title_cards: list[TitleCard] = []
         self._title_window_provider: Optional[Callable[[TitleOverlay], list]] = None
+        self._title_window_fade_provider: Optional[Callable[[], tuple[int, int]]] = None
         self._title_entry_defaults_provider: Optional[Callable[[], TitleOverlay]] = None
         self._title_tag_provider: Optional[Callable[[], list]] = None
         self._title_duration_provider: Optional[Callable[[], int]] = None
@@ -2044,6 +2045,12 @@ class PropertyPanel(QWidget):
         """注入「当前四档推导窗口」计算器（首次切入自定义模式时预填）。"""
         self._title_window_provider = provider
 
+    def set_title_window_fade_provider(
+        self, provider: Optional[Callable[[], tuple[int, int]]]
+    ) -> None:
+        """注入「新建时间段默认淡入淡出」来源（应用偏好记忆的标题淡入淡出）。"""
+        self._title_window_fade_provider = provider
+
     def set_title_entry_defaults_provider(
         self, provider: Optional[Callable[[], TitleOverlay]]
     ) -> None:
@@ -2294,6 +2301,20 @@ class PropertyPanel(QWidget):
             return
         self._update_title(index, custom_windows=card.window_rows_windows())
 
+    def _title_window_fades(self, title: TitleOverlay) -> tuple[int, int]:
+        """新建自定义时间段的默认淡入淡出：习惯记忆优先，回落条目四档值。
+
+        时间（开始/结束）逐曲自适应，淡入淡出是用户习惯——「＋ 添加时间段」
+        不该退回窗口出厂的 500/500。
+        """
+        if self._title_window_fade_provider is not None:
+            try:
+                fade_in, fade_out = self._title_window_fade_provider()
+                return max(int(fade_in), 0), max(int(fade_out), 0)
+            except Exception:  # noqa: BLE001 - 记忆查询是尽力而为
+                pass
+        return max(int(title.fade_in_ms), 0), max(int(title.fade_out_ms), 0)
+
     def _on_title_card_window_added(self, index: int) -> None:
         if self._syncing:
             return
@@ -2310,7 +2331,15 @@ class PropertyPanel(QWidget):
             end = int(total)
         else:
             end = begin + max(int(current.duration_ms), 0)
-        windows.append(TitleTimeWindow(begin_ms=begin, end_ms=end))
+        fade_in, fade_out = self._title_window_fades(current)
+        windows.append(
+            TitleTimeWindow(
+                begin_ms=begin,
+                end_ms=end,
+                fade_in_ms=fade_in,
+                fade_out_ms=fade_out,
+            )
+        )
         self._update_title(index, custom_windows=windows)
 
     def _on_title_card_window_removed(self, index: int, row: Any) -> None:
