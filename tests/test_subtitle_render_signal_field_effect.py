@@ -100,6 +100,9 @@ def _base_style() -> Style:
         lit_transition_distance=28,
         signals_duration_ms=4_000,
         volume_enabled=True,
+        # 翻转审计要覆盖 volume_* 独立字段，须钉在 custom 档；出厂默认 auto
+        # 下这些字段由主文字字号/配色推导，改值不落画面。
+        volume_appearance_mode="custom",
         volume_duration_ms=4_000,
         volume_waiting_time_ms=0,
         volume_time_offset_ms=0,

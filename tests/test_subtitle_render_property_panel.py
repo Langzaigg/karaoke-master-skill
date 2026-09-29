@@ -513,8 +513,8 @@ def test_property_panel_uses_fluent_checkboxes(qapp):
     assert not panel._allow_inter_page_line_overlap_check.isChecked()
     assert not panel._allow_animation_overlap_check.isChecked()
     assert panel._auto_fill_section_time_check.isChecked()
-    # 出厂预设（74f5c7b）默认开启同步入场/退场与每句同步，控件可用。
-    assert panel._sync_each_page_check.isChecked()
+    # 出厂默认只开同步入场；每句同步默认关，但父开关开着所以控件可用。
+    assert not panel._sync_each_page_check.isChecked()
     assert panel._sync_each_page_check.isEnabled()
     assert panel._n3_style_row.indexOf(panel._ruby_main_reading_units_check) == 0
     assert panel._n3_style_row.indexOf(panel._allow_animation_overlap_check) == 1
@@ -711,7 +711,7 @@ def test_timing_context_reset_clamps_stale_scope(qapp):
 
 def test_sync_each_page_is_enabled_only_for_active_sync_parent(qapp):
     panel = PropertyPanel()
-    # 出厂预设默认全开；本测试验证 enable 只跟随同步父开关，先显式归零。
+    # 本测试验证 enable 只跟随同步父开关，先显式归零。
     panel.set_style(Style(sync_entry=False, sync_ending=False, sync_each_page=False))
 
     assert not panel._sync_each_page_check.isEnabled()
@@ -2214,9 +2214,12 @@ def test_delete_layout_uses_fluent_confirmation(qapp, monkeypatch):
         return False
 
     monkeypatch.setattr(pp, "fluent_question", reject)
+    before = [layout.name for layout in panel.subtitle_style.layouts]
     panel._on_delete_layout()
 
-    assert [layout.name for layout in panel.subtitle_style.layouts] == ["副歌布局"]
+    # set_style 会按 from_dict 同口径补齐出厂布局（含「タイトル左上」），
+    # 拒绝删除后应保持补齐后的快照原样不动。
+    assert [layout.name for layout in panel.subtitle_style.layouts] == before
     assert captured["args"][1:3] == (
         "删除布局",
         "确定要删除布局“副歌布局”吗？\n"
@@ -2231,7 +2234,11 @@ def test_delete_layout_uses_fluent_confirmation(qapp, monkeypatch):
 
     monkeypatch.setattr(pp, "fluent_question", lambda *args, **kwargs: True)
     panel._on_delete_layout()
-    assert panel.subtitle_style.layouts == []
+    # 自定义布局被删；set_style 补齐的出厂预设（タイトル左上 + N 行布局）
+    # 不属于删除目标，原样保留。
+    names = [layout.name for layout in panel.subtitle_style.layouts]
+    assert "副歌布局" not in names
+    assert "タイトル左上" in names
 
 
 def test_property_panel_set_style_populates_controls(qapp):
@@ -2643,11 +2650,11 @@ def test_volume_auto_appearance_mode_roundtrips_through_payload():
     assert restored.volume_auto_column_ratio_pct == 40
     assert style_from_dict({}).volume_auto_size_ratio_pct == 50
     assert style_from_dict({}).volume_auto_column_ratio_pct == 25
-    # 旧工程载荷没有该字段时回退 custom，未知值也按 custom 处理。
-    assert style_from_dict({}).volume_appearance_mode == "custom"
+    # 旧工程载荷没有该字段时回退出厂 auto，未知值也按 auto 处理。
+    assert style_from_dict({}).volume_appearance_mode == "auto"
     assert (
         style_from_dict({"volume_appearance_mode": "bogus"}).volume_appearance_mode
-        == "custom"
+        == "auto"
     )
 
 
@@ -2715,9 +2722,9 @@ def test_style_defaults_match_nicokara_layout_baseline():
     assert style.stroke2_width_px == 5
     assert style.decoration_kind == "shadow"
     assert style.glow_radius_px == 10
-    # N3 阴影偏移固定 = DecorSize（双轴同值），新建默认 10（CreateLyricsFont）。
-    assert style.shadow_offset_x == 10
-    assert style.shadow_offset_y == 10
+    # 阴影偏移 1080 下默认 5（2026-09 用户校准，与 N3 导入的 DecorSize=5 一致）。
+    assert style.shadow_offset_x == 5
+    assert style.shadow_offset_y == 5
     assert style.horizontal_margin_px == 50
     assert style.line_alignments == ["left", "right"]
     assert style.line_lead_in_ms == 1800
@@ -2725,7 +2732,7 @@ def test_style_defaults_match_nicokara_layout_baseline():
     assert style.timing_offset_ms == 0
     assert style.section_gap_ms == 4000
     assert style.sync_entry is True
-    assert style.sync_ending is True
+    assert style.sync_ending is False
     assert style.section_ending_mode == "hold"
     assert style.line_lane_gap_ms == 300
     assert style.entry_anim == "fade"
@@ -2734,9 +2741,9 @@ def test_style_defaults_match_nicokara_layout_baseline():
     assert style.exit_fade_ms == 300
     assert style.lit_enabled is False
     assert style.volume_enabled is False
-    assert style.lit_style == "volume"
+    assert style.lit_style == "circle"
     assert style.lit_number == 4
-    assert style.lit_size == 32
+    assert style.lit_size == 45
     assert style.lit_offset_x == 0
     assert style.lit_offset_y == -24
     assert style.lit_tracking == 0
@@ -2754,7 +2761,7 @@ def test_style_defaults_match_nicokara_layout_baseline():
     assert style.lit_transition_angle_deg == 0
     assert style.lit_transition_distance == 0
     assert style.signals_duration_ms == 4000
-    assert style.volume_appearance_mode == "custom"
+    assert style.volume_appearance_mode == "auto"
     assert style.volume_auto_size_ratio_pct == 50
     assert style.volume_auto_column_ratio_pct == 25
     assert style.volume_size == 48
@@ -10137,3 +10144,32 @@ def test_host_can_mark_paint_relayout_scope(qapp):
 
     panel.mark_style_relayout_scope("unknown")
     assert panel.take_style_relayout_scope() is None
+
+
+def test_title_card_layout_combo_falls_back_to_factory_title_layout(qapp):
+    """悬空布局引用：下拉显示与渲染同口径回退的「タイトル左上」。"""
+    panel = PropertyPanel()
+    panel.set_style(
+        Style(title_overlays=[TitleOverlay(enabled=True, layout_index=99)])
+    )
+
+    card = panel._title_cards[0]
+    assert card.layout_combo.currentText() == "タイトル左上"
+
+
+def test_title_card_layout_materializes_code_default_into_library(qapp):
+    """库里连「タイトル左上」都没有：set_style 按代码内置定义补进布局库。
+
+    补进来的条目是真实布局（可在布局页编辑），悬空引用的下拉直接选中它。"""
+    panel = PropertyPanel()
+    panel.set_style(
+        Style(
+            layouts=[LyricsLayout(name="别的布局", layout_id="other")],
+            title_overlays=[TitleOverlay(enabled=True, layout_index=42)],
+        )
+    )
+
+    card = panel._title_cards[0]
+    assert card.layout_combo.currentText() == "タイトル左上"
+    names = [layout.name for layout in panel.subtitle_style.layouts]
+    assert "タイトル左上" in names

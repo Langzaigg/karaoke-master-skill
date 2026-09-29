@@ -16,11 +16,17 @@ from krok_helper.subtitle_render.domain.models import (
     TITLE_SCHEME_NAME,
     Style,
     TitleOverlay,
+    title_fallback_layout,
 )
 
 
 def title_layout_source(style: Style, index: Optional[int]):
-    """Resolve a title layout reference; dangling references return ``None``."""
+    """Resolve a title layout reference with a factory fallback for dangling refs.
+
+    ``0`` / ``None`` 的语义不变（全局默认布局 / 旧工程显式锚点字段）；悬空
+    的整数引用回退出厂「タイトル左上」——库里有就取库里的同名条目，没有
+    则取代码内置定义（:func:`title_fallback_layout`），渲染与 UI 下拉同口径。
+    """
     if index is None:
         return None
     index = int(index)
@@ -28,7 +34,7 @@ def title_layout_source(style: Style, index: Optional[int]):
         return style
     if 1 <= index <= len(style.layouts):
         return style.layouts[index - 1]
-    return None
+    return title_fallback_layout(style)
 
 
 def resolve_title_overlay(

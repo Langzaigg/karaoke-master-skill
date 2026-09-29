@@ -353,8 +353,8 @@ struct TextStyle {
     float glowBeforeRadius = 10.0f;
     float glowAfterRadius = 10.0f;
     int glowConcentrationLevel = 0;
-    float shadowOffsetX = 0.0f;
-    float shadowOffsetY = 1.0f;
+    float shadowOffsetX = 5.0f;
+    float shadowOffsetY = 5.0f;
     std::wstring rubyFontFamily;
     std::optional<std::wstring> rubyLatinFontFamily;
     float rubyFontSize = 45.0f;
@@ -392,9 +392,9 @@ struct TextStyle {
     float rubyShadowOffsetX = 0.0f;
     float rubyShadowOffsetY = 1.0f;
     bool litEnabled = false;
-    std::string litStyle = "volume";
+    std::string litStyle = "circle";
     int litNumber = 4;
-    float litSize = 32.0f;
+    float litSize = 45.0f;
     float litOffsetX = 0.0f;
     float litOffsetY = -24.0f;
     float litTracking = 0.0f;
@@ -420,7 +420,7 @@ struct TextStyle {
     bool volumeEnabled = false;
     // auto 外观模式：柱体走主文字装饰管线（填充/渐变、描边/二重描边、
     // 发光/阴影、整字放大），镜像 Painter 的 _draw_volume_decorated_group。
-    std::string volumeAppearanceMode = "custom";
+    std::string volumeAppearanceMode = "auto";
     int volumeDurationMs = 4000;
     int volumeWaitingTimeMs = 0;
     int volumeTimeOffsetMs = 0;

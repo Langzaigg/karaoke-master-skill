@@ -74,3 +74,62 @@ def test_application_legacy_builtin_title_migrates_to_information_small():
     migrated = migrate_legacy_app_title_default(legacy)
 
     assert migrated.custom_style_schemes["标题"] == default_title_scheme()
+
+
+def test_dangling_title_layout_falls_back_to_factory_title_layout():
+    """悬空布局引用回退出厂「タイトル左上」：渲染解析与库内容一致。"""
+    from krok_helper.subtitle_render.domain.models import Style, TitleOverlay
+    from krok_helper.subtitle_render.engine.style.title_semantics import (
+        resolve_title_overlay,
+        title_layout_source,
+    )
+
+    style = Style()
+    overlay = resolve_title_overlay(style, TitleOverlay(layout_index=99))
+    assert overlay.anchor == "top_left"
+    assert overlay.offset_x == 50
+    assert overlay.offset_y == 50
+    assert overlay.line_gap_px == 15
+    assert overlay.align == "left"
+    # 库里有同名出厂条目时，回退取的就是库里那一条。
+    source = title_layout_source(style, 99)
+    assert source is style.layouts[0]
+    assert source.name == "タイトル左上"
+
+
+def test_dangling_title_layout_uses_code_default_when_library_lacks_it():
+    """布局库里连「タイトル左上」都没有时，从代码内置定义取出回退。"""
+    from krok_helper.subtitle_render.domain.models import (
+        Style,
+        TitleOverlay,
+        LyricsLayout,
+        default_title_layout,
+    )
+    from krok_helper.subtitle_render.engine.style.title_semantics import (
+        resolve_title_overlay,
+        title_layout_source,
+    )
+
+    style = Style(
+        layouts=[
+            LyricsLayout(name="别的布局", layout_id="other"),
+        ]
+    )
+    source = title_layout_source(style, 42)
+    assert source == default_title_layout()
+
+    style_empty = Style(layouts=[])
+    overlay = resolve_title_overlay(style_empty, TitleOverlay(layout_index=7))
+    assert overlay.anchor == "top_left"
+    assert overlay.offset_x == 50
+    assert overlay.line_gap_px == 15
+
+
+def test_title_layout_none_keeps_legacy_explicit_anchor_semantics():
+    """``layout_index=None`` 是旧工程显式锚点字段的合法语义，不走回退。"""
+    from krok_helper.subtitle_render.domain.models import Style, TitleOverlay
+    from krok_helper.subtitle_render.engine.style.title_semantics import (
+        title_layout_source,
+    )
+
+    assert title_layout_source(Style(), None) is None

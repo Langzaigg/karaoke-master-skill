@@ -159,9 +159,31 @@ bool hasNonNull(const QJsonObject &object, const QString &key) {
     return object.contains(key) && !object.value(key).isNull() && !object.value(key).isUndefined();
 }
 
+// Painter 的 legacy_after_text_fill 镜像：Style 级 fill_gradient_* 在没有显式
+// karaoke_colors 矩阵时把已唱填充物化成双端渐变（角度 90/270 为纵向）。
+PaintFillSpec legacyAfterTextFill(const ResolvedStyle &cfg) {
+    if (!cfg.fillGradientEnabled) {
+        return solidPaintFill(cfg.fillColor);
+    }
+    const bool vertical = cfg.fillGradientAngleDeg == 90 || cfg.fillGradientAngleDeg == 270;
+    PaintFillSpec fill;
+    fill.mode = vertical ? QStringLiteral("gradient_vertical")
+                         : QStringLiteral("gradient_horizontal");
+    fill.color = cfg.fillColor;
+    fill.startColor = cfg.fillGradientStartColor;
+    fill.endColor = cfg.fillGradientEndColor;
+    fill.gradientStops = {
+        {0.0, cfg.fillGradientStartColor},
+        {100.0, cfg.fillGradientEndColor},
+    };
+    fill.splitTopColor = cfg.fillGradientStartColor;
+    fill.splitBottomColor = cfg.fillGradientEndColor;
+    return fill;
+}
+
 void refreshLegacyMainFills(ResolvedStyle &cfg) {
     cfg.baseFill = solidPaintFill(cfg.baseColor);
-    cfg.afterFill = solidPaintFill(cfg.fillColor);
+    cfg.afterFill = legacyAfterTextFill(cfg);
     cfg.beforeStrokeFill = solidPaintFill(cfg.beforeStrokeColor);
     cfg.afterStrokeFill = solidPaintFill(cfg.afterStrokeColor);
     cfg.beforeStroke2Fill = solidPaintFill(cfg.beforeStroke2Color);
@@ -479,6 +501,24 @@ void applyScalarStyleOverrides(ResolvedStyle &cfg, const QJsonObject &style) {
     }
     if (hasNonNull(style, QStringLiteral("fill_color"))) {
         cfg.fillColor = stringValue(style, QStringLiteral("fill_color"), cfg.fillColor);
+    }
+    if (style.value(QStringLiteral("fill_gradient_enabled")).isBool()) {
+        cfg.fillGradientEnabled = style.value(QStringLiteral("fill_gradient_enabled")).toBool();
+    }
+    if (hasNonNull(style, QStringLiteral("fill_gradient_start_color"))) {
+        cfg.fillGradientStartColor = stringValue(
+            style, QStringLiteral("fill_gradient_start_color"), cfg.fillGradientStartColor
+        );
+    }
+    if (hasNonNull(style, QStringLiteral("fill_gradient_end_color"))) {
+        cfg.fillGradientEndColor = stringValue(
+            style, QStringLiteral("fill_gradient_end_color"), cfg.fillGradientEndColor
+        );
+    }
+    if (hasNonNull(style, QStringLiteral("fill_gradient_angle_deg"))) {
+        cfg.fillGradientAngleDeg = intValue(
+            style, QStringLiteral("fill_gradient_angle_deg"), cfg.fillGradientAngleDeg
+        );
     }
     if (hasNonNull(style, QStringLiteral("ruby_color"))) {
         cfg.rubyColor = stringValue(style, QStringLiteral("ruby_color"), cfg.rubyColor);
@@ -886,6 +926,17 @@ std::optional<RenderConfig> parseRenderConfig(const QJsonObject &ir, QString *er
     base.letterSpacingPx = intValue(style, QStringLiteral("letter_spacing_px"), base.letterSpacingPx);
     base.baseColor = stringValue(style, QStringLiteral("base_color"), base.baseColor);
     base.fillColor = stringValue(style, QStringLiteral("fill_color"), base.fillColor);
+    base.fillGradientEnabled = style.value(QStringLiteral("fill_gradient_enabled"))
+        .toBool(base.fillGradientEnabled);
+    base.fillGradientStartColor = stringValue(
+        style, QStringLiteral("fill_gradient_start_color"), base.fillGradientStartColor
+    );
+    base.fillGradientEndColor = stringValue(
+        style, QStringLiteral("fill_gradient_end_color"), base.fillGradientEndColor
+    );
+    base.fillGradientAngleDeg = intValue(
+        style, QStringLiteral("fill_gradient_angle_deg"), base.fillGradientAngleDeg
+    );
     base.rubyColor = stringValue(style, QStringLiteral("ruby_color"), base.rubyColor);
     const QString strokeColor = stringValue(style, QStringLiteral("stroke_color"), base.beforeStrokeColor);
     base.beforeStrokeColor = strokeColor;
@@ -1140,7 +1191,11 @@ std::optional<RenderConfig> parseRenderConfig(const QJsonObject &ir, QString *er
     const QJsonObject mainKaraokeColors = style.value(QStringLiteral("karaoke_colors")).toObject();
     const QJsonObject rubyKaraokeColors = style.value(QStringLiteral("ruby_karaoke_colors")).toObject();
 
-    applyMainKaraokeColors(base, mainKaraokeColors);
+    // 矩阵缺失（null）时保留 refreshLegacyMainFills 的 legacy 填充（含
+    // fill_gradient_* 渐变）；空对象直灌会把 afterFill 冲回纯色 fill_color。
+    if (hasMainKaraokeColors) {
+        applyMainKaraokeColors(base, mainKaraokeColors);
+    }
     // ``role`` 模式：解析指定来源的「走字后-主文字」填充。保留键
     // ``__global__`` 取主样式自身（applyMainKaraokeColors 刚填好的
     // afterFill，含 legacy 回退）；其余名字查 customStyleSchemes。名字悬空

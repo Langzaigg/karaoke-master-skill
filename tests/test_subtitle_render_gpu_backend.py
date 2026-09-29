@@ -1233,6 +1233,57 @@ def test_gpu_mixed_roles_restart_horizontal_gradient_on_each_role(monkeypatch) -
 
 
 @pytest.mark.skipif(os.name != "nt", reason="Direct2D GPU backend is Windows-only")
+@pytest.mark.skipif(os.name != "nt", reason="Direct2D GPU backend is Windows-only")
+@pytest.mark.parametrize("angle_deg", [0, 90])
+def test_gpu_legacy_fill_gradient_renders_gradient_not_solid(
+    monkeypatch, angle_deg: int
+) -> None:
+    """Style 级 fill_gradient_*（无显式 karaoke_colors 矩阵）两后端都出渐变。
+
+    回归：native 的 legacy 回退 refreshLegacyMainFills 原先只给纯色
+    fill_color，旧工程 /「恢复默认」后不带矩阵的样式在 GPU 上已唱文字
+    渲成单色（Painter 正常）。横向 (0°) 与纵向 (90°) 都要覆盖。
+    """
+    monkeypatch.setenv("QT_QPA_PLATFORM", "offscreen")
+
+    def gradient_style(enabled: bool) -> Style:
+        return _g1_style(
+            fill_color="#FF2030",
+            fill_gradient_enabled=enabled,
+            fill_gradient_start_color="#FF0000",
+            fill_gradient_end_color="#0000FF",
+            fill_gradient_angle_deg=angle_deg,
+            karaoke_colors=None,
+        )
+
+    def ramp_pixels(payload: bytes) -> int:
+        # 已唱渐变红→蓝的中段是紫红/紫（R 高、B 明显、G 低）；单色
+        # #FF2030 的 B 通道只有 0x30=48，不会命中。
+        return sum(
+            payload[index] > 120
+            and payload[index + 2] > 55
+            and payload[index + 1] < 70
+            and payload[index + 3] > 80
+            for index in range(0, len(payload), 4)
+        )
+
+    style = gradient_style(True)
+    assert style.karaoke_colors is None
+    painter = _render_painter_oracle(style, t_ms=750)
+    with NativeRendererProcess(_renderer_path(), response_timeout_s=15.0) as renderer:
+        _, gpu = _render_g1_frames(renderer, style, (750,), force_warp=True)
+        _, solid_gpu = _render_g1_frames(
+            renderer, gradient_style(False), (750,), force_warp=True
+        )
+
+    # 两侧渲染覆盖率本身有差异（AA/描边口径），断言「渐变中段颜色是否
+    # 出现」这一特征，不做像素数对账。
+    assert ramp_pixels(painter) > 150
+    assert ramp_pixels(gpu[0]) > 40
+    # 阴性对照：关掉渐变后，同样的样式不应再出现渐变中段颜色。
+    assert ramp_pixels(solid_gpu[0]) == 0
+
+
 def test_gpu_horizontal_ruby_gradient_uses_main_line_bounds_by_default(monkeypatch) -> None:
     monkeypatch.setenv("QT_QPA_PLATFORM", "offscreen")
 

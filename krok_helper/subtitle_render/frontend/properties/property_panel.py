@@ -174,6 +174,7 @@ from krok_helper.subtitle_render.n3.font_catalog import (
 from krok_helper.subtitle_render.domain.models import (
     N3_FONT_INHERITANCE_FIELDS,
     PRESET_REFERENCE_HEIGHT,
+    ensure_page_layout_defaults,
     RUBY_DECORATION_OVERRIDE_FIELDS,
     StylePreset,
     SubtitleStyleScheme,
@@ -1017,6 +1018,11 @@ class PropertyPanel(QWidget):
         self._n3_template_lyrics_dir = Path(path) if path is not None else None
 
     def set_style(self, style: Style, *, emit: bool = False) -> None:
+        # 与 style_from_dict 同口径补齐出厂布局（含「タイトル左上」）：直连
+        # 构造、未走 from_dict 的样式进面板后，布局页也能看到并编辑它，
+        # 悬空标题引用的下拉回退才能选中真实条目。幂等，放等值快路径之前
+        # 保证两侧同口径比较。
+        style = ensure_page_layout_defaults(style)
         self._title_text_change_timer.stop()
         self._title_text_pending.clear()
         if self._style_synced and not emit and style == self._style:

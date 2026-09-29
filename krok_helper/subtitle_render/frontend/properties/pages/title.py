@@ -20,6 +20,7 @@ from qfluentwidgets import (
 
 from krok_helper.subtitle_render.domain.models import (
     TITLE_SCHEME_NAME,
+    title_fallback_layout,
     TitleOverlay,
     TitleTimeWindow,
 )
@@ -398,7 +399,23 @@ class TitleCard:
             for index, layout_def in enumerate(style.layouts, start=1):
                 combo.addItem(layout_def.name, index)
             target = overlay.layout_index if overlay.layout_index is not None else 0
-            combo.setCurrentIndex(max(0, combo.findData(int(target))))
+            row = combo.findData(int(target))
+            if row < 0 and overlay.layout_index is not None:
+                # 悬空引用：与渲染同口径回退库里的出厂「タイトル左上」。
+                # 直连构造漏掉它时 set_style 的 ensure 已补进布局库，这里
+                # 按名字选中真实条目（可在布局页编辑）；工程显式删除
+                # （hidden）的极端场景退回第 0 行显示，渲染侧仍按代码
+                # 内置定义回退。
+                fallback = title_fallback_layout(style)
+                row = next(
+                    (
+                        index
+                        for index in range(combo.count())
+                        if combo.itemText(index) == fallback.name
+                    ),
+                    -1,
+                )
+            combo.setCurrentIndex(max(0, row))
         finally:
             combo.blockSignals(blocked)
 

@@ -1069,6 +1069,7 @@ def test_signal_volume_uses_sayatoo_default_shape_and_line_anchor(qapp):
         line_lead_in_ms=0,
         lit_enabled=True,
         lit_style="volume",
+        volume_appearance_mode="custom",
         lit_shadow=False,
         signals_duration_ms=1000,
     )
@@ -1118,6 +1119,7 @@ def test_signal_volume_union_shifts_role_line_text_beside_bars(qapp):
         font_family_latin="Arial",
         font_size_px=48,
         volume_enabled=True,
+        volume_appearance_mode="custom",
         volume_duration_ms=2000,
         volume_waiting_time_ms=0,
         volume_time_offset_ms=0,
@@ -1591,6 +1593,7 @@ def test_signal_union_window_follows_extended_display_end(qapp):
     style = Style(
         font_size_px=32,
         volume_enabled=True,
+        volume_appearance_mode="custom",
         volume_duration_ms=1000,
         volume_waiting_time_ms=0,
         volume_time_offset_ms=0,
@@ -1616,6 +1619,8 @@ def test_signal_union_window_follows_extended_display_end(qapp):
 def test_signal_volume_local_bounds_match_sayatoo_offset_origin(qapp):
     style = Style(
         lit_enabled=True,
+        lit_style="volume",
+        volume_appearance_mode="custom",
         lit_shadow=False,
         lit_stroke_width=2,
         volume_offset_x=0,
@@ -1759,6 +1764,8 @@ def test_signal_volume_layout_does_not_jump_between_flash_and_fill(qapp):
         dual_line_layout=False,
         line_lead_in_ms=0,
         lit_enabled=True,
+        lit_style="volume",
+        volume_appearance_mode="custom",
         lit_shadow=False,
         signals_duration_ms=1000,
         volume_flash_times=1,
@@ -1781,6 +1788,8 @@ def test_signal_volume_widens_line_and_shifts_text(qapp):
         dual_line_layout=False,
         line_lead_in_ms=0,
         lit_enabled=True,
+        lit_style="volume",
+        volume_appearance_mode="custom",
         lit_shadow=False,
         signals_duration_ms=1000,
     )
@@ -1811,6 +1820,8 @@ def test_signal_volume_union_alignment_left_vs_right(qapp):
         line_y_margin_px=10,
         dual_line_layout=False,
         line_lead_in_ms=2000,  # keep the line visible at t=800 with or without bars
+        lit_style="volume",
+        volume_appearance_mode="custom",
         lit_shadow=False,
         signals_duration_ms=1000,
         line_horizontal_layout="per_row",
@@ -1875,6 +1886,8 @@ def test_signal_volume_offset_x_moves_bars_not_text(qapp):
             dual_line_layout=False,
             line_lead_in_ms=0,
             lit_enabled=True,
+            lit_style="volume",
+            volume_appearance_mode="custom",
             lit_shadow=False,
             signals_duration_ms=1000,
             line_horizontal_layout="per_row",
@@ -1899,6 +1912,8 @@ def test_signal_volume_stays_visible_after_the_line_starts(qapp):
         dual_line_layout=False,
         line_lead_in_ms=0,
         lit_enabled=True,
+        lit_style="volume",
+        volume_appearance_mode="custom",
         lit_shadow=False,
         signals_duration_ms=1000,
         volume_flash_times=1,
@@ -1975,6 +1990,8 @@ def test_signal_volume_flash_off_phase_is_transparent(qapp):
         dual_line_layout=False,
         line_lead_in_ms=0,
         lit_enabled=True,
+        lit_style="volume",
+        volume_appearance_mode="custom",
         lit_shadow=False,
         signals_duration_ms=1000,
         volume_flash_times=1,
@@ -1994,6 +2011,8 @@ def test_signal_volume_flash_on_phase_keeps_all_columns_visible(qapp):
         line_lead_in_ms=0,
         entry_anim="none",
         lit_enabled=True,
+        lit_style="volume",
+        volume_appearance_mode="custom",
         lit_shadow=False,
         signals_duration_ms=1000,
         volume_flash_times=1,
@@ -2255,6 +2274,7 @@ def test_volume_bars_render_when_time_offset_covers_the_duration(qapp):
         dual_line_layout=False,
         line_lead_in_ms=0,
         volume_enabled=True,
+        volume_appearance_mode="custom",
         volume_duration_ms=1000,
         volume_time_offset_ms=1000,
         volume_flash_duration_ratio=0.0,
@@ -2294,6 +2314,8 @@ def test_signal_volume_follows_section_head_entry_and_exit_animation(qapp):
         stroke2_enabled=False,
         decoration_kind="none",
         lit_enabled=True,
+        lit_style="volume",
+        volume_appearance_mode="custom",
         lit_shadow=False,
         lit_stroke_width=0,
         signals_duration_ms=1000,
@@ -10431,7 +10453,7 @@ def test_style_dict_roundtrip_keeps_sync_entry():
     assert restored.auto_fill_section_time is False
     assert style_from_dict({}).sync_entry is True
     assert style_from_dict({}).allow_entry_exit_animation_overlap is False
-    assert style_from_dict({}).sync_each_page is True
+    assert style_from_dict({}).sync_each_page is False
     assert style_from_dict({}).auto_fill_section_time is True
 
 

@@ -496,3 +496,21 @@ def test_windows_catalog_canonicalizes_ud_kyokasho_alias_when_installed():
     assert canonical == "UD デジタル 教科書体 N-B"
     assert canonical in catalog.families
     assert len(catalog.families) == len(set(catalog.families))
+
+
+def test_n3_default_family_falls_back_to_simsun_for_chinese_systems():
+    """日文专用字体全缺席时，末位兜底取中文系统常备的宋体（SimSun）。"""
+    catalog = N3FontCatalog(
+        families=("宋体", "Arial"),
+        aliases={
+            "simsun": "宋体",
+            "宋体".casefold(): "宋体",
+            "arial": "Arial",
+        },
+        authoritative=True,
+    )
+    normalized, changed = normalize_style_font_families(
+        Style(font_family="UD デジタル 教科書体 N-B"), catalog
+    )
+    assert changed is True
+    assert normalized.font_family == "宋体"

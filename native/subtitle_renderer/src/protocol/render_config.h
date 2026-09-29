@@ -160,6 +160,13 @@ struct ResolvedStyle {
     int letterSpacingPx = 0;
     QString baseColor = QStringLiteral("#FFFFFF");
     QString fillColor = QStringLiteral("#FF5A6F");
+    // Legacy fill gradient（Style 级 fill_gradient_* 字段）：仅在没有显式
+    // karaoke_colors 矩阵时经 refreshLegacyMainFills 物化成 afterFill 渐变，
+    // 与 Painter 的 legacy_after_text_fill 同口径。
+    bool fillGradientEnabled = false;
+    QString fillGradientStartColor = QStringLiteral("#FF5A6F");
+    QString fillGradientEndColor = QStringLiteral("#0055FF");
+    int fillGradientAngleDeg = 0;
     QString beforeStrokeColor = QStringLiteral("#222222");
     QString afterStrokeColor = QStringLiteral("#222222");
     QString beforeStroke2Color = QStringLiteral("#000000");

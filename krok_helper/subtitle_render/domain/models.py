@@ -312,8 +312,8 @@ class TitleOverlay:
     glow_concentration_level: int = 0
     """-1 disables glow; NicoKaraMaker3 ``BlurLevel`` 0/1/2 = low/medium/high."""
     shadow: PaintFill = field(default_factory=lambda: _paint_fill("#FFFFFF"))
-    shadow_offset_x: int = 10
-    shadow_offset_y: int = 10
+    shadow_offset_x: int = 5
+    shadow_offset_y: int = 5
 
     # 位置（锚点 9 宫格 + 内边距 / 偏移；逆向 ニコカラ「タイトル左上」）。
     # 这些字段与上方字体/颜色字段一样，现在是「解析结果」：渲染时由
@@ -548,6 +548,19 @@ def default_title_layout() -> LyricsLayout:
         horizontal_margin_px=50,
         line_alignments=["left"],
     )
+
+
+def title_fallback_layout(style: "Style") -> LyricsLayout:
+    """悬空标题布局引用的统一回退。
+
+    优先取布局库里的出厂「タイトル左上」；库缺失（手改 JSON / 外部清库）
+    时直接取代码内置定义。渲染与标题卡片下拉都走这里，保证显示与实际
+    渲染同口径。
+    """
+    for layout in style.layouts:
+        if layout.name == TITLE_LAYOUT_NAME:
+            return layout
+    return default_title_layout()
 
 
 DEFAULT_LAYOUT_BY_ROW_COUNT: dict[int, str] = {
@@ -869,10 +882,9 @@ class Style:
     glow_concentration_level: int = 0
     """-1 disables glow; NicoKaraMaker3 ``BlurLevel`` 0/1/2 = low/medium/high."""
     shadow_color: str = "#000000"
-    shadow_offset_x: int = 10
-    """阴影 X 偏移。N3 阴影偏移固定为 DecorSize（双轴同值），新建默认 10
-    （``CreateLyricsFont``），这里默认值对齐。"""
-    shadow_offset_y: int = 10
+    shadow_offset_x: int = 5
+    """阴影 X 偏移。N3 阴影偏移固定为 DecorSize（双轴同值），1080 下默认 5。"""
+    shadow_offset_y: int = 5
     karaoke_colors: Optional[KaraokeColors] = None
 
     singer_style_overrides: dict[int, SubtitleStyleScheme] = field(default_factory=dict)
@@ -1069,13 +1081,13 @@ class Style:
     sync_entry: bool = True
     """同步入场：先取同步页最长延长候选，再逐个压缩实际碰撞的行。"""
 
-    sync_ending: bool = True
+    sync_ending: bool = False
     """同步退场：先取同步页最长延长候选，再逐个压缩实际碰撞的行。"""
 
     allow_entry_exit_animation_overlap: bool = False
     """允许相邻页面的入场和退场动画在时间上重叠。"""
 
-    sync_each_page: bool = True
+    sync_each_page: bool = False
     """每句同步：开启时每页同步；关闭时仅同步段首入场和段尾退场。"""
 
     auto_fill_section_time: bool = True
@@ -1192,7 +1204,7 @@ class Style:
     # volume_enabled 控制会插入字幕行首、参与行宽布局的音量柱。
     lit_enabled: bool = False
     volume_enabled: bool = False
-    volume_appearance_mode: VolumeAppearanceMode = "custom"
+    volume_appearance_mode: VolumeAppearanceMode = "auto"
     """音量柱外观联动：``auto`` 时整体高度/柱宽/描边宽按主文字字号推导，
     且柱体改用主文字的完整装饰管线——填充/渐变/描边/发光/阴影取**段首行
     第一个角色**的有效配色（无角色时为该行样式），整字放大唱字动画与文字
@@ -1206,7 +1218,7 @@ class Style:
     描边上限等比例链随柱宽推导，仅 auto 模式生效。"""
     # Keep the serialized/default discriminator for source compatibility with
     # direct Style(lit_enabled=True) callers; the new UI always writes a shape.
-    lit_style: LitStyle = "volume"
+    lit_style: LitStyle = "circle"
     lit_image_path: str = ""
     """形状灯「图片」模式的素材路径（#RRGGBB 之外唯一非数值 lit 参数）。
 
@@ -1215,7 +1227,7 @@ class Style:
     图片模式下忽略。图片缺失或无法解码时回退为圆形（与 native 一致）。
     """
     lit_number: int = 4
-    lit_size: int = 32
+    lit_size: int = 45
     lit_offset_x: int = 0
     lit_offset_y: int = -24
     lit_tracking: int = 0

@@ -37,7 +37,10 @@ log = logging.getLogger(__name__)
 _DWRITE_FACTORY_TYPE_SHARED = 0
 _DWRITE_FONT_STYLE_NORMAL = 0
 _IID_IDWRITE_FACTORY = "B859EE5A-D838-4B5B-A2E8-1ADC7D93DB48"
-_N3_DEFAULT_FONT_CANDIDATES = ("HGP明朝E", "游明朝", "ＭＳ Ｐ明朝")
+# 末位兜底面向中文系统：宋体（SimSun）自带假名与日文汉字形，简体中文
+# Windows 必有；日文专用字体（HGP明朝E / 游明朝 / ＭＳ Ｐ明朝）都缺席时
+# 用它保住可渲染的日文观感，最后才轮到字体目录第一个族。
+_N3_DEFAULT_FONT_CANDIDATES = ("HGP明朝E", "游明朝", "ＭＳ Ｐ明朝", "SimSun", "宋体")
 _OPTIONAL_FONT_FIELDS = (
     "font_family_latin",
     "ruby_font_family",

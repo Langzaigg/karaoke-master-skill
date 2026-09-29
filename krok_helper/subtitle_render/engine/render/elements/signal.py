@@ -822,7 +822,10 @@ def _draw_volume_lit_group(
     active_index = group.active_index if group.active_index is not None else -1
     bar_animations = group.bar_animations
 
-    if style.volume_appearance_mode == "auto":
+    # auto 装饰管线只属于独立音量柱模块：旧版 lit_style="volume" 兼容路径
+    # 不经 resolve_volume_appearance 物化（render_ir 同门），这里若只看
+    # 模式字段会让 Painter 走推导、native 读物化前的原始值，两后端岔开。
+    if style.volume_enabled and style.volume_appearance_mode == "auto":
         _draw_volume_decorated_group(
             painter, group, style, geometry, rects, active_index, bar_animations
         )
