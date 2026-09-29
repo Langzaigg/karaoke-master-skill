@@ -703,10 +703,17 @@ class _FilterableFontMenu(ComboBoxMenu):
         return super().event(e)
 
     def eventFilter(self, obj, event) -> bool:  # noqa: N802 - Qt API
-        if event.type() == QEvent.Type.MouseButtonPress and self.isVisible():
-            pressed = obj if isinstance(obj, QWidget) else None
-            if not _widget_is_within(pressed, self):
-                self._close_for_outside_press(pressed)
+        # 真实鼠标按下会先以 QWindow（顶层窗口本身）为接收者过一遍应用级
+        # 过滤器，随后的子控件分发才带上具体 QWidget。窗口阶段拿不到控件、
+        # 一律不判定；否则菜单自家窗口上的任何按下（含滚动条、列表行）都会
+        # 被误判为「点在外部」而收起。
+        if (
+            event.type() == QEvent.Type.MouseButtonPress
+            and self.isVisible()
+            and isinstance(obj, QWidget)
+        ):
+            if not _widget_is_within(obj, self):
+                self._close_for_outside_press(obj)
         return super().eventFilter(obj, event)
 
     def hideEvent(self, event) -> None:  # noqa: N802 - Qt API

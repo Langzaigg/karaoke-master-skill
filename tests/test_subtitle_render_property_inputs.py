@@ -350,6 +350,20 @@ def test_property_font_menu_keeps_open_for_press_inside(qapp) -> None:
     menu.close()
 
 
+def test_property_font_menu_ignores_window_stage_press_on_itself(qapp) -> None:
+    combo = _popup_font_combo()
+    menu = combo.dropMenu
+    window = menu.windowHandle()
+
+    # 真实鼠标按下先以 QWindow 为接收者经过应用级过滤器（子控件分发在其
+    # 后）；窗口阶段不判定，否则菜单自家窗口上的任何点击都会被误判为
+    # 「点在外部」而收起（滚动条不可点击的根因）。
+    if window is not None:
+        menu.eventFilter(window, _mouse_press_event())
+        assert menu.isVisible() is True
+    menu.close()
+
+
 def test_property_font_menu_closes_on_window_deactivate(qapp) -> None:
     combo = _popup_font_combo()
     menu = combo.dropMenu
