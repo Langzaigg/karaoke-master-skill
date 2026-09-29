@@ -289,7 +289,13 @@ def test_the_open_project_content_survives_the_reset(
             fill_gradient_start_color="#FF0000",
             fill_gradient_end_color="#0000FF",
             title_overlays=[
-                replace(title, enabled=True, fade_in_ms=250, text_template="歌名")
+                replace(
+                    title,
+                    enabled=True,
+                    fade_in_ms=250,
+                    show_mode="whole",
+                    text_template="歌名",
+                )
             ],
         ),
         emit=True,
@@ -300,11 +306,14 @@ def test_the_open_project_content_survives_the_reset(
     confirm(True)
     window._reset_app_preferences()
 
-    # 逐曲内容保留：标题条目（文字 + 淡入淡出）、画面尺寸不动。
+    # 逐曲内容保留：标题文字、画面尺寸不动。
     project_title = window._style.title_overlays[0]
-    assert project_title.fade_in_ms == 250
     assert project_title.text_template == "歌名"
     assert window._screen_settings == canvas_before
+    # 标题的习惯字段（淡入淡出 / 显示时段）回出厂——它们是习惯不是逐曲
+    # 内容，重置后卡片上就应该是出厂值。
+    assert project_title.fade_in_ms == TitleOverlay().fade_in_ms
+    assert project_title.show_mode == TitleOverlay().show_mode
     # 通用样式（动画 / 唱字特效 / legacy 渐变）真正回到出厂：面板看到的
     # 就是默认值，下一次保存也不会把旧值写回记忆。
     assert window._style.entry_anim == Style().entry_anim
@@ -348,3 +357,67 @@ def test_reset_keeps_the_preset_library_seen_by_the_panel(
 
     assert set(window._style_presets) == {"preset-1"}
     assert set(window._property_panel.preset_schemes) == {"preset-1"}
+
+
+def test_reset_resolves_title_layout_against_preserved_library(
+    make_window, settings, confirm, tmp_path
+) -> None:
+    """库首不是タイトル左上（N3 工作流积累）时，重置不能把标题布局指错。
+
+    回归：应用默认标题的 layout_index 曾按出厂布局表算好（恒为 1）再换入
+    保留布局库，库首是「下寄せ1行」时新工程/新条目的标题全部指到它。
+    """
+    from krok_helper.subtitle_render.domain.models import (
+        LyricsLayout,
+        style_to_dict,
+    )
+
+    polluted = _polluted_payload(str(tmp_path / "skip.yurika"))
+    polluted["style"] = style_to_dict(
+        replace(
+            Style(),
+            layouts=[
+                LyricsLayout(
+                    name="下寄せ1行",
+                    line_y_position="bottom",
+                    line_alignments=["center"],
+                ),
+                LyricsLayout(
+                    name="下寄せ2行",
+                    line_y_position="bottom",
+                    line_alignments=["left", "right"],
+                ),
+            ],
+        )
+    )
+    settings.data = polluted
+    window = make_window()
+    # 工程里标题条目也带着旧习惯：显示时段=全程、布局指向库首。
+    title = (window._style.title_overlays or [TitleOverlay()])[0]
+    window._property_panel.set_style(
+        replace(
+            window._style,
+            title_overlays=[
+                replace(title, enabled=True, show_mode="whole", layout_index=1)
+            ],
+        ),
+        emit=True,
+    )
+    QApplication.instance().processEvents()
+
+    confirm(True)
+    window._reset_app_preferences()
+
+    # 出厂「タイトル左上」被 ensure 补进库（追加在尾部），应用默认标题
+    # 解析到它的**真实位置**，而不是恒为 1 的出厂表位置。
+    entry = window._new_title_entry_defaults()
+    index = int(entry.layout_index or 0)
+    assert 1 <= index <= len(window._app_default_style.layouts)
+    assert window._app_default_style.layouts[index - 1].name == "タイトル左上"
+    assert entry.show_mode == TitleOverlay().show_mode
+
+    # 工作区条目同样回到出厂：布局 = タイトル左上、显示时段 = 自定义。
+    workspace_title = window._style.title_overlays[0]
+    workspace_index = int(workspace_title.layout_index or 0)
+    assert window._style.layouts[workspace_index - 1].name == "タイトル左上"
+    assert workspace_title.show_mode == TitleOverlay().show_mode

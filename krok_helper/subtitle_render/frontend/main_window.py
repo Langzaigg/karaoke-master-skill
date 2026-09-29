@@ -317,6 +317,7 @@ from krok_helper.subtitle_render.domain.models import (
     ensure_page_layout_defaults,
     layout_capacity,
     layout_display_name,
+    lyrics_layout_to_dict,
     layout_id_for_index,
     migrate_spacing_bindings_to_used_layouts,
     migrate_title_guide_symbols,
@@ -8076,9 +8077,9 @@ class SubtitleRenderWindow(QWidget):
             "· 自动和声、「批量识别导唱标记」等对话框的上次设置\n"
             "· 输出偏好（GPU 预览 / 导出、输出目录、命名模板、编码器设置）\n"
             "· 自动保存与备份设置\n"
-            "当前工程的通用样式也会回到默认（标题文字、角色配色等逐曲内容"
-            "保留，可作为未保存改动放弃）；自定义样式预设库与软件布局库保留，"
-            "最近打开的项目列表保持不变。",
+            "当前工程的通用样式与标题外观/显示时段习惯也会回到默认（标题"
+            "文字、时间段等逐曲内容保留，可作为未保存改动放弃）；自定义样式"
+            "预设库与软件布局库保留，最近打开的项目列表保持不变。",
             yes_text="恢复默认",
             no_text="取消",
             default_cancel=True,
@@ -8106,27 +8107,37 @@ class SubtitleRenderWindow(QWidget):
                 self, "恢复默认偏好", "写入设置文件失败，本次未能恢复默认。"
             )
             return
-        # 与启动装载走同一入口：空配置 → 纯出厂值，今后新增的偏好字段也自动
-        # 覆盖，不用在这里逐个枚举。
+        # 与启动装载走同一入口，只带保留的布局库（连同其参考高度——库内
+        # 像素字段按这份高度保存），其余字段全部缺席 → 出厂值，今后新增的
+        # 偏好字段也自动覆盖。布局库经 from_dict 的 ensure 补齐出厂条目，
+        # 「タイトル左上」在库里的**真实位置**由装载端解析：不能先按出厂
+        # 布局表算好 index 再换库，库首不是タイトル左上时（N3 工作流积累
+        # 的库）会指错条目。
         loaded = load_app_preferences(
-            {},
+            {
+                "style": {
+                    "layouts": [
+                        lyrics_layout_to_dict(layout)
+                        for layout in self._app_default_style.layouts
+                    ],
+                    "layout_reference_height": (
+                        self._app_default_style.layout_reference_height
+                    ),
+                }
+            },
             chorus_begin_default=DEFAULT_CHORUS_BEGIN_CHARS,
             chorus_end_default=DEFAULT_CHORUS_END_CHARS,
             font_catalog=get_n3_font_catalog(),
         )
-        # 布局库连同其参考高度原样保留（库内像素字段按这份高度保存，拆开
-        # 会让后续合并错误重缩放）；其余样式习惯——包括 default_layout_by_
-        # row_count 记住的软件默认布局指向——取出厂值。
-        self._app_default_style = replace(
-            loaded.app_default_style,
-            layouts=deepcopy(self._app_default_style.layouts),
-            layout_reference_height=self._app_default_style.layout_reference_height,
-        )
+        self._app_default_style = loaded.app_default_style
         # 工作区样式一并回默认（按当前画布高度重缩放，与启动装载同口径）：
         # 面板上看到的通用样式（动画/走字/时间/配色/字体）就是出厂值。不改
         # 它的话，收尾保存会经 merge_common_style_preferences 把旧习惯原样
-        # 写回记忆，重置形同虚设。逐曲内容不跟着走：标题条目（文字/时间
-        # 段）、角色方案、歌手覆盖与出厂布局隐藏标记保留在工程里。
+        # 写回记忆，重置形同虚设。逐曲内容不跟着走：标题条目保留文字、名称、
+        # 启用态与自定义时间段，角色方案、歌手覆盖与出厂布局隐藏标记留在
+        # 工程里；标题的**习惯字段**（配色/布局引用、淡入淡出、显示时段）
+        # 与其余样式一起回出厂——它们是习惯不是逐曲内容，重置后卡片上就
+        # 应该显示出厂值。
         project_seed = rescale_font_sizes(
             rescale_layout_sizes(
                 deepcopy(self._app_default_style),
@@ -8134,9 +8145,22 @@ class SubtitleRenderWindow(QWidget):
             ),
             self._screen_settings.height,
         )
+        app_title = (self._app_default_style.title_overlays or [TitleOverlay()])[0]
+        title_habits = {
+            name: getattr(app_title, name)
+            for name in (*_TITLE_FADE_FIELDS, *_TITLE_TIMING_FIELDS)
+        }
         self._style = replace(
             project_seed,
-            title_overlays=deepcopy(self._style.title_overlays),
+            title_overlays=[
+                replace(
+                    overlay,
+                    scheme_name=app_title.scheme_name,
+                    layout_index=app_title.layout_index,
+                    **title_habits,
+                )
+                for overlay in deepcopy(self._style.title_overlays)
+            ],
             custom_style_schemes=deepcopy(self._style.custom_style_schemes),
             singer_style_overrides=deepcopy(self._style.singer_style_overrides),
             hidden_builtin_layout_ids=deepcopy(self._style.hidden_builtin_layout_ids),
