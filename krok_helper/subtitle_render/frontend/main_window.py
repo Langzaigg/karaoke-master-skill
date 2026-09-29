@@ -339,6 +339,7 @@ from krok_helper.subtitle_render.settings.preferences import (
     AppPreferenceSaveInput,
     BUILTIN_SCHEME_STYLE_FIELDS as _BUILTIN_SCHEME_STYLE_FIELDS,
     DEFAULT_AUTO_SAVE_INTERVAL_MINUTES,
+    DEFAULT_PREVIEW_SPLITTER_RATIO,
     DEFAULT_PROJECT_BACKUP_COUNT,
     DISCARDED_BACKUP_RETENTION_DAYS,
     LAYOUT_DEFAULT_STYLE_FIELDS as _LAYOUT_DEFAULT_STYLE_FIELDS,
@@ -1394,6 +1395,10 @@ class SubtitleRenderWindow(QWidget):
         )
         menu.addSeparator()
         menu.addAction(Action(FIF.DOWNLOAD, "导入 N3 项目", triggered=self._import_n3_project))
+        menu.addSeparator()
+        menu.addAction(
+            Action(FIF.BROOM, "恢复默认偏好…", triggered=self._reset_app_preferences)
+        )
         self._file_menu_btn.setMenu(menu)
         left_layout.addWidget(self._file_menu_btn)
 
@@ -8051,6 +8056,189 @@ class SubtitleRenderWindow(QWidget):
                 self._style, preference.get("layout_name")
             )
             assign_layout_to_all(track, index, self._style)
+
+    def _reset_app_preferences(self) -> None:
+        """「文件管理 → 恢复默认偏好…」：应用级习惯记忆与工作区样式回出厂。
+
+        等价于清空 settings.json 的 ``subtitle_render`` 命名空间（保留最近打开
+        列表与样式预设库）后按空配置重新装载。样式预设库与软件布局库是跨工程
+        积累的**内容库**而不是习惯：原样保留；按行数记住的「软件默认布局」
+        指向随其他样式习惯一起回出厂。当前工程的通用样式同步回默认（否则
+        下一次保存会把旧习惯原样写回记忆），但标题文字、角色配色等逐曲内容
+        与已加载素材不动。
+        """
+        if not fluent_question(
+            self,
+            "恢复默认偏好",
+            "将把字幕视频生成模块记住的偏好恢复为出厂默认，包括：\n"
+            "· 新建工程的默认样式与标题习惯（淡入淡出、显示时段等）\n"
+            "· 按行数记住的「软件默认布局」选择与当前配色方案选择\n"
+            "· 自动和声、「批量识别导唱标记」等对话框的上次设置\n"
+            "· 输出偏好（GPU 预览 / 导出、输出目录、命名模板、编码器设置）\n"
+            "· 自动保存与备份设置\n"
+            "当前工程的通用样式也会回到默认（标题文字、角色配色等逐曲内容"
+            "保留，可作为未保存改动放弃）；自定义样式预设库与软件布局库保留，"
+            "最近打开的项目列表保持不变。",
+            yes_text="恢复默认",
+            no_text="取消",
+            default_cancel=True,
+        ):
+            return
+        # 待落盘的防抖先停掉：重置过程分多步，中途触发保存会把半新半旧的
+        # 状态写盘；收尾的 _save_persisted_state 统一补一次完整投影。
+        self._persisted_state_save_timer.stop()
+        self._persisted_state_dirty = False
+        self._splitter_save_timer.stop()
+        current = self._load_subtitle_settings()
+        preserved = {
+            key: value
+            for key, value in current.items()
+            # 预设库是多实例共享的内容库，与最近打开列表一样不随偏好重置走。
+            if key in {_RECENT_PROJECTS_SETTINGS_KEY, "style_presets"}
+        }
+        try:
+            self._settings_store.save(preserved)
+        except Exception:
+            logging.getLogger(__name__).warning(
+                "清空字幕渲染模块设置失败", exc_info=True
+            )
+            fluent_warning(
+                self, "恢复默认偏好", "写入设置文件失败，本次未能恢复默认。"
+            )
+            return
+        # 与启动装载走同一入口：空配置 → 纯出厂值，今后新增的偏好字段也自动
+        # 覆盖，不用在这里逐个枚举。
+        loaded = load_app_preferences(
+            {},
+            chorus_begin_default=DEFAULT_CHORUS_BEGIN_CHARS,
+            chorus_end_default=DEFAULT_CHORUS_END_CHARS,
+            font_catalog=get_n3_font_catalog(),
+        )
+        # 布局库连同其参考高度原样保留（库内像素字段按这份高度保存，拆开
+        # 会让后续合并错误重缩放）；其余样式习惯——包括 default_layout_by_
+        # row_count 记住的软件默认布局指向——取出厂值。
+        self._app_default_style = replace(
+            loaded.app_default_style,
+            layouts=deepcopy(self._app_default_style.layouts),
+            layout_reference_height=self._app_default_style.layout_reference_height,
+        )
+        # 工作区样式一并回默认（按当前画布高度重缩放，与启动装载同口径）：
+        # 面板上看到的通用样式（动画/走字/时间/配色/字体）就是出厂值。不改
+        # 它的话，收尾保存会经 merge_common_style_preferences 把旧习惯原样
+        # 写回记忆，重置形同虚设。逐曲内容不跟着走：标题条目（文字/时间
+        # 段）、角色方案、歌手覆盖与出厂布局隐藏标记保留在工程里。
+        project_seed = rescale_font_sizes(
+            rescale_layout_sizes(
+                deepcopy(self._app_default_style),
+                self._screen_settings.height,
+            ),
+            self._screen_settings.height,
+        )
+        self._style = replace(
+            project_seed,
+            title_overlays=deepcopy(self._style.title_overlays),
+            custom_style_schemes=deepcopy(self._style.custom_style_schemes),
+            singer_style_overrides=deepcopy(self._style.singer_style_overrides),
+            hidden_builtin_layout_ids=deepcopy(self._style.hidden_builtin_layout_ids),
+        )
+        self._property_panel.set_style(self._style)
+        self._preview_panel.set_style(self._style)
+        self._lyrics_panel.set_style(self._style)
+        self._clamp_active_title_index()
+        self._refresh_preview_style_soon()
+        self._mark_project_dirty()
+        self._layout_assignment_preference = loaded.layout_assignment
+        self._subtitle_loading_defaults = loaded.subtitle_loading_defaults
+        self._auto_chorus_role = loaded.auto_chorus_role
+        self._auto_chorus_begin_chars = loaded.auto_chorus_begin_chars
+        self._auto_chorus_end_chars = loaded.auto_chorus_end_chars
+        self._auto_chorus_overwrite = loaded.auto_chorus_overwrite
+        self._auto_chorus_auto_apply = loaded.auto_chorus_auto_apply
+        # 当前配色方案选择也回「全局」：与工程装载同路径推给面板再读回，
+        # 面板不接受的键由它自己钳回合法值。
+        self._selected_scheme_key = loaded.selected_scheme_key
+        if hasattr(self, "_property_panel"):
+            self._property_panel.set_current_scheme_key(self._selected_scheme_key)
+            self._selected_scheme_key = self._property_panel.current_scheme_key()
+        self._preview_splitter_ratio = loaded.preview_splitter_ratio
+        self._auto_save_enabled = loaded.auto_save_enabled
+        self._auto_save_interval_minutes = loaded.auto_save_interval_minutes
+        self._project_backup_count = loaded.project_backup_count
+        self._apply_auto_save_timer_config()
+        remember_bitmap_settings({})
+        self._local_output_preferences = {}
+        self._export_dir_mode = EXPORT_DIR_SOURCE_VIDEO
+        self._export_custom_dir = ""
+        self._export_name_template = DEFAULT_EXPORT_NAME_TEMPLATE
+        self._reset_output_widgets_to_factory()
+        self._save_persisted_state()
+        InfoBar.success(
+            title="已恢复默认偏好",
+            content="记忆偏好与当前工程样式已回到出厂默认；标题文字等逐曲内容保留。",
+            parent=self,
+            position=InfoBarPosition.BOTTOM_RIGHT,
+            duration=2500,
+        )
+
+    def _reset_output_widgets_to_factory(self) -> None:
+        """把输出相关控件拨回与「空配置首次启动」一致的出厂值。
+
+        信号一律阻断：编码器 / 编码 / 质量等控件在线上会把改动当成用户编辑
+        （记偏好 + 标脏当前工程），重置偏好不应该弄脏工程。
+        """
+        controls = (
+            self._export_encoder_combo,
+            self._export_codec_combo,
+            self._export_preset_combo,
+            self._export_crf_spin,
+            self._export_render_workers_combo,
+            self._export_format_combo,
+        )
+        blocked = [control.blockSignals(True) for control in controls]
+        try:
+            self._export_encoder_combo.setCurrentIndex(
+                max(self._export_encoder_combo.findData(ENCODER_CPU), 0)
+            )
+            self._export_codec_combo.setCurrentIndex(
+                max(self._export_codec_combo.findData(CODEC_H264), 0)
+            )
+            preset_index = self._export_preset_combo.findData("medium")
+            self._export_preset_combo.setCurrentIndex(max(preset_index, 0))
+            self._export_crf_spin.setValue(18)
+            self._export_render_workers_combo.setCurrentIndex(
+                max(self._export_render_workers_combo.findData(0), 0)
+            )
+            format_index = self._export_format_combo.findData(OUTPUT_FORMAT_MP4)
+            if format_index >= 0:
+                self._export_format_combo.setCurrentIndex(format_index)
+        finally:
+            for control, was_blocked in zip(controls, blocked):
+                control.blockSignals(was_blocked)
+        self._update_export_preset_enabled()
+        self._refresh_export_format_label()
+        self._sync_export_directory()
+        quality = normalize_preview_quality(DEFAULT_PREVIEW_QUALITY)
+        self._transport_bar.set_preview_quality(quality)
+        self._preview_panel.set_preview_quality(quality)
+        # GPU 两个开关的出厂值与 _apply_output_settings 读空配置的分支一致；
+        # 静默置位 + 直接下发给面板，同样不走用户点击的 apply 路径。
+        gpu_preview_factory = gpu_preview_enabled()
+        gpu_export_factory = sys.platform == "win32"
+        blocked_preview = self._gpu_preview_check.blockSignals(True)
+        try:
+            self._gpu_preview_check.setChecked(gpu_preview_factory)
+        finally:
+            self._gpu_preview_check.blockSignals(blocked_preview)
+        blocked_export = self._gpu_export_check.blockSignals(True)
+        try:
+            self._gpu_export_check.setChecked(gpu_export_factory)
+        finally:
+            self._gpu_export_check.blockSignals(blocked_export)
+        self._preview_panel.set_gpu_preview_enabled(gpu_preview_factory)
+        ratio = DEFAULT_PREVIEW_SPLITTER_RATIO
+        self._preview_splitter.setSizes(
+            [round(ratio * 10_000), round((1.0 - ratio) * 10_000)]
+        )
 
     def _load_persisted_state(self) -> None:
         raw_settings = self._load_subtitle_settings()
