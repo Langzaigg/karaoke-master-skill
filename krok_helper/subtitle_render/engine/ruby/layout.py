@@ -23,6 +23,7 @@ from krok_helper.subtitle_render.engine.ruby.style import (
 )
 from krok_helper.subtitle_render.engine.ruby.timing import _ruby_utopia_visual_units
 from krok_helper.subtitle_render.engine.text import (
+    char_glyph_ink_box,
     char_layout_width,
     char_path_left_offset,
     letter_spacing,
@@ -36,7 +37,7 @@ from krok_helper.subtitle_render.domain.timing import RubyAnnotation, TimingLine
 
 _RUBY_MEASURE_CACHE: dict[tuple, tuple[QFont, Style]] = {}
 _RUBY_MEASURE_CACHE_MAX = 64
-_RUBY_UNIT_LAYOUT_CACHE: dict[tuple, list[tuple[str, float, float]]] = {}
+_RUBY_UNIT_LAYOUT_CACHE: dict[tuple, list[tuple[str, float, float, float, float]]] = {}
 _RUBY_UNIT_LAYOUT_CACHE_MAX = 4096
 
 
@@ -72,6 +73,7 @@ def ruby_layout_gap(
     base_text: str | None,
     reading: str,
 ) -> float:
+    """Base inter-unit gap before per-pair stroke clearance floors."""
     if unit_count <= 1:
         return 0.0
     interval = float(ruby_interval_px(style))
@@ -84,6 +86,52 @@ def ruby_layout_gap(
     return max(gap, interval)
 
 
+def ruby_pair_gap_floors(
+    unit_layouts: list[tuple[str, float, float, float, float]],
+    style: Style | None,
+) -> list[float]:
+    """相邻注音单元的最小净空下限，保证两层描边不互相叠压。
+
+    N3 的 advance 契约只预留第一层描边；当二重描边宽于一重、且相邻单元
+    几乎没有 side bearing（英数窄字母）时，描边外环会压到邻字。此处按
+    「两层描边需要量 − 该对单元在 gap=0 时的墨迹间距」逐对补足缺口，
+    墨迹间距按单元盒内墨迹边（控制点多边形口径）计算。注音字间距为负
+    表示用户主动压紧（允许叠压），净空整体停用；假名对通常有足够的
+    side bearing，下限为 0，布局不受影响。CPU/D2D 两侧同口径
+    （d2d_backend_configure.cpp 的 ruby 排布段）。
+    """
+    pair_count = max(len(unit_layouts) - 1, 0)
+    if pair_count == 0 or style is None:
+        return [0.0] * pair_count
+    if ruby_interval_px(style) < 0:
+        return [0.0] * pair_count
+    needed = float(ruby_stroke_width(style) + ruby_stroke2_width(style))
+    floors: list[float] = []
+    for (_unit, width, _offset, _ink_left, ink_right), (
+        _next_unit,
+        _next_width,
+        _next_offset,
+        next_ink_left,
+        _next_ink_right,
+    ) in zip(unit_layouts, unit_layouts[1:]):
+        existing = max(width - ink_right, 0.0) + max(next_ink_left, 0.0)
+        floors.append(max(needed - existing, 0.0))
+    return floors
+
+
+def _ruby_pair_gaps(
+    unit_layouts: list[tuple[str, float, float, float, float]],
+    style: Style | None,
+    base_gap: float,
+) -> list[float]:
+    # floor <= 0 时净空不参与，base_gap（含负值 interval）原样生效；
+    # 只有正净空才作为下限，而正净空只可能出现在 interval >= 0 时。
+    return [
+        base_gap if floor <= 0.0 else max(base_gap, floor)
+        for floor in ruby_pair_gap_floors(unit_layouts, style)
+    ]
+
+
 def ruby_layout_width(
     reading: str,
     ruby_metrics: QFontMetrics,
@@ -93,10 +141,13 @@ def ruby_layout_width(
 ) -> float:
     units = _ruby_utopia_visual_units(reading)
     unit_layouts = ruby_unit_layouts(units, ruby_metrics, style)
-    natural = sum(width for _unit, width, _offset in unit_layouts)
+    natural = sum(
+        width for _unit, width, _offset, _ink_left, _ink_right in unit_layouts
+    )
     interval = float(ruby_interval_px(style))
     if target_width is None:
-        return natural + interval * max(len(units) - 1, 0)
+        gaps = _ruby_pair_gaps(unit_layouts, style, interval)
+        return natural + sum(gaps)
     target = float(max(target_width, 0))
     if len(units) <= 1:
         return max(target, natural)
@@ -108,7 +159,8 @@ def ruby_layout_width(
         base_text,
         reading,
     )
-    return max(target, natural + gap * (len(units) - 1))
+    gaps = _ruby_pair_gaps(unit_layouts, style, gap)
+    return max(target, natural + sum(gaps))
 
 
 def ruby_layout_left_offset(
@@ -124,7 +176,9 @@ def ruby_layout_left_offset(
     if not units:
         return 0.0
     unit_layouts = ruby_unit_layouts(units, ruby_metrics, style)
-    natural = sum(width for _unit, width, _offset in unit_layouts)
+    natural = sum(
+        width for _unit, width, _offset, _ink_left, _ink_right in unit_layouts
+    )
     target = float(target_width)
     if len(units) <= 1:
         content_width = natural
@@ -137,7 +191,7 @@ def ruby_layout_left_offset(
             base_text,
             reading,
         )
-        content_width = natural + gap * (len(units) - 1)
+        content_width = natural + sum(_ruby_pair_gaps(unit_layouts, style, gap))
     return min((target - content_width) / 2.0, 0.0)
 
 
@@ -196,19 +250,24 @@ def ruby_layout_origins(
     unit_layouts = ruby_unit_layouts(units, ruby_metrics, style)
     if not units:
         return []
-    natural = sum(width for _unit, width, _offset in unit_layouts)
+    natural = sum(
+        width for _unit, width, _offset, _ink_left, _ink_right in unit_layouts
+    )
     interval = float(ruby_interval_px(style))
     if target_width is None:
+        gaps = _ruby_pair_gaps(unit_layouts, style, interval)
         cursor = float(x)
         result: list[tuple[str, float, float, float]] = []
-        for unit, width, offset in unit_layouts:
+        for index, (unit, width, offset, _ink_left, _ink_right) in enumerate(
+            unit_layouts
+        ):
             result.append((unit, cursor, width, offset))
-            cursor += width + interval
+            cursor += width + (gaps[index] if index < len(gaps) else 0.0)
         return result
 
     target = float(target_width)
     if len(units) <= 1:
-        unit, width, offset = unit_layouts[0]
+        unit, width, offset, _ink_left, _ink_right = unit_layouts[0]
         unit_left = float(x) + float(truncate_div(int(target - width), 2))
         return [(unit, unit_left, width, offset)]
 
@@ -222,16 +281,19 @@ def ruby_layout_origins(
         base_text,
         reading,
     )
-    content_width = natural + gap * (len(units) - 1)
+    gaps = _ruby_pair_gaps(unit_layouts, style, gap)
+    content_width = natural + sum(gaps)
     if alignment == "center":
         cursor = float(x) + float(truncate_div(int(target - content_width), 2))
     else:
         cursor = float(x) + (target - content_width) / 2.0
     result = []
-    for unit, width, offset in unit_layouts:
+    for index, (unit, width, offset, _ink_left, _ink_right) in enumerate(
+        unit_layouts
+    ):
         origin = float(int(cursor)) if alignment == "equal_space" else cursor
         result.append((unit, origin, width, offset))
-        cursor += width + gap
+        cursor += width + (gaps[index] if index < len(gaps) else 0.0)
     return result
 
 
@@ -306,10 +368,22 @@ def ruby_unit_layouts(
     units: list[str],
     ruby_metrics: QFontMetrics,
     style: Style | None,
-) -> list[tuple[str, float, float]]:
+) -> list[tuple[str, float, float, float, float]]:
+    """Return per-unit ``(unit, box_width, pen_offset, ink_left, ink_right)``.
+
+    ink_left/ink_right 是墨迹盒（控制点多边形口径）在单元盒内的左右边，
+    供 :func:`ruby_pair_gap_floors` 计算相邻描边净空；空墨迹单元退化为
+    pen_offset 处的零宽墨迹。
+    """
     if style is None:
         return [
-            (unit, float(ruby_metrics.horizontalAdvance(unit)), 0.0)
+            (
+                unit,
+                float(ruby_metrics.horizontalAdvance(unit)),
+                0.0,
+                0.0,
+                float(ruby_metrics.horizontalAdvance(unit)),
+            )
             for unit in units
         ]
     measure_key = _ruby_measure_key(style)
@@ -329,15 +403,21 @@ def ruby_unit_layouts(
     for unit in units:
         unit_font = build_ruby_font_for_text(style, unit)
         unit_metrics = QFontMetrics(unit_font)
-        result.append((
-            unit,
-            float(char_layout_width(
-                unit, unit_font, unit_metrics, unit_metrics, None, measure_style,
-            )),
-            char_path_left_offset(
-                unit, unit_font, unit_metrics, unit_metrics, None, measure_style,
-            ),
+        width = float(char_layout_width(
+            unit, unit_font, unit_metrics, unit_metrics, None, measure_style,
         ))
+        offset = float(char_path_left_offset(
+            unit, unit_font, unit_metrics, unit_metrics, None, measure_style,
+        ))
+        ink_box = char_glyph_ink_box(
+            unit, unit_font, unit_metrics, unit_metrics, None
+        )
+        if ink_box is None:
+            ink_left = ink_right = offset
+        else:
+            ink_left = offset + float(ink_box[0])
+            ink_right = offset + float(ink_box[2])
+        result.append((unit, width, offset, ink_left, ink_right))
     if len(_RUBY_UNIT_LAYOUT_CACHE) >= _RUBY_UNIT_LAYOUT_CACHE_MAX:
         _RUBY_UNIT_LAYOUT_CACHE.clear()
     _RUBY_UNIT_LAYOUT_CACHE[layout_key] = result
@@ -500,5 +580,6 @@ __all__ = [
     "ruby_layout_origins",
     "ruby_layout_units",
     "ruby_layout_width",
+    "ruby_pair_gap_floors",
     "ruby_unit_layouts",
 ]

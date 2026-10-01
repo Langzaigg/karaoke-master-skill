@@ -13,6 +13,7 @@ from krok_helper.subtitle_render.engine.ruby.layout import (
     ruby_layout_origins,
     ruby_layout_units,
     ruby_layout_width,
+    ruby_pair_gap_floors,
     ruby_unit_layouts,
 )
 from krok_helper.subtitle_render.engine.ruby.selection import (
@@ -83,6 +84,7 @@ __all__ = [
     "ruby_layout_units",
     "ruby_layout_width",
     "ruby_main_text_slot_times",
+    "ruby_pair_gap_floors",
     "ruby_main_uses_base_timing",
     "ruby_owns_line",
     "ruby_scale",

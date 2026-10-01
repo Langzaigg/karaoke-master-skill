@@ -184,7 +184,9 @@ class LayoutPropertyPageBuilder:
         host._ruby_interval_spin.setToolTip(
             "注音字符之间的最小间距（N3 ルビ間隔），可为负让注音字符收紧。\n"
             "注意这是「下限」：注音比正文窄、均等分布摊出的间距大于此值时，"
-            "调整它看不到变化；对超出正文宽度的长注音效果最明显。"
+            "调整它看不到变化；对超出正文宽度的长注音效果最明显。\n"
+            "非负时会自动保证相邻注音的描边（含二重描边）不互相叠压；\n"
+            "设为负值表示主动压紧，不再自动避让（可能出现叠压）。"
         )
         host._ruby_interval_spin.valueChanged.connect(
             lambda value: host._update_layout_field(ruby_interval_px=value)

@@ -917,7 +917,11 @@ class Style:
     ruby_gap_px: int = 0
     """NicokaraMaker3 ``LyricsAndRubyInterval`` default: 0 px."""
     ruby_interval_px: int = 0
-    """NicokaraMaker3 ``RubyInterval``：注音字符间最小间距，可为负。"""
+    """NicokaraMaker3 ``RubyInterval``：注音字符间最小间距，可为负。
+
+    非负时布局逐对保证相邻注音的描边（含二重描边）不互相叠压；
+    为负时视为用户主动压紧，不再做描边避让（允许叠压）。
+    """
     ruby_alignment: RubyAlignment = "auto"
     """注音相对正文范围的排布（N3 ``RubyAlignment``）：``auto`` = 正文或注音全为
     英数时居中、否则均等分布；``center`` = 整组居中；``equal_space`` = 均等分布。"""

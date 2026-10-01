@@ -5507,6 +5507,158 @@ def test_ruby_unit_layouts_latin_units_do_not_overlap_when_drawn(qapp):
         prev_right = float(ink.right()) + stroke / 2.0
 
 
+def test_ruby_latin_units_keep_stroke2_clearance_when_drawn(qapp):
+    """逐对最小净空：两层描边（含二重）外环不得互相叠压（2026-10 修复）。
+
+    N3 的 advance 契约只预留第一层描边，英数窄字母几乎没有 side bearing，
+    二重描边宽于一重时外环会压到邻字。净空按「两层描边需要量 − 该对
+    单元在 gap=0 时的墨迹间距」逐对补足；墨迹与净空同为控制点多边形
+    口径，可直接用绘制路径的 boundingRect 验证。
+    """
+    style = Style(
+        font_family="MS Gothic",
+        font_family_latin="Comic Sans MS",
+        font_size_px=64,
+        ruby_interval_px=0,
+    )
+    reading = "LOVE"
+    units = ruby_timing._ruby_utopia_visual_units(reading)
+    reading_font = ruby_style.build_ruby_font_for_text(style, reading)
+    if QFontMetrics(reading_font).horizontalAdvance("O") == QFontMetrics(
+        ruby_style.build_ruby_font(style)
+    ).horizontalAdvance("O"):
+        pytest.skip("host resolves both families to the same font")
+
+    layout_units = ruby_layout.ruby_layout_units(
+        units, QFontMetrics(reading_font), 0, 260, style=style, base_text="愛"
+    )
+
+    needed = (
+        ruby_style.ruby_stroke_width(style)
+        + ruby_style.ruby_stroke2_width(style)
+    )
+    prev_right = None
+    for unit, unit_x, _width in layout_units:
+        path = QPainterPath()
+        path.addText(
+            float(unit_x), 0.0, ruby_style.build_ruby_font_for_text(style, unit), unit
+        )
+        ink = path.boundingRect()
+        assert not ink.isEmpty()
+        if prev_right is not None:
+            # 0.05px 容差吸收 hinting 随落笔亚像素位置的轮廓抖动；
+            # 盒内口径（ruby_pair_gap_floors）本身是精确保证。
+            assert float(ink.left()) - prev_right >= needed - 0.05
+        prev_right = float(ink.right())
+
+
+def test_ruby_pair_gap_floors_math(qapp):
+    """净空 = 两层描边需要量 − 该对单元 gap=0 时的墨迹间距。"""
+    style = Style(
+        ruby_stroke_width_px=10,
+        ruby_stroke2_enabled=True,
+        ruby_stroke2_width_px=3,
+    )
+    fakes = [
+        ("a", 20.0, 0.0, 5.0, 15.0),
+        ("b", 20.0, 0.0, 5.0, 15.0),
+        ("c", 30.0, 0.0, 2.0, 26.0),
+    ]
+    # needed = 13；ab 对余量 = (20-15)+5 = 10 → 下限 3；
+    # bc 对余量 = (20-15)+2 = 7 → 下限 6。
+    assert ruby_layout.ruby_pair_gap_floors(fakes, style) == [3.0, 6.0]
+
+    # 二重描边关闭时需要量降到一重：ab 对描边预留恰好覆盖 → 0；
+    # bc 对的右单元墨迹距盒左缘仅 2px（< 预留的一半描边），一重仍缺 3。
+    no_edge2 = replace(style, ruby_stroke2_enabled=False)
+    assert ruby_layout.ruby_pair_gap_floors(fakes, no_edge2) == [0.0, 3.0]
+
+    # 余量充足（假名典型形态）→ 全 0，布局不受影响。
+    roomy = [("あ", 40.0, 0.0, 10.0, 30.0), ("い", 40.0, 0.0, 10.0, 30.0)]
+    assert ruby_layout.ruby_pair_gap_floors(roomy, style) == [0.0]
+
+
+def test_ruby_pair_gap_floors_negative_interval_disables_guard(qapp):
+    """注音字间距为负 = 用户主动压紧，净空整体停用。"""
+    style = Style(
+        ruby_stroke_width_px=10,
+        ruby_stroke2_enabled=True,
+        ruby_stroke2_width_px=3,
+        ruby_interval_px=-1,
+    )
+    fakes = [
+        ("a", 20.0, 0.0, 5.0, 15.0),
+        ("b", 20.0, 0.0, 5.0, 15.0),
+    ]
+    assert ruby_layout.ruby_pair_gap_floors(fakes, style) == [0.0]
+    assert ruby_layout.ruby_pair_gap_floors(fakes, None) == [0.0]
+
+
+def test_ruby_layout_origins_apply_pair_gap_floors(qapp, monkeypatch):
+    """净空必须同时进入原点、整宽与左偏移，居中才不会与单元位置脱节。"""
+    style = Style(
+        ruby_alignment="center",
+        ruby_interval_px=0,
+        ruby_stroke_width_px=10,
+        ruby_stroke2_enabled=True,
+        ruby_stroke2_width_px=3,
+    )
+    fakes = [
+        ("L", 20.0, 0.0, 5.0, 15.0),
+        ("V", 20.0, 0.0, 5.0, 15.0),
+    ]
+    monkeypatch.setattr(
+        ruby_layout,
+        "ruby_unit_layouts",
+        lambda units, _metrics, _style: [fakes[i] for i in range(len(units))],
+    )
+    metrics = QFontMetrics(_build_ruby_font(style))
+
+    origins = ruby_layout.ruby_layout_origins(
+        ["L", "V"], metrics, 0, 100, style=style, base_text="愛"
+    )
+    # natural = 40，净空 3 → content = 43，起点 truncate_div(100-43, 2) = 28。
+    assert [origin for _unit, origin, _w, _o in origins] == [28.0, 51.0]
+    assert ruby_layout.ruby_layout_width("LV", metrics, None, style, "愛") == 43.0
+
+    # 负 interval 原样生效：gap = -5 → content = 35，起点 32。
+    squeezing = replace(style, ruby_interval_px=-5)
+    origins = ruby_layout.ruby_layout_origins(
+        ["L", "V"], metrics, 0, 100, style=squeezing, base_text="愛"
+    )
+    assert [origin for _unit, origin, _w, _o in origins] == [32.0, 47.0]
+    assert ruby_layout.ruby_layout_width("LV", metrics, None, squeezing, "愛") == 35.0
+
+
+def test_ruby_kana_units_never_closer_than_legacy(qapp):
+    """假名对只可能更宽，不会比旧间距更窄（净空不为负）。"""
+    style = Style(font_family="MS Gothic", font_size_px=64, ruby_interval_px=0)
+    reading = "宣伝"
+    units = ruby_timing._ruby_utopia_visual_units(reading)
+    metrics = QFontMetrics(ruby_style.build_ruby_font_for_text(style, reading))
+
+    layout_units = ruby_layout.ruby_layout_units(
+        units, metrics, 0, 220, style=style, base_text="愛"
+    )
+    unit_layouts = ruby_layout.ruby_unit_layouts(units, metrics, style)
+
+    needed = (
+        ruby_style.ruby_stroke_width(style)
+        + ruby_style.ruby_stroke2_width(style)
+    )
+    for index in range(len(layout_units) - 1):
+        _unit, prev_x, _w = layout_units[index]
+        _next, next_x, _nw = layout_units[index + 1]
+        _u, _pw, _po, prev_ink_left, prev_ink_right = unit_layouts[index]
+        _nu, _nw2, _no, next_ink_left, _nir = unit_layouts[index + 1]
+        ink_gap = (
+            (next_x - prev_x)
+            + (next_ink_left - prev_ink_right)
+        )
+        # 旧契约保证的最小间距是「净宽 + 一层描边」，新净空只会加不会减。
+        assert ink_gap >= needed - 1e-6
+
+
 def test_build_ruby_font_for_text_matches_gpu_latin_fallback_chain(qapp, monkeypatch):
     monkeypatch.setattr(ruby_style, "resolve_qt_font_family", lambda name: name)
 
@@ -9776,11 +9928,20 @@ def test_negative_ruby_gap_moves_ruby_down_into_main_text(qapp):
 
 
 def test_ruby_interval_enforces_min_gap_between_units(qapp):
+    # 描边净空恒 0（needed=0），本测试只关 interval 的下限语义。
     tight_style = Style(
-        ruby_font_size_px=36, ruby_alignment="equal_space", ruby_interval_px=0
+        ruby_font_size_px=36,
+        ruby_alignment="equal_space",
+        ruby_interval_px=0,
+        ruby_stroke_width_px=0,
+        ruby_stroke2_enabled=False,
     )
     spaced_style = Style(
-        ruby_font_size_px=36, ruby_alignment="equal_space", ruby_interval_px=12
+        ruby_font_size_px=36,
+        ruby_alignment="equal_space",
+        ruby_interval_px=12,
+        ruby_stroke_width_px=0,
+        ruby_stroke2_enabled=False,
     )
     metrics = QFontMetrics(_build_ruby_font(tight_style))
     units = ["か", "な", "た"]
@@ -10984,7 +11145,9 @@ def test_n3_adjacent_ruby_boxes_only_shift_the_colliding_third_group(
         ruby_layout,
         "ruby_unit_layouts",
         lambda units, _metrics, _style: [
-            (unit, 52.0, 0.0) for unit in units
+            # 墨迹取盒中心退化点：这组回归只关心注音组间避让，逐对描边
+            # 净空须为 0，避免污染 N3 工程推导出的期望数字。
+            (unit, 52.0, 0.0, 26.0, 26.0) for unit in units
         ],
     )
 
@@ -11005,7 +11168,7 @@ def test_ruby_collision_box_does_not_shrink_the_paint_clip(qapp, monkeypatch):
         ruby_layout,
         "ruby_unit_layouts",
         lambda units, _metrics, _style: [
-            (unit, 52.0, 0.0) for unit in units
+            (unit, 52.0, 0.0, 26.0, 26.0) for unit in units
         ],
     )
     layout = subtitle_painter._RubyLayout(
@@ -11068,7 +11231,10 @@ def test_inline_role_line_applies_ruby_collision_gaps(qapp):
         style=second.style,
         base_text=second.ruby.kanji,
     )
-    assert second_left - first_right >= _ruby_interval_px(style) - 1e-6
+    # N3 整数量化放置（int() 向零截断）在游标跨零时模型与绝对坐标可差
+    # 1px；注音组间净空按「不低于 interval − 1px」验收，组内模型级精确
+    # 保证由 test_ruby_char_gaps 系列 golden 承担。
+    assert second_left - first_right >= _ruby_interval_px(style) - 1.000001
 
 
 def test_effective_ruby_clamps_but_never_stretches_wipe_clock(qapp):

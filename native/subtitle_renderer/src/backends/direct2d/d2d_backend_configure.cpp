@@ -1644,6 +1644,10 @@ void Direct2DGpuBackend::configure(const RenderScene &scene) {
                 D2D1_RECT_F bounds{};
                 float layoutWidth = 0.0f;
                 float pathOffset = 0.0f;
+                // 墨迹盒在单元盒内的左右边（输出像素），供相邻单元的
+                // 描边净空下限使用；空墨迹单元退化为 pathOffset 处。
+                float inkLeft = 0.0f;
+                float inkRight = 0.0f;
             };
             std::vector<RubyGlyph> rubyGlyphs;
             rubyGlyphs.reserve(sourceRuby.units.size());
@@ -1751,6 +1755,10 @@ void Direct2DGpuBackend::configure(const RenderScene &scene) {
                     glyph.pathOffset = (-referenceRubyBounds.left
                         + static_cast<float>(geometryLeft)
                         + static_cast<float>(rubyEdgeSize / 2)) * layoutScale;
+                    glyph.inkLeft = glyph.pathOffset
+                        + referenceRubyBounds.left * layoutScale;
+                    glyph.inkRight = glyph.pathOffset
+                        + referenceRubyBounds.right * layoutScale;
                 } else if (sourceUnit.text == L" ") {
                     glyph.layoutWidth = static_cast<float>(
                         measureUnit * std::clamp(rubyStyle.spaceWidthPercent, 10, 100) / 100
@@ -1789,18 +1797,56 @@ void Direct2DGpuBackend::configure(const RenderScene &scene) {
                     isAsciiAlnumText(sourceRuby.baseText)
                     || isAsciiAlnumText(sourceRuby.reading)
                 ));
-            float gap = rubyStyle.rubyInterval;
+            float baseGap = rubyStyle.rubyInterval;
             if (!centered && rubyGlyphs.size() > 1) {
                 const float slots = targetWidth <= naturalWidth
                     ? static_cast<float>(rubyGlyphs.size() - 1)
                     : static_cast<float>(rubyGlyphs.size() + 1);
-                gap = std::max(
+                baseGap = std::max(
                     (targetWidth - naturalWidth) / std::max(slots, 1.0f),
                     rubyStyle.rubyInterval
                 );
             }
-            const float contentWidth = naturalWidth
-                + gap * static_cast<float>(rubyGlyphs.size() - 1);
+            std::vector<float> pairGaps(
+                rubyGlyphs.empty() ? 0 : rubyGlyphs.size() - 1, baseGap
+            );
+            // Pair clearance floor (mirrors engine/ruby/layout.py
+            // ruby_pair_gap_floors): with a non-negative RubyInterval each
+            // adjacent pair keeps enough room for both stroke layers so fat
+            // outlines cannot cross on bearing-less glyphs (narrow Latin
+            // letters).  A negative interval means deliberate manual
+            // squeezing and disables the floor entirely.
+            if (rubyStyle.rubyInterval >= 0.0f && rubyGlyphs.size() > 1) {
+                const float outlineNeed =
+                    std::max(rubyStyle.rubyStrokeWidth, 0.0f)
+                    + std::max(rubyStyle.rubyStroke2Width, 0.0f);
+                for (std::size_t pairIndex = 0;
+                     pairIndex + 1 < rubyGlyphs.size(); ++pairIndex) {
+                    // pairIndex addresses the logical pair (k, k+1); in RTL
+                    // the visually-left glyph is the higher logical index.
+                    const std::size_t leftIndex = style.rightToLeft
+                        ? pairIndex + 1
+                        : pairIndex;
+                    const std::size_t rightIndex = style.rightToLeft
+                        ? pairIndex
+                        : pairIndex + 1;
+                    const RubyGlyph &leftGlyph = rubyGlyphs[leftIndex];
+                    const RubyGlyph &rightGlyph = rubyGlyphs[rightIndex];
+                    const float existing =
+                        std::max(
+                            leftGlyph.layoutWidth - leftGlyph.inkRight, 0.0f
+                        )
+                        + std::max(rightGlyph.inkLeft, 0.0f);
+                    pairGaps[pairIndex] = std::max(
+                        pairGaps[pairIndex], outlineNeed - existing
+                    );
+                }
+            }
+            float gapsTotal = 0.0f;
+            for (float pairGap : pairGaps) {
+                gapsTotal += pairGap;
+            }
+            const float contentWidth = naturalWidth + gapsTotal;
             float rubyCursor = targetLeft + (targetWidth - contentWidth) * 0.5f;
             if (centered || rubyGlyphs.size() == 1) {
                 rubyCursor = targetLeft
@@ -1822,7 +1868,12 @@ void Direct2DGpuBackend::configure(const RenderScene &scene) {
                     )) * layoutScale;
                 layoutCursor += rubyGlyphs[logicalIndex].layoutWidth;
                 if (visualIndex + 1 < rubyGlyphs.size()) {
-                    layoutCursor += gap;
+                    // Gap between this visual unit and the next one maps to
+                    // the logical pair (min(logicalIndex, neighbour), +1).
+                    const std::size_t pairIndex = style.rightToLeft
+                        ? logicalIndex - 1
+                        : logicalIndex;
+                    layoutCursor += pairGaps[pairIndex];
                 }
             }
 
