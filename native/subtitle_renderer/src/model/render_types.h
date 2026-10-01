@@ -385,6 +385,12 @@ struct TextStyle {
     PaintStyle rubyAfterDecorPaint;
     float rubyStrokeWidth = 0.0f;
     float rubyStroke2Width = 0.0f;
+    // Script-effective ruby strokes for alnum readings (ruby-latin overrides
+    // with the ruby Japanese-track fallback already applied); consumers pick
+    // between the two pairs by the reading's script, mirroring the CPU
+    // painter's ruby_script_stroke_style.
+    float rubyLatinStrokeWidth = 0.0f;
+    float rubyLatinStroke2Width = 0.0f;
     std::string rubyDecorationKind = "none";
     float rubyGlowBeforeRadius = 0.0f;
     float rubyGlowAfterRadius = 0.0f;

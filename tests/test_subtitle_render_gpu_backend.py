@@ -4368,6 +4368,75 @@ def test_gpu_g3_ruby_has_independent_geometry_and_wipe(monkeypatch) -> None:
 
 
 @pytest.mark.skipif(os.name != "nt", reason="Direct2D GPU backend is Windows-only")
+def test_gpu_ruby_latin_strokes_override_for_alnum_readings(monkeypatch) -> None:
+    """英数注音的一重/二重描边必须走 ruby-latin 轨（CPU 同口径）。
+
+    修复前协议/投影链没有 ruby-latin 描边字段：GPU 英数注音永远用日文轨
+    描边，用户设置的注音-英数描边在 GPU 预览/导出里不生效。修复后仅英数
+    读音消费这些字段，假名读音不受影响。
+    """
+    monkeypatch.setenv("QT_QPA_PLATFORM", "offscreen")
+
+    def alnum_track() -> TimingTrack:
+        return TimingTrack(
+            lines=[TimingLine(chars=[TimingChar("愛", 0)], end_ms=2_000)],
+            rubies=[
+                RubyAnnotation("愛", "LOVE", pos_start_ms=0, pos_end_ms=2_000)
+            ],
+        )
+
+    def kana_track() -> TimingTrack:
+        return TimingTrack(
+            lines=[TimingLine(chars=[TimingChar("漢", 0)], end_ms=2_000)],
+            rubies=[
+                RubyAnnotation("漢", "かんじ", pos_start_ms=0, pos_end_ms=2_000)
+            ],
+        )
+
+    def ruby_style(latin_stroke: int, latin_stroke2: int) -> Style:
+        return _g1_style(
+            font_family="Meiryo",
+            font_family_latin="Meiryo",
+            font_size_px=48,
+            dual_line_layout=False,
+            stroke_width_px=0,
+            stroke2_enabled=False,
+            ruby_stroke_width_px=4,
+            ruby_stroke2_enabled=True,
+            ruby_stroke2_width_px=2,
+            ruby_latin_stroke_width_px=latin_stroke,
+            ruby_latin_stroke2_width_px=latin_stroke2,
+        )
+
+    def opaque_pixels(payload: bytes) -> int:
+        return sum(
+            payload[index + 3] > 0 for index in range(0, len(payload), 4)
+        )
+
+    thin = ruby_style(2, 1)
+    thick = ruby_style(14, 10)
+
+    with NativeRendererProcess(_renderer_path(), response_timeout_s=15.0) as renderer:
+        _configured, thin_frames = _render_g1_frames(
+            renderer, thin, (1_999,), force_warp=True, track=alnum_track()
+        )
+        _configured, thick_frames = _render_g1_frames(
+            renderer, thick, (1_999,), force_warp=True, track=alnum_track()
+        )
+        _configured, kana_thin_frames = _render_g1_frames(
+            renderer, thin, (1_999,), force_warp=True, track=kana_track()
+        )
+        _configured, kana_thick_frames = _render_g1_frames(
+            renderer, thick, (1_999,), force_warp=True, track=kana_track()
+        )
+
+    # 英数读音：拉丁描边加粗必须有可见增量（修复前两组逐字节相同）。
+    assert opaque_pixels(thick_frames[0]) > opaque_pixels(thin_frames[0]) + 40
+    # 假名读音：拉丁轨字段不得泄漏进日文轨。
+    assert opaque_pixels(kana_thick_frames[0]) == opaque_pixels(kana_thin_frames[0])
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Direct2D GPU backend is Windows-only")
 def test_gpu_next_line_ruby_is_not_cached_at_previous_line_end(monkeypatch) -> None:
     monkeypatch.setenv("QT_QPA_PLATFORM", "offscreen")
     track = TimingTrack(

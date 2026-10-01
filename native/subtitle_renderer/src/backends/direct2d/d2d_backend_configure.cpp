@@ -1617,6 +1617,15 @@ void Direct2DGpuBackend::configure(const RenderScene &scene) {
                 sourceRuby.units.end(),
                 [](const RubyUnit &unit) { return isLatinText(unit.text); }
             );
+            // CPU 对齐（engine/ruby/style.py ruby_script_stroke_style）：英数
+            // 读音的描边（布局预留、几何、绘制、逐对净空）走 ruby-latin 轨；
+            // 投影已把未设/非正值解析为与日文轨同值，按读音脚本二选一即可。
+            const float rubyStrokeWidthFx = rubyIsLatin
+                ? rubyStyle.rubyLatinStrokeWidth
+                : rubyStyle.rubyStrokeWidth;
+            const float rubyStroke2WidthFx = rubyIsLatin
+                ? rubyStyle.rubyLatinStroke2Width
+                : rubyStyle.rubyStroke2Width;
             const auto selectedRubyFace = hasRubyStyle
                 ? resolveFace(
                     rubyStyle.rubyFontFamily.empty()
@@ -1653,7 +1662,7 @@ void Direct2DGpuBackend::configure(const RenderScene &scene) {
             rubyGlyphs.reserve(sourceRuby.units.size());
             float naturalWidth = 0.0f;
             float rubyBoxDescent = 0.0f;
-            const int rubyEdgeSize = referenceInt(rubyStyle.rubyStrokeWidth, 0);
+            const int rubyEdgeSize = referenceInt(rubyStrokeWidthFx, 0);
             const int rubyAnchorEdgeSize = rubyEdgeSize;
 
             for (const RubyUnit &sourceUnit : sourceRuby.units) {
@@ -1818,8 +1827,8 @@ void Direct2DGpuBackend::configure(const RenderScene &scene) {
             // squeezing and disables the floor entirely.
             if (rubyStyle.rubyInterval >= 0.0f && rubyGlyphs.size() > 1) {
                 const float outlineNeed =
-                    std::max(rubyStyle.rubyStrokeWidth, 0.0f)
-                    + std::max(rubyStyle.rubyStroke2Width, 0.0f);
+                    std::max(rubyStrokeWidthFx, 0.0f)
+                    + std::max(rubyStroke2WidthFx, 0.0f);
                 for (std::size_t pairIndex = 0;
                      pairIndex + 1 < rubyGlyphs.size(); ++pairIndex) {
                     // pairIndex addresses the logical pair (k, k+1); in RTL
@@ -1881,6 +1890,7 @@ void Direct2DGpuBackend::configure(const RenderScene &scene) {
             ruby.startMs = sourceRuby.startMs;
             ruby.endMs = sourceRuby.endMs;
             ruby.styleIndex = sourceRuby.styleIndex;
+            ruby.latin = rubyIsLatin;
             ruby.transitionCharIndex = sourceRuby.firstCharIndex;
             ruby.firstCharIndex = sourceRuby.firstCharIndex;
             ruby.lastCharIndex = sourceRuby.lastCharIndex;
@@ -1907,8 +1917,8 @@ void Direct2DGpuBackend::configure(const RenderScene &scene) {
             ruby.pivotY = ruby.baselineOffset
                 + static_cast<float>(rubyFillDescent) * layoutScale
                 - static_cast<float>(rubyFillSize) * layoutScale * 0.5f;
-            const int rubyDrawEdge = referenceInt(rubyStyle.rubyStrokeWidth, 0);
-            const int rubyDrawEdge2 = referenceInt(rubyStyle.rubyStroke2Width, 0);
+            const int rubyDrawEdge = referenceInt(rubyStrokeWidthFx, 0);
+            const int rubyDrawEdge2 = referenceInt(rubyStroke2WidthFx, 0);
             const float rubyDrawBottom = ruby.baselineOffset
                 + static_cast<float>(rubyFillDescent + rubyDrawEdge / 2) * layoutScale;
             const float rubyInset = static_cast<float>(
@@ -1952,15 +1962,15 @@ void Direct2DGpuBackend::configure(const RenderScene &scene) {
                         !impl_->dynamicDirectStrokeEnabled
                             ? cachedWidenedStroke(
                                 glyph.resource->strokeGeometries,
-                                glyph.geometry.Get(), rubyStyle.rubyStrokeWidth,
+                                glyph.geometry.Get(), rubyStrokeWidthFx,
                                 positionDx, positionDy,
                                 "ID2D1Factory::CreateTransformedGeometry(position ruby stroke)"
                             )
                             : nullptr
                     );
-                    const float stroke2Width = rubyStyle.rubyStroke2Width > 0.0f
-                        ? std::max(rubyStyle.rubyStrokeWidth, 0.0f)
-                            + rubyStyle.rubyStroke2Width
+                    const float stroke2Width = rubyStroke2WidthFx > 0.0f
+                        ? std::max(rubyStrokeWidthFx, 0.0f)
+                            + rubyStroke2WidthFx
                         : 0.0f;
                     ruby.stroke2Geometries.push_back(
                         !impl_->dynamicDirectStrokeEnabled
@@ -1972,11 +1982,11 @@ void Direct2DGpuBackend::configure(const RenderScene &scene) {
                             )
                             : nullptr
                     );
-                    if (rubyStyle.rubyStrokeWidth > 0.0f
+                    if (rubyStrokeWidthFx > 0.0f
                         && (paintNeedsBodyProtection(rubyStyle.rubyBeforeFillPaint)
                             || paintNeedsBodyProtection(rubyStyle.rubyAfterFillPaint))) {
                         auto &cache = glyph.resource->protectedGeometries;
-                        const float width = rubyStyle.rubyStrokeWidth;
+                        const float width = rubyStrokeWidthFx;
                         auto entry = cache.find(width);
                         if (entry == cache.end()) {
                             ++impl_->diagnostics.glyphStrokeCacheMisses;
@@ -2024,7 +2034,7 @@ void Direct2DGpuBackend::configure(const RenderScene &scene) {
                         );
                     const auto protectedEntry =
                         glyph.resource->protectedGeometries.find(
-                            rubyStyle.rubyStrokeWidth
+                            rubyStrokeWidthFx
                         );
                     if (protectedEntry
                         != glyph.resource->protectedGeometries.end()) {
@@ -2663,8 +2673,10 @@ void Direct2DGpuBackend::configure(const RenderScene &scene) {
                     appendCharTasks(
                         lineIndex, static_cast<int>(rubyIndex), charIndex,
                         ruby.chars[charIndex],
-                        rubyStyle.rubyStrokeWidth,
-                        rubyStyle.rubyStroke2Width
+                        ruby.latin ? rubyStyle.rubyLatinStrokeWidth
+                                   : rubyStyle.rubyStrokeWidth,
+                        ruby.latin ? rubyStyle.rubyLatinStroke2Width
+                                   : rubyStyle.rubyStroke2Width
                     );
                 }
             }

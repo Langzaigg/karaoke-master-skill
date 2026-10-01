@@ -669,6 +669,21 @@ void applyScalarStyleOverrides(ResolvedStyle &cfg, const QJsonObject &style) {
             0, intValue(style, QStringLiteral("ruby_stroke2_width_px"), 0)
         );
     }
+    if (hasNonNull(style, QStringLiteral("ruby_latin_stroke_width_px"))) {
+        cfg.rubyLatinStrokeWidthPx = std::max(
+            0, intValue(style, QStringLiteral("ruby_latin_stroke_width_px"), 0)
+        );
+    }
+    if (hasNonNull(style, QStringLiteral("ruby_latin_stroke2_enabled"))) {
+        cfg.rubyLatinStroke2Enabled = style.value(
+            QStringLiteral("ruby_latin_stroke2_enabled")
+        ).toBool();
+    }
+    if (hasNonNull(style, QStringLiteral("ruby_latin_stroke2_width_px"))) {
+        cfg.rubyLatinStroke2WidthPx = std::max(
+            0, intValue(style, QStringLiteral("ruby_latin_stroke2_width_px"), 0)
+        );
+    }
     if (hasNonNull(style, QStringLiteral("ruby_decoration_kind"))) {
         cfg.rubyDecorationKind = stringValue(
             style, QStringLiteral("ruby_decoration_kind"), cfg.rubyDecorationKind
@@ -1041,6 +1056,21 @@ std::optional<RenderConfig> parseRenderConfig(const QJsonObject &ir, QString *er
     if (style.value(QStringLiteral("ruby_stroke2_width_px")).isDouble()) {
         base.rubyStroke2WidthPx = std::max(
             0, intValue(style, QStringLiteral("ruby_stroke2_width_px"), 0)
+        );
+    }
+    if (style.value(QStringLiteral("ruby_latin_stroke_width_px")).isDouble()) {
+        base.rubyLatinStrokeWidthPx = std::max(
+            0, intValue(style, QStringLiteral("ruby_latin_stroke_width_px"), 0)
+        );
+    }
+    if (style.value(QStringLiteral("ruby_latin_stroke2_enabled")).isBool()) {
+        base.rubyLatinStroke2Enabled = style.value(
+            QStringLiteral("ruby_latin_stroke2_enabled")
+        ).toBool();
+    }
+    if (style.value(QStringLiteral("ruby_latin_stroke2_width_px")).isDouble()) {
+        base.rubyLatinStroke2WidthPx = std::max(
+            0, intValue(style, QStringLiteral("ruby_latin_stroke2_width_px"), 0)
         );
     }
     if (hasNonNull(style, QStringLiteral("ruby_decoration_kind"))) {

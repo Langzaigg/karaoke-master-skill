@@ -242,6 +242,13 @@ struct ResolvedStyle {
     std::optional<int> rubyStrokeWidthPx;
     std::optional<bool> rubyStroke2Enabled;
     std::optional<int> rubyStroke2WidthPx;
+    // Ruby-latin stroke overrides for alnum readings; unset (or a
+    // non-positive width) follows the ruby Japanese-track values resolved
+    // by the projection — mirroring the CPU painter's
+    // ruby_script_stroke_style fallback chain.
+    std::optional<int> rubyLatinStrokeWidthPx;
+    std::optional<bool> rubyLatinStroke2Enabled;
+    std::optional<int> rubyLatinStroke2WidthPx;
     QString rubyDecorationKind;
     std::optional<int> rubyGlowBeforeRadiusPx;
     std::optional<int> rubyGlowAfterRadiusPx;

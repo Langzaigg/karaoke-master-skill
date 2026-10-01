@@ -278,11 +278,33 @@ void applyGpuResolvedStyle(
     // off; gating the inherited width a second time made an explicitly enabled
     // ruby with no width of its own collapse to 0.
     const bool rubyStroke2On = source.rubyStroke2Enabled.value_or(source.stroke2Enabled);
-    const int rubyStroke2Px = rubyStroke2On
-        ? source.rubyStroke2WidthPx.value_or(scaledFromMain(source.stroke2RawWidthPx))
-        : 0;
+    const int rubyStroke2RawPx = source.rubyStroke2WidthPx.value_or(
+        scaledFromMain(source.stroke2RawWidthPx)
+    );
+    const int rubyStroke2Px = rubyStroke2On ? rubyStroke2RawPx : 0;
     target.rubyStrokeWidth = static_cast<float>(rubyStrokePx * scale);
     target.rubyStroke2Width = static_cast<float>(rubyStroke2Px * scale);
+    // Ruby-latin strokes for alnum readings (CPU: ruby_script_stroke_style):
+    // an unset or non-positive latin width follows the ruby Japanese-track
+    // value; the latin stroke2 flag follows the ruby flag when unset, and the
+    // ungated ruby width keeps an explicitly enabled latin stroke2 from
+    // collapsing when the ruby track itself is switched off.
+    const int rubyLatinStrokePx =
+        (source.rubyLatinStrokeWidthPx.has_value()
+            && *source.rubyLatinStrokeWidthPx > 0)
+            ? *source.rubyLatinStrokeWidthPx
+            : rubyStrokePx;
+    const bool rubyLatinStroke2On = source.rubyLatinStroke2Enabled.value_or(
+        rubyStroke2On
+    );
+    const int rubyLatinStroke2RawPx =
+        (source.rubyLatinStroke2WidthPx.has_value()
+            && *source.rubyLatinStroke2WidthPx > 0)
+            ? *source.rubyLatinStroke2WidthPx
+            : rubyStroke2RawPx;
+    const int rubyLatinStroke2Px = rubyLatinStroke2On ? rubyLatinStroke2RawPx : 0;
+    target.rubyLatinStrokeWidth = static_cast<float>(rubyLatinStrokePx * scale);
+    target.rubyLatinStroke2Width = static_cast<float>(rubyLatinStroke2Px * scale);
     target.rubyDecorationKind = (
         source.rubyDecorationKind.isEmpty()
             ? source.decorationKind

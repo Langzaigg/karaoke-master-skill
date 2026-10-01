@@ -80,6 +80,8 @@ struct Direct2DGpuBackend::Impl {
         int endMs = 0;
         float baselineOffset = 0.0f;
         int styleIndex = -1;
+        // 读音是否全拉丁单元：预实现任务据此取 ruby-latin 还是日文轨描边。
+        bool latin = false;
         int transitionCharIndex = 0;
         int firstCharIndex = 0;
         int lastCharIndex = 0;
