@@ -30,7 +30,7 @@ from PyQt6.QtGui import (
     QPixmap,
     QTransform,
 )
-from PyQt6.QtWidgets import QVBoxLayout, QWidget
+from PyQt6.QtWidgets import QLabel, QVBoxLayout, QWidget
 
 from krok_helper.subtitle_render.domain.models import Style
 from krok_helper.subtitle_render.engine.style.style_semantics import (
@@ -56,7 +56,7 @@ from krok_helper.subtitle_render.engine.style.style_preview import (
     ruby_stroke2_width as _ruby_stroke2_width,
     ruby_stroke_width as _ruby_stroke_width,
 )
-from krok_helper.subtitle_render.frontend.widgets.theme import palette
+from krok_helper.subtitle_render.frontend.widgets.theme import palette, themed
 from krok_helper.subtitle_render.n3.font_catalog import resolve_qt_font_family
 
 
@@ -453,6 +453,13 @@ class _FontSampleRenderTask(QRunnable):
         self.signals.completed.emit(image, self._generation)
 
 
+def _scheme_display_name(scheme_key: str) -> str:
+    """角色导航的方案键转显示名：全局键之外都带 ``custom:`` 前缀。"""
+    if scheme_key.startswith("custom:"):
+        return scheme_key.removeprefix("custom:")
+    return "全局默认"
+
+
 class _FontPreviewWidget(QWidget):
     """Small embedded sample owned exclusively by ``PropertyPanel``."""
 
@@ -461,8 +468,25 @@ class _FontPreviewWidget(QWidget):
         self.setObjectName("SubtitleFontPreviewWidget")
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(4)
         self.canvas = _FontSampleCanvas(self)
         layout.addWidget(self.canvas)
+        # 预览图常驻一行「编辑对象」题注：用户注意力在下方控件上时，
+        # 这里是页面上唯一持续标明当前改的是谁的地方。
+        self.target_caption = QLabel(self)
+        self.target_caption.setObjectName("SubtitleFontPreviewTargetCaption")
+        self.target_caption.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        layout.addWidget(self.target_caption)
+        themed(
+            self.target_caption,
+            lambda: (
+                "QLabel#SubtitleFontPreviewTargetCaption { "
+                f"color: {palette().text_secondary}; "
+                "font-size: 8.5pt; "
+                "border: 0; "
+                "}"
+            ),
+        )
         self._style = Style()
         self._scheme_key = "global"
         self._script = "japanese"
@@ -508,6 +532,7 @@ class _FontPreviewWidget(QWidget):
         self._refresh_sample()
 
     def _refresh_sample(self) -> None:
+        self.target_caption.setText(f"编辑对象：{_scheme_display_name(self._scheme_key)}")
         role_label = (
             self._scheme_key.removeprefix("custom:")
             if self._scheme_key.startswith("custom:")

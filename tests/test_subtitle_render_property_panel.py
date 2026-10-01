@@ -3859,7 +3859,8 @@ def test_font_preview_widget_embeds_at_role_card_top_right(qapp):
 
     assert panel._role_header.isAncestorOf(preview)
     assert preview.geometry().right() == panel._role_header.contentsRect().right()
-    assert preview.size() == QSize(120, 112)
+    assert preview.canvas.size() == QSize(120, 112)
+    assert preview.target_caption.text() == "编辑对象：全局默认"
 
 
 def test_font_preview_canvas_geometry_is_stable_across_scripts(qapp):
@@ -3877,6 +3878,18 @@ def test_font_preview_canvas_geometry_is_stable_across_scripts(qapp):
     assert preview.geometry() == japanese_geometry
     assert preview.canvas.size() == japanese_canvas_size == QSize(120, 112)
     assert preview._sample_text == "LinK"
+
+
+def test_font_preview_caption_tracks_scheme_selection(qapp):
+    panel = PropertyPanel()
+    preview = panel._font_preview_widget
+    assert preview.target_caption.text() == "编辑对象：全局默认"
+
+    panel.set_current_scheme_key("custom:标题")
+    assert preview.target_caption.text() == "编辑对象：标题"
+
+    panel._add_custom_scheme("角色A")
+    assert preview.target_caption.text() == "编辑对象：角色A"
 
 
 def test_font_preview_restores_open_state_after_page_round_trip(qapp):
@@ -8073,6 +8086,62 @@ def test_property_panel_scheme_selection_emits_current_key(qapp):
     panel._singer_combo.setCurrentIndex(panel._singer_combo.findData("custom:图像方案"))
 
     assert emitted[-1] == "custom:图像方案"
+
+
+def test_property_panel_scheme_switch_announces_target_info_bar(qapp, monkeypatch):
+    panel = PropertyPanel()
+    panel._add_custom_scheme("角色A")
+    panel._add_custom_scheme("角色B")
+    notices: list[dict] = []
+    monkeypatch.setattr(pp.InfoBar, "success", lambda **kwargs: notices.append(kwargs))
+
+    panel._singer_combo.setCurrentIndex(panel._singer_combo.findData("custom:角色A"))
+    panel._singer_combo.setCurrentIndex(panel._singer_combo.findData("custom:角色B"))
+    panel._singer_combo.setCurrentIndex(panel._singer_combo.findData("custom:标题"))
+    panel._singer_combo.setCurrentIndex(panel._singer_combo.findData("global"))
+
+    assert [notice["content"] for notice in notices] == [
+        "正在编辑「角色A」的样式",
+        "正在编辑「角色B」的样式",
+        "正在编辑「标题」的样式",
+        "正在编辑「全局默认」的样式",
+    ]
+    assert all(notice["title"] == "编辑目标已切换" for notice in notices)
+
+
+def test_property_panel_programmatic_scheme_push_does_not_announce(qapp, monkeypatch):
+    panel = PropertyPanel()
+    panel._add_custom_scheme("角色A")
+    emitted: list[str] = []
+    panel.schemeSelectionChanged.connect(emitted.append)
+    notices: list[dict] = []
+    monkeypatch.setattr(pp.InfoBar, "success", lambda **kwargs: notices.append(kwargs))
+
+    panel.set_current_scheme_key("global")
+    assert panel.current_scheme_key() == "global"
+    assert emitted == ["global"]
+    assert notices == []
+
+    panel.set_style(
+        Style(
+            custom_style_schemes={
+                "角色A": SubtitleStyleScheme(fill_color="#111111"),
+            }
+        )
+    )
+    panel.set_roles(["角色A", "新角色"])
+    assert notices == []
+
+
+def test_property_panel_title_scheme_jump_announces_target(qapp, monkeypatch):
+    panel = PropertyPanel()
+    notices: list[dict] = []
+    monkeypatch.setattr(pp.InfoBar, "success", lambda **kwargs: notices.append(kwargs))
+
+    panel._open_title_scheme(0)
+
+    assert panel.current_scheme_key() == "custom:标题"
+    assert [notice["content"] for notice in notices] == ["正在编辑「标题」的样式"]
 
 
 def test_property_panel_add_scheme_button_ignores_clicked_checked_arg(qapp, monkeypatch):

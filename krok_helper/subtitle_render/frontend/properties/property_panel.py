@@ -757,6 +757,9 @@ class PropertyPanel(QWidget):
         )
         self._preset_schemes: dict[str, StylePreset] = {}
         self._pages: list[QWidget] = []
+        # 程序化 set_current_scheme_key（工程装载/恢复默认回填选中）期间
+        # 压制「编辑目标已切换」提示，只有用户操作与标题页跳转才播报。
+        self._scheme_announce_suppressed = False
         self._color_edit_style_snapshot: Optional[Style] = None
         self._screen_color_picker: Optional[ScreenColorPicker] = None
         # 面板创建时后台建好共享取色对话框，首次点击不再付构建成本。
@@ -2263,7 +2266,7 @@ class PropertyPanel(QWidget):
             if data:
                 scheme = str(data)
         self.setCurrentIndex(0)
-        self.set_current_scheme_key(f"{_CUSTOM_SCHEME_PREFIX}{scheme}")
+        self.set_current_scheme_key(f"{_CUSTOM_SCHEME_PREFIX}{scheme}", announce=True)
 
     def _on_title_card_renamed(self, index: int, name: str) -> None:
         if self._syncing:
@@ -4131,7 +4134,12 @@ class PropertyPanel(QWidget):
     def current_scheme_key(self) -> str:
         return self._current_scheme_key() or _GLOBAL_SCHEME_KEY
 
-    def set_current_scheme_key(self, key: str) -> None:
+    def set_current_scheme_key(self, key: str, *, announce: bool = False) -> None:
+        """回填角色导航的选中目标。
+
+        默认是宿主推状态（工程装载、恢复默认等），不播报切换；标题页
+        「编辑配色」跳转这类要替用户按下开关的场景用 ``announce=True``。
+        """
         if not hasattr(self, "_singer_combo"):
             return
         index = self._singer_combo.findData(key)
@@ -4139,7 +4147,11 @@ class PropertyPanel(QWidget):
             index = self._singer_combo.findData(_GLOBAL_SCHEME_KEY)
         if index < 0:
             return
-        self._singer_combo.setCurrentIndex(index)
+        self._scheme_announce_suppressed = not announce
+        try:
+            self._singer_combo.setCurrentIndex(index)
+        finally:
+            self._scheme_announce_suppressed = False
 
     def _on_scheme_combo_changed(self, _index: int) -> None:
         name = self._current_custom_scheme_name()
@@ -4150,7 +4162,23 @@ class PropertyPanel(QWidget):
         self._sync_subtitle_scheme_controls()
         self._sync_font_preview()
         if not self._syncing:
+            if not self._scheme_announce_suppressed:
+                self._announce_scheme_target_switch()
             self.schemeSelectionChanged.emit(self.current_scheme_key())
+
+    def _announce_scheme_target_switch(self) -> None:
+        """目标切换后播报当前正在编辑谁，避免改动落在意料外的方案上。
+
+        角色下拉是个不起眼的紧凑控件，用户经常没注意选中目标就改字体/
+        颜色，回到预览才发现「改了没反应」。加载/重建等程序化刷新走
+        ``_syncing`` 或 ``_scheme_announce_suppressed`` 守卫，不会到这里。
+        """
+        InfoBar.success(
+            title="编辑目标已切换",
+            content=f"正在编辑「{self._current_target_label()}」的样式",
+            parent=self,
+            duration=2500,
+        )
 
     def _current_custom_scheme_name(self) -> Optional[str]:
         key = self._current_scheme_key()
