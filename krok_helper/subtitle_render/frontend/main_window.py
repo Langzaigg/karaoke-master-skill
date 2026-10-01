@@ -214,6 +214,7 @@ from krok_helper.subtitle_render.frontend.workflow.export_view import (
     format_elapsed_seconds as _format_elapsed_seconds,
     format_eta_seconds as _format_eta_seconds,
     format_warning_lines as _format_warning_lines,
+    nearest_existing_directory,
     physical_preview_size as _physical_preview_size,
     scaled_preview_pixmap as _scaled_preview_pixmap,
     sync_export_preset_enabled,
@@ -3049,8 +3050,10 @@ class SubtitleRenderWindow(QWidget):
             self.load_audio(Path(path_str))
 
     def _browse_export_output(self) -> None:
-        start = self._export_dir_edit.text().strip() or str(self._default_export_dir())
-        path_str = QFileDialog.getExistingDirectory(self, "选择输出文件夹", start)
+        raw = self._export_dir_edit.text().strip() or str(self._default_export_dir())
+        path_str = QFileDialog.getExistingDirectory(
+            self, "选择输出文件夹", nearest_existing_directory(raw)
+        )
         if path_str:
             self._set_export_directory_settings(
                 EXPORT_DIR_CUSTOM, path_str, persist=True

@@ -258,6 +258,27 @@ class SettingsColumnScrollArea(QScrollArea):
         return QSize(base.width(), content.sizeHint().height())
 
 
+def nearest_existing_directory(raw: str | Path) -> str:
+    """浏览对话框的起始目录：从给定路径逐级向上找第一个真实存在的目录。
+
+    Windows 原生文件夹对话框（``getExistingDirectory``）遇到不存在的起始
+    目录时，``SHCreateItemFromParsingName`` 失败、``SetFolder`` 被静默跳过，
+    对话框会打开系统按进程记住的「上次访问目录」，看起来就像完全忽略了
+    界面上显示的路径。自定义目录被删掉、工程换机恢复等情况都会触发；
+    这里向上找最近的现存祖先目录，全都找不到时退回用户主目录。
+    """
+    text = str(raw).strip()
+    if not text:
+        return str(Path.home())
+    candidate = Path(text).expanduser()
+    if candidate.is_file():
+        candidate = candidate.parent
+    for directory in (candidate, *candidate.parents):
+        if directory.is_dir():
+            return str(directory)
+    return str(Path.home())
+
+
 class ExportLocationDialog(ModelessDialog):
     """字幕视频导出目录与文件名偏好。"""
 
@@ -348,7 +369,9 @@ class ExportLocationDialog(ModelessDialog):
         self._sync_controls()
 
     def _browse(self) -> None:
-        start = self.directory_edit.text().strip() or str(self._initial_dir)
+        start = nearest_existing_directory(
+            self.directory_edit.text().strip() or str(self._initial_dir)
+        )
         selected = QFileDialog.getExistingDirectory(
             self, "选择字幕视频导出目录", start
         )

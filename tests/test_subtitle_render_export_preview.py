@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -12,11 +13,12 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 from PyQt6.QtCore import QPoint, QSize  # noqa: E402
 from PyQt6.QtGui import QImage, QPixmap  # noqa: E402
 from PyQt6.QtTest import QSignalSpy  # noqa: E402
-from PyQt6.QtWidgets import QApplication, QWidget  # noqa: E402
+from PyQt6.QtWidgets import QApplication, QFileDialog, QWidget  # noqa: E402
 
 from krok_helper.subtitle_render.frontend.main_window import (  # noqa: E402
     SubtitleRenderWindow,
     _AspectRatioBox,
+    _ExportLocationDialog,
     _ExportMonitorView,
     _export_preview_width,
     _physical_preview_size,
@@ -24,6 +26,7 @@ from krok_helper.subtitle_render.frontend.main_window import (  # noqa: E402
 )
 from krok_helper.subtitle_render.frontend.workflow.export_view import (  # noqa: E402
     ExportWorkspaceView,
+    nearest_existing_directory,
 )
 
 
@@ -443,3 +446,74 @@ def test_export_format_switch_updates_badge_encoder_state_and_label(qapp):
         window.close()
         window.deleteLater()
         qapp.processEvents()
+
+
+def test_nearest_existing_directory_passes_an_existing_folder_through(tmp_path):
+    assert nearest_existing_directory(tmp_path) == str(tmp_path)
+
+
+def test_nearest_existing_directory_climbs_from_a_missing_folder(tmp_path):
+    """Windows 原生对话框对不存在的起始目录会静默回退到「上次访问目录」。"""
+    dead = tmp_path / "deleted" / "deeper"
+    assert nearest_existing_directory(dead) == str(tmp_path)
+
+
+def test_nearest_existing_directory_uses_the_parent_of_a_file(tmp_path):
+    target = tmp_path / "song.mp4"
+    target.write_text("x", encoding="utf-8")
+    assert nearest_existing_directory(target) == str(tmp_path)
+
+
+def test_nearest_existing_directory_survives_a_missing_drive():
+    result = nearest_existing_directory("Q:/missing/folder")
+    assert Path(result).is_dir()
+
+
+def test_nearest_existing_directory_falls_back_to_home_when_empty():
+    assert nearest_existing_directory("") == str(Path.home())
+    assert nearest_existing_directory("   ") == str(Path.home())
+
+
+def test_browse_export_output_starts_from_nearest_existing_directory(
+    qapp, monkeypatch, tmp_path
+):
+    """输出目录显示的路径在磁盘上已失效时，「浏览」从最近现存祖先目录打开。"""
+    captured = {}
+    monkeypatch.setattr(
+        QFileDialog,
+        "getExistingDirectory",
+        staticmethod(
+            lambda parent, title, start: (captured.update(start=start), "")[1]
+        ),
+    )
+    window = SubtitleRenderWindow(
+        embedded=True,
+        settings_provider=_SettingsProvider(),
+    )
+    try:
+        window._export_dir_edit.setText(str(tmp_path / "deleted" / "deeper"))
+        window._browse_export_output()
+        assert captured["start"] == str(tmp_path)
+    finally:
+        window.close()
+        window.deleteLater()
+        qapp.processEvents()
+
+
+def test_export_location_dialog_browses_from_nearest_existing_ancestor(
+    qapp, monkeypatch, tmp_path
+):
+    """「导出视频位置与命名」设置对话框里的浏览同样不能从失效目录起跳。"""
+    captured = {}
+    monkeypatch.setattr(
+        QFileDialog,
+        "getExistingDirectory",
+        staticmethod(
+            lambda parent, title, start: (captured.update(start=start), "")[1]
+        ),
+    )
+    dialog = _ExportLocationDialog(
+        "custom", str(tmp_path / "gone" / "deeper"), tmp_path, None
+    )
+    dialog._browse()
+    assert captured["start"] == str(tmp_path)
