@@ -1933,6 +1933,151 @@ def test_signal_volume_stays_visible_after_the_line_starts(qapp):
     )
 
 
+def _assert_volume_flash_fades_group_as_unit(
+    track: TimingTrack,
+    style: Style,
+    *,
+    duration_ms: int = 1000,
+    times: int = 1,
+    flash_ratio: float = 0.5,
+) -> None:
+    """整组明灭：任意两帧满足 像素 ≈ 底色 + (另一帧像素 − 底色) × α比。
+
+    闪烁段内 active_index 恒为 -1，两帧的柱组内容完全相同，唯一差别是
+    组透明度；"先合成、后整体乘 α"因此可逐像素线性验证。取 α 明显不同
+    的两帧互推，α 的比值会强烈区分 α¹ 与 α²/α³。正文文字不参与闪烁
+    （两帧中完全一致），单独放行。帧时刻避开显示窗口起点边界。
+    """
+    flash_ms = int(duration_ms - duration_ms / (times * flash_ratio + 1.0))
+    t_high = t_low = None
+    alpha_high = alpha_low = 0.0
+    for t_ms in range(60, flash_ms):
+        alpha = _volume_flash_alpha(t_ms, flash_ms, style)
+        if t_high is None and 0.4 <= alpha <= 0.6:
+            t_high, alpha_high = t_ms, alpha
+        elif t_high is not None and 0.1 <= alpha <= 0.3:
+            t_low, alpha_low = t_ms, alpha
+            break
+    assert t_high is not None, "三角波应存在 α∈[0.4, 0.6] 的帧"
+    assert t_low is not None, "三角波应存在 α∈[0.1, 0.3] 的帧"
+    ratio = alpha_low / alpha_high
+    frame_high = paint_frame(_blank(160, 90), track, t_high, style)
+    frame_low = paint_frame(_blank(160, 90), track, t_low, style)
+
+    # 断言只覆盖柱组左侧（柱体 + 发光左晕）：正文文字自己的发光不参与
+    # 闪烁且会左伸进柱区，混入会破坏两帧线性关系；限制在文字光晕到不了的
+    # 区域即可逐像素严格验证。
+    layout = _sayatoo_layout_for(track, style, t_high)
+    x_limit = min(int(layout.text_x) - 40, frame_high.width() - 1)
+    x_floor = max(int(layout.signal_x) - 24, 0) if layout.signal_x is not None else 0
+
+    bg = QColor("#101010")
+    bg_rgb = (bg.red(), bg.green(), bg.blue())
+    faded = 0
+    for y in range(frame_high.height()):
+        for x in range(x_floor, x_limit + 1):
+            high_color = QColor(frame_high.pixel(x, y))
+            high_rgb = (
+                high_color.red(),
+                high_color.green(),
+                high_color.blue(),
+            )
+            if high_rgb == bg_rgb:
+                continue
+            low_color = QColor(frame_low.pixel(x, y))
+            low_rgb = (
+                low_color.red(),
+                low_color.green(),
+                low_color.blue(),
+            )
+            if low_rgb == high_rgb:
+                # 未参与闪烁的内容（正文文字）两帧一致。
+                continue
+            for high_c, low_c, bg_c in zip(high_rgb, low_rgb, bg_rgb):
+                expected = bg_c + (high_c - bg_c) * ratio
+                assert abs(low_c - expected) <= 5, (
+                    x,
+                    y,
+                    high_rgb,
+                    low_rgb,
+                    alpha_high,
+                    alpha_low,
+                )
+            faded += 1
+    assert faded > 50, "柱组（含发光晕）应有足够像素参与明灭"
+
+
+def test_volume_custom_flash_alpha_applied_once(qapp):
+    """custom 档：闪烁 alpha 只乘一次（修复前被连乘成 α²）。"""
+    track = _singer_track(singer_id=0)
+    style = Style(
+        font_size_px=32,
+        line_y_margin_px=10,
+        dual_line_layout=False,
+        line_lead_in_ms=2000,
+        entry_anim="none",
+        exit_anim="none",
+        section_head_anim="none",
+        volume_enabled=True,
+        volume_appearance_mode="custom",
+        volume_duration_ms=1000,
+        volume_waiting_time_ms=0,
+        volume_time_offset_ms=0,
+        volume_column_count=4,
+        # 柱组整体左移，与正文文字的抗锯齿边缘脱开：文字墨水不参与闪烁，
+        # 与柱重叠的像素不满足两帧线性关系，需排除在断言区域之外。
+        volume_offset_x=-12,
+        volume_flash_times=1,
+        volume_flash_duration_ratio=0.5,
+        volume_transition_ratio_pct=100,
+        # 描边关闭：单层填充的像素值随 α 严格线性；描边+填充两层同乘 α 的
+        # 叠加像素非线性，会干扰"α 只乘一次"的逐像素断言。
+        volume_stroke_width=0,
+        volume_fill_color="#0000FF",
+        volume_stroke_color="#0000FF",
+    )
+    _assert_volume_flash_fades_group_as_unit(track, style)
+
+
+def test_volume_auto_flash_fades_decorated_group_as_unit(qapp):
+    """auto 档：发光/二重描边/描边/填充作为整体明灭。
+
+    修复前：α 被连乘三次，且发光的多 pass 叠加（浓度语义）发生在乘 α
+    之后，发光环比柱体褪色慢 —— 明灭中段柱芯先灭、描边处残留一根
+    "空心柱"残影。
+    """
+    track = _singer_track(singer_id=0)
+    style = Style(
+        font_size_px=32,
+        line_y_margin_px=10,
+        dual_line_layout=False,
+        line_lead_in_ms=2000,
+        entry_anim="none",
+        exit_anim="none",
+        section_head_anim="none",
+        volume_enabled=True,
+        volume_appearance_mode="auto",
+        volume_duration_ms=1000,
+        volume_waiting_time_ms=0,
+        volume_time_offset_ms=0,
+        volume_column_count=4,
+        # 柱组整体左移，与正文文字的抗锯齿边缘脱开（同 custom 档测试）。
+        volume_offset_x=-12,
+        volume_flash_times=1,
+        volume_flash_duration_ratio=0.5,
+        volume_transition_ratio_pct=100,
+        decoration_kind="glow",
+        shadow_color="#FF3366",
+        glow_before_radius_px=16,
+        glow_after_radius_px=16,
+        glow_concentration_level=2,
+        stroke_width_px=2,
+        stroke2_enabled=True,
+        stroke2_width_px=2,
+    )
+    _assert_volume_flash_fades_group_as_unit(track, style)
+
+
 def test_signal_shape_tracks_top_of_subtitle_line_box(qapp):
     track = _track_with_ruby()
     style = Style(

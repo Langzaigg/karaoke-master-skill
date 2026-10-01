@@ -9088,9 +9088,101 @@ def test_gpu_g4_volume_signal_timing_union_layout_and_colors_follow_painter(
 
 
 @pytest.mark.skipif(os.name != "nt", reason="Direct2D GPU backend is Windows-only")
-def test_gpu_g4_volume_signal_limited_to_section_head_follows_painter(
-    monkeypatch,
-) -> None:
+def test_gpu_g4_volume_auto_flash_mid_fade_matches_painter(monkeypatch) -> None:
+    """auto 档 + 发光：闪烁中段（0<α<1）两端一致。
+
+    修复前 CPU 把闪烁 α 连乘（α²/α³）而 GPU 只乘一次，且两端发光的
+    多 pass 叠加都发生在乘 α 之后 —— 中段帧 GPU/CPU 信号亮度差近一倍，
+    明灭中段描边处残留"空心柱"残影。修复后两端都改为整组先合成、再
+    整体乘 α（CPU 离屏 QImage，GPU OpacityLayer），中段帧必须同亮度。
+    """
+    monkeypatch.setenv("QT_QPA_PLATFORM", "offscreen")
+    track = TimingTrack(
+        lines=[
+            TimingLine(
+                chars=[TimingChar("Signal", 4_000)],
+                end_ms=5_000,
+            )
+        ]
+    )
+    style = _g1_style(
+        font_family="Meiryo",
+        font_family_latin="Meiryo",
+        font_size_px=64,
+        stroke_width_px=3,
+        stroke2_enabled=True,
+        stroke2_width_px=2,
+        decoration_kind="glow",
+        glow_before_radius_px=8,
+        glow_after_radius_px=8,
+        glow_concentration_level=2,
+        dual_line_layout=False,
+        line_horizontal_layout="center",
+        line_lead_in_ms=500,
+        line_tail_ms=500,
+        volume_enabled=True,
+        volume_appearance_mode="auto",
+        volume_duration_ms=4_000,
+        volume_waiting_time_ms=0,
+        volume_time_offset_ms=0,
+        volume_column_count=4,
+        volume_flash_times=3,
+        volume_flash_duration_ratio=1.0,
+        volume_transition_ratio_pct=67,
+    )
+    # duration=4000、times=3、ratio=1 → flash=3000、per_flash=1000。
+    # 0/125：α=1（顶部平台）；250/750/1250：三角波中段 α=0.5；1500：α=0
+    # （熄灭帧，作文字基准）；3500：闪烁已结束，进入填充段（α=1）。
+    timestamps = (0, 125, 250, 750, 1_250, 1_500, 3_500)
+    with NativeRendererProcess(_renderer_path(), response_timeout_s=15.0) as renderer:
+        _, gpu = _render_g1_frames(
+            renderer, style, timestamps, force_warp=True, track=track
+        )
+    painter = [
+        _render_painter_oracle(style, t_ms=t_ms, track=track)
+        for t_ms in timestamps
+    ]
+
+    for t_ms, gpu_frame, painter_frame in zip(timestamps, gpu, painter):
+        assert all(
+            abs(actual - expected) <= 12
+            for actual, expected in zip(
+                _payload_alpha_bounds(gpu_frame),
+                _payload_alpha_bounds(painter_frame),
+            )
+        ), (
+            t_ms,
+            _payload_alpha_bounds(gpu_frame),
+            _payload_alpha_bounds(painter_frame),
+        )
+
+    # 熄灭帧（1500）只剩正文，作为文字基准；各帧"信号 alpha 总量" =
+    # 全帧 alpha 求和 − 文字基准。中段帧两端必须同亮度（修复前
+    # CPU α² 与 GPU α¹ 差出一倍）。
+    gpu_text_alpha = sum(gpu[5][3::4])
+    painter_text_alpha = sum(painter[5][3::4])
+    mid_fade_indices = (2, 3, 4)  # 250 / 750 / 1250
+    full_strength_indices = (0, 1, 6)  # α=1 帧
+    for indices, label in (
+        (mid_fade_indices, "mid-fade"),
+        (full_strength_indices, "full-strength"),
+    ):
+        for index in indices:
+            gpu_signal = sum(gpu[index][3::4]) - gpu_text_alpha
+            painter_signal = sum(painter[index][3::4]) - painter_text_alpha
+            assert gpu_signal > 0, (label, index)
+            assert painter_signal > 0, (label, index)
+            assert abs(gpu_signal / painter_signal - 1.0) <= 0.1, (
+                label,
+                timestamps[index],
+                gpu_signal,
+                painter_signal,
+            )
+
+    # 明灭本身仍在工作：中段帧的信号亮度约为 α=1 帧的一半。
+    gpu_full = sum(gpu[0][3::4]) - gpu_text_alpha
+    gpu_half = sum(gpu[2][3::4]) - gpu_text_alpha
+    assert 0.3 <= gpu_half / gpu_full <= 0.7
     monkeypatch.setenv("QT_QPA_PLATFORM", "offscreen")
     # 两段三行：行 0（S1 第一页第一行）与行 2（S2 第一页第一行）是段首，
     # 行 1 是页内第二行。音量柱只允许出现在段首行旁。

@@ -9,7 +9,7 @@ from dataclasses import dataclass, replace
 from threading import Lock
 from typing import Hashable, Protocol
 
-from PyQt6.QtCore import QRectF, Qt
+from PyQt6.QtCore import QPointF, QRectF, Qt
 from PyQt6.QtGui import (
     QBrush,
     QColor,
@@ -50,6 +50,7 @@ from krok_helper.subtitle_render.engine.render.elements.horizontal.transitions i
     zoom_pulse_wipe_scale,
 )
 from krok_helper.subtitle_render.engine.render.effects.metrics import (
+    glow_extent,
     glow_radius,
     main_stroke2_width,
 )
@@ -840,9 +841,10 @@ def _draw_volume_lit_group(
     )
     stroke_width = max(int(style.lit_stroke_width), 0)
 
+    # 闪烁 alpha（group.opacity）只在 paint_dynamic 处乘一次：这里再乘会把
+    # 明灭曲线变成 α²，与 native 端的 α¹ 分歧（2026-10 修复）。
     painter.save()
     try:
-        painter.setOpacity(painter.opacity() * group.opacity)
         for index in range(active_index + 1, geometry.count):
             _draw_volume_column_animated(
                 painter,
@@ -859,6 +861,47 @@ def _draw_volume_lit_group(
             )
     finally:
         painter.restore()
+
+
+def _volume_decorated_bar_ink_rect(
+    rect: QRectF,
+    animation: BarAnimationState | None,
+    pulse: float,
+    pad_x: float,
+    pad_y: float,
+) -> QRectF:
+    """Bound one decorated bar's ink for the flash composite buffer.
+
+    覆盖逐字动画（位移/旋转/缩放/剪切，柱心为轴）与整字放大的行程，
+    再外扩发光晕 / 阴影 / 描边笔宽。变换按 AABB 取界（宽松即可），
+    与 `_draw_volume_column_animated` 的变换语义一致。
+    """
+    bounds = QRectF(rect)
+    if animation is not None:
+        _opacity, dx, dy, rotation, scale_x, scale_y, skew_y = animation
+        transform = character_transform(
+            center_x=rect.center().x(),
+            center_y=rect.center().y(),
+            dx=dx,
+            dy=dy,
+            rotation=rotation,
+            scale_x=scale_x,
+            scale_y=scale_y,
+            skew_y=skew_y,
+        )
+        if not transform.isIdentity():
+            bounds = transform.mapRect(bounds)
+    if pulse != 1.0:
+        center = bounds.center()
+        half_w = bounds.width() * pulse * 0.5
+        half_h = bounds.height() * pulse * 0.5
+        bounds = QRectF(
+            center.x() - half_w,
+            center.y() - half_h,
+            half_w * 2.0,
+            half_h * 2.0,
+        )
+    return bounds.adjusted(-pad_x, -pad_y, pad_x, pad_y)
 
 
 def _draw_volume_decorated_group(
@@ -878,6 +921,11 @@ def _draw_volume_decorated_group(
     偏移按 柱高/该角色字号 同比缩放（描边几何预留仍来自全局解析，柱距
     口径不受角色差异影响）；「整字放大」唱字动画开启时，倒计时扫到的
     那根柱按同一曲线在其覆盖窗口内放大-缩回。
+
+    闪烁段（``group.opacity < 1``）整组先离屏合成、再一次性乘 alpha：
+    发光的多 pass 叠加（浓度语义）与描边/填充必须作为整体明灭，否则
+    发光环比柱体褪色慢，明灭中段会残留一根"空心柱"残影。native 端以
+    OpacityLayer 镜像本语义（d2d_backend_render 的 volumeFlashLayer）。
     """
     decor_style = group.bar_style if group.bar_style is not None else style
     colors = effective_karaoke_colors(decor_style)
@@ -911,30 +959,28 @@ def _draw_volume_decorated_group(
         flash_duration = 0.0
     fill_elapsed = max(float(group.elapsed_ms) - flash_duration, 0.0)
 
-    painter.save()
-    try:
-        painter.setOpacity(painter.opacity() * group.opacity)
-        for index in range(geometry.count):
-            animation = (
-                bar_animations[index] if bar_animations is not None else None
+    bars: list[tuple[QRectF, BarAnimationState | None, float, object]] = []
+    for index in range(geometry.count):
+        animation = (
+            bar_animations[index] if bar_animations is not None else None
+        )
+        if animation is not None and animation[0] <= 0.0:
+            continue
+        covered = index <= active_index
+        state = colors.after if covered else colors.before
+        pulse = 1.0
+        if pulse_enabled and fill_duration > 0.0:
+            bar_start = int(fill_duration * index / geometry.count)
+            bar_end = int(fill_duration * (index + 1) / geometry.count)
+            pulse = zoom_pulse_wipe_scale(
+                int(fill_elapsed), bar_start, bar_end, pulse_level
             )
-            if animation is not None and animation[0] <= 0.0:
-                continue
-            covered = index <= active_index
-            state = colors.after if covered else colors.before
-            pulse = 1.0
-            if pulse_enabled and fill_duration > 0.0:
-                bar_start = int(fill_duration * index / geometry.count)
-                bar_end = int(fill_duration * (index + 1) / geometry.count)
-                pulse = zoom_pulse_wipe_scale(
-                    int(fill_elapsed), bar_start, bar_end, pulse_level
-                )
-            _draw_volume_column_animated(
-                painter,
+        bars.append(
+            (
                 rects[index],
-                None,
                 animation,
-                decorated=(
+                pulse,
+                (
                     state,
                     decor_style,
                     stroke_width,
@@ -946,8 +992,71 @@ def _draw_volume_decorated_group(
                     pulse,
                 ),
             )
+        )
+    if not bars:
+        return
+
+    layer_image: QImage | None = None
+    layer_painter: QPainter | None = None
+    origin = QPointF(0.0, 0.0)
+    if group.opacity < 1.0:
+        # 闪烁中段：先在不透明离屏缓冲里画完整个柱组（发光叠加发生在乘
+        # alpha 之前），再整体乘 alpha 落回主画布。alpha 由 paint_dynamic
+        # 预先乘进 painter.opacity()，此处只负责"一次"合成。
+        glow_pad = (
+            float(
+                glow_extent(
+                    stroke_width, stroke2_width, max(glow_before, glow_after)
+                )
+            )
+            if decor_style.decoration_kind == "glow"
+            else 0.0
+        )
+        half_pen = (stroke_width + stroke2_width) * 0.5
+        pad_x = max(glow_pad, half_pen + abs(shadow_dx)) + 2.0
+        pad_y = max(glow_pad, half_pen + abs(shadow_dy)) + 2.0
+        ink = _volume_decorated_bar_ink_rect(
+            bars[0][0], bars[0][1], bars[0][2], pad_x, pad_y
+        )
+        for rect, animation, pulse, _decorated in bars[1:]:
+            ink = ink.united(
+                _volume_decorated_bar_ink_rect(
+                    rect, animation, pulse, pad_x, pad_y
+                )
+            )
+        left = math.floor(ink.left())
+        top = math.floor(ink.top())
+        width = max(1, math.ceil(ink.right()) - left)
+        height = max(1, math.ceil(ink.bottom()) - top)
+        layer_image = QImage(
+            width, height, QImage.Format.Format_ARGB32_Premultiplied
+        )
+        layer_image.fill(Qt.GlobalColor.transparent)
+        layer_painter = QPainter(layer_image)
+        layer_painter.setRenderHints(
+            QPainter.RenderHint.Antialiasing
+            | QPainter.RenderHint.TextAntialiasing
+            | QPainter.RenderHint.SmoothPixmapTransform
+        )
+        layer_painter.translate(-left, -top)
+        origin = QPointF(float(left), float(top))
+
+    draw_painter = layer_painter if layer_painter is not None else painter
+    painter.save()
+    try:
+        for rect, animation, _pulse, decorated in bars:
+            _draw_volume_column_animated(
+                draw_painter,
+                rect,
+                None,
+                animation,
+                decorated=decorated,
+            )
     finally:
         painter.restore()
+    if layer_painter is not None:
+        layer_painter.end()
+        painter.drawImage(origin, layer_image)
 
 
 def _draw_volume_column_animated(

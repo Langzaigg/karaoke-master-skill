@@ -1575,6 +1575,18 @@ ProbeResult Direct2DGpuBackend::renderFrameInternal(
         // 阴影/整字放大），与 Painter 的 _draw_volume_decorated_group 同口径。
         const bool volumeAutoDecorated = independentVolume
             && style.volumeAppearanceMode == "auto";
+        // 闪烁段把柱组（含发光合成）收进不透明图层、出层时整体乘 alpha
+        // （镜像 Painter 的离屏合成，与行级 lineOpacityLayer 同一模式）：
+        // 发光的多 pass 叠加（浓度语义）必须发生在乘 alpha 之前，否则
+        // 发光环比柱体褪色慢，明灭中段会残留一根"空心柱"残影。图层创建
+        // 失败时回退旧的逐笔刷乘法（flashBrushAlpha 保留闪烁分量）。
+        OpacityLayerScope volumeFlashLayer;
+        const bool volumeFlashLayerActive = signalState.opacity > 0.0f
+            && signalState.opacity < 1.0f
+            && volumeFlashLayer.prepare(context, signalState.opacity);
+        const float flashBrushAlpha = volumeFlashLayerActive
+            ? 1.0f
+            : signalState.opacity;
         // 装饰源样式：段首行第一个有几何字符的角色方案（Painter 取第一
         // 个非空白字符的 role，两端一致；无角色回退行样式）。
         const TextStyle *volumeBarDecorStylePtr = &style;
@@ -4898,7 +4910,7 @@ ProbeResult Direct2DGpuBackend::renderFrameInternal(
             && signalState.opacity > 0.0f
             && style.volumeOpacity > 0.0f) {
             const float groupOpacityBase = std::clamp(
-                style.volumeOpacity * signalState.opacity * lineAnimationOpacity,
+                style.volumeOpacity * flashBrushAlpha * lineAnimationOpacity,
                 0.0f,
                 1.0f
             );
@@ -6483,10 +6495,15 @@ ProbeResult Direct2DGpuBackend::renderFrameInternal(
         if (signalState.visible
             && (style.volumeEnabled ? style.volumeOpacity : style.litOpacity) > 0.0f
             && signalState.opacity > 0.0f) {
+            // 图层在块首推入、块尾弹出：块内所有笔刷（发光合成 + 柱体各
+            // 层）都以 flashBrushAlpha 参与绘制，闪烁分量由图层统一承载。
+            if (volumeFlashLayerActive) {
+                volumeFlashLayer.push();
+            }
             context->SetTransform(withViewport(D2D1::Matrix3x2F::Translation(signalDx, dy)));
             const float signalGroupOpacity = std::clamp(
                 (style.volumeEnabled ? style.volumeOpacity : style.litOpacity)
-                    * signalState.opacity
+                    * flashBrushAlpha
                     // 行级 OpacityLayer 正常时该值为 1（透明度由图层
                     // 统一承载）；图层不可用的逐笔刷兜底路径里它是
                     // 入退场动画透明度，信号必须与正文同乘。
@@ -6786,6 +6803,7 @@ ProbeResult Direct2DGpuBackend::renderFrameInternal(
                 drawColumn(index, true);
             }
         }
+        volumeFlashLayer.pop();
         if (shapeState.visible
             && shapeState.activeIndex >= 0
             && style.litOpacity > 0.0f) {
