@@ -73,6 +73,15 @@ _VIDEO_SEEK_TOLERANCE_MS = 80
 _ASYNC_PLAYBACK_STALE_TOLERANCE_MS = 120
 """Late subtitle frames accepted while video playback is advancing."""
 
+_ASYNC_PAUSED_STALE_TOLERANCE_MS = 9
+"""暂停态收帧容差（≥ 半个 60fps 帧间隔 8.3ms）。
+
+GPU 预览渲染器把请求时刻吸附到 60fps 帧键网格后按吸附值回帧（最大偏
+半格），画布侧的媒体原始毫秒与回帧时间戳不可能严格相等。暂停态若仍要求
+严格相等，当前位帧会被全部丢弃，「字幕渲染中」徽标等不到收帧而无限计时。
+相邻帧键至少相隔一个帧间隔（16.7ms），容差取 9ms 不会误收邻键过期帧。
+"""
+
 _VIDEO_EDGE_OVERSCAN_PX = 4
 """旧 cover 视频铺满时代的防边缘细缝外扩；视频改 contain 加黑边后不再使用。"""
 """Small scene-space bleed to cover native video edge underdraw while playing."""
@@ -632,9 +641,15 @@ class PreviewGraphicsView(QGraphicsView):
         badge.move(max(self.width() - hint.width() - 12, 0), 12)
         badge.raise_()
 
+    def _async_frame_tolerance(self) -> int:
+        """收帧容差：播放中容忍迟到帧；暂停下只容忍帧键吸附偏移（见常量注释）。"""
+        if self._video_playing:
+            return _ASYNC_PLAYBACK_STALE_TOLERANCE_MS
+        return _ASYNC_PAUSED_STALE_TOLERANCE_MS
+
     def _on_async_frame(self, image: QImage, t_ms: int) -> None:
         if int(t_ms) != int(self._t_ms):
-            tolerance = _ASYNC_PLAYBACK_STALE_TOLERANCE_MS if self._video_playing else 0
+            tolerance = self._async_frame_tolerance()
             if tolerance <= 0 or abs(int(t_ms) - int(self._t_ms)) > tolerance:
                 return
         self._note_frame_delivered()
@@ -642,7 +657,7 @@ class PreviewGraphicsView(QGraphicsView):
 
     def _on_native_frame_presented(self, t_ms: int) -> None:
         if int(t_ms) != int(self._t_ms):
-            tolerance = _ASYNC_PLAYBACK_STALE_TOLERANCE_MS if self._video_playing else 0
+            tolerance = self._async_frame_tolerance()
             if tolerance <= 0 or abs(int(t_ms) - int(self._t_ms)) > tolerance:
                 return
         self._note_frame_delivered()
@@ -835,6 +850,13 @@ class PreviewGraphicsView(QGraphicsView):
         self._video_playing = playing
         if self._async_renderer is not None and hasattr(self._async_renderer, "set_playing"):
             self._async_renderer.set_playing(playing)
+        if not playing and self._async_renderer is not None and self._track is not None:
+            # 暂停后当前位帧可能再无来源：GPU 播放路径的当前帧依赖前瞻缓存
+            # 命中，投机批次又在暂停时被渲染器丢弃。补发一帧当前位请求（命中
+            # 缓存直接回帧，否则现渲染），让「字幕渲染中」徽标的无帧区间能
+            # 正常闭合，而不是无限计时。
+            self._note_render_requested()
+            self._async_renderer.request(self._t_ms)
         if self._external_player is not None:
             # 播放由 TransportBar 驱动共享 controller；本视图不操作播放器。
             return

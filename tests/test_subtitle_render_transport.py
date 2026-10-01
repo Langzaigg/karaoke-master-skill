@@ -2456,6 +2456,34 @@ def test_preview_graphics_accepts_near_late_async_frame_while_playing(qapp, monk
         qapp.processEvents()
 
 
+def test_preview_graphics_accepts_snapped_async_frame_while_paused(qapp, monkeypatch):
+    """暂停态必须收下当前帧键的吸附回帧。
+
+    GPU 预览渲染器把请求时刻吸附到 60fps 帧键网格（最大偏半格 ≈8.3ms）后
+    按吸附值回帧；暂停态若要求回帧时间戳与媒体原始毫秒严格相等，当前位帧
+    会被全部丢弃——「字幕渲染中」徽标等不到收帧而无限计时（暂停/暂停中
+    拖动进度条均触发）。
+    """
+    from krok_helper.subtitle_render.frontend.preview import preview_graphics as pg
+    from krok_helper.subtitle_render.frontend.preview.preview_graphics import PreviewGraphicsView
+
+    monkeypatch.setattr(pg, "async_preview_enabled", lambda: False)
+    graphics = PreviewGraphicsView()
+    try:
+        graphics._subtitle_item.set_async_mode(True)
+        graphics.set_time(10_008)
+        snapped = QImage(16, 9, QImage.Format.Format_ARGB32_Premultiplied)
+        snapped.fill(QColor("#0000FF"))
+
+        graphics._on_async_frame(snapped, 10_000)
+
+        assert graphics._subtitle_item._async_image is not None
+    finally:
+        graphics.close()
+        graphics.deleteLater()
+        qapp.processEvents()
+
+
 def test_preview_graphics_clears_async_frame_on_style_change(qapp, monkeypatch):
     from krok_helper.subtitle_render.frontend.preview import preview_graphics as pg
     from krok_helper.subtitle_render.frontend.preview.preview_graphics import PreviewGraphicsView
@@ -2631,6 +2659,194 @@ def test_preview_graphics_render_badge_closes_on_empty_track(qapp, monkeypatch):
         assert graphics._render_pending_since is None
         assert graphics._render_busy_badge.isHidden()
     finally:
+        graphics.close()
+        graphics.deleteLater()
+        qapp.processEvents()
+
+
+def test_preview_graphics_render_badge_closes_on_snapped_frame_while_paused(
+    qapp, monkeypatch
+):
+    """回归：暂停态收到吸附回帧必须闭合徽标区间；容差外仍拒绝。
+
+    修复前暂停态容差为 0，GPU 吸附回帧（偏 ≤8.3ms）全部被丢，无帧区间
+    永不闭合 →「字幕渲染中」秒数无限增长。
+    """
+    from krok_helper.subtitle_render.frontend.preview import preview_graphics as pg
+
+    monkeypatch.setattr(pg, "_RENDER_BUSY_DELAY_S", 0.0)
+    graphics = _badge_view(monkeypatch)
+    try:
+        badge = graphics._render_busy_badge
+        # 暂停态（默认未播放）请求 10_008 → 徽标出现。
+        graphics.set_time(10_008)
+        graphics._update_render_busy_badge()
+        assert not badge.isHidden()
+
+        # GPU 回帧按吸附值 10_000（偏 -8ms）到达 → 收帧并闭合区间、停表。
+        image = QImage(4, 4, QImage.Format.Format_ARGB32_Premultiplied)
+        graphics._on_async_frame(image, 10_000)
+        assert badge.isHidden()
+        assert graphics._render_pending_since is None
+        assert not graphics._render_busy_timer.isActive()
+
+        # 超出暂停容差（9ms）的帧仍被拒绝：暂停容差是帧键吸附级别，
+        # 不是播放级的 120ms。
+        graphics.set_time(10_008)
+        assert graphics._render_pending_since is not None
+        graphics._on_async_frame(image, 10_050)
+        assert graphics._render_pending_since is not None
+    finally:
+        graphics.close()
+        graphics.deleteLater()
+        qapp.processEvents()
+
+
+def test_preview_graphics_pause_re_requests_current_frame(qapp, monkeypatch):
+    """回归：暂停必须补发当前位帧请求。
+
+    GPU 播放路径的当前帧依赖前瞻缓存命中，暂停会丢弃投机批次；画布若不
+    补发请求，暂停位的帧无人渲染，已打开的徽标区间悬死。
+    """
+    from krok_helper.subtitle_render.frontend.preview import preview_graphics as pg
+
+    graphics = _badge_view(monkeypatch)
+    try:
+        renderer = graphics._async_renderer
+        graphics.set_time(10_008)
+        renderer.requests.clear()
+        graphics._render_pending_since = None
+        graphics._render_busy_timer.stop()
+
+        graphics.set_playing(False)
+
+        # 暂停补发的请求用的是画布当前媒体时刻（原始毫秒，吸附在渲染器内做）。
+        assert renderer.requests == [10_008]
+        assert graphics._render_pending_since is not None
+        # 无轨道时不得补发（set_track(None) 自身的刷新请求不算）。
+        graphics.set_track(None)
+        renderer.requests.clear()
+        graphics.set_playing(False)
+        assert renderer.requests == []
+    finally:
+        graphics.close()
+        graphics.deleteLater()
+        qapp.processEvents()
+
+
+def test_preview_pause_slow_configure_still_shows_stage_badge(qapp, monkeypatch):
+    """回归护栏：暂停补帧修复不得吞掉慢 configure 的阶段提示。
+
+    真实 GpuAsyncSubtitleRenderer + 真实画布，fake sidecar 的第二次
+    configure_gpu（样式变化触发的全量重排）阻塞模拟慢场景构建：期间
+    「场景构建」进度事件应照常点亮徽标，暂停位帧到达后徽标按常归隐。
+    （用户反馈核对：暂停修复后阶段提示是否还能出现。）
+    """
+    import krok_helper.subtitle_render.frontend.preview.preview_async as preview_async
+    from krok_helper.subtitle_render.frontend.preview import preview_graphics as pg
+    from krok_helper.subtitle_render.frontend.preview.preview_graphics import (
+        PreviewGraphicsView,
+    )
+    from krok_helper.subtitle_render.domain.models import (
+        Style,
+        TimingChar,
+        TimingLine,
+        TimingTrack,
+    )
+
+    configure_count = 0
+    slow_configure_entered = threading.Event()
+    release_slow_configure = threading.Event()
+
+    class SlowConfigureProcess:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def start(self):
+            return {"ok": True, "event": "ready"}
+
+        def configure_gpu(self, *args, progress=None, **kwargs):
+            nonlocal configure_count
+            configure_count += 1
+            if configure_count < 2:
+                return {"ok": True, "event": "gpu_configured", "worker_count": 1}
+            if progress is not None:
+                progress()  # IR 重排完成 → renderer 侧 emit(80, "场景构建")
+            slow_configure_entered.set()
+            release_slow_configure.wait(timeout=5.0)
+            return {"ok": True, "event": "gpu_configured", "worker_count": 1}
+
+        def render_gpu_frame(self, t_ms, **kwargs):
+            return {
+                "ok": True,
+                "event": "gpu_frame_ready",
+                "shm_key": "gpu-slow-configure-ring",
+                "t_ms": int(t_ms),
+            }
+
+        def close(self):
+            release_slow_configure.set()
+
+    class FakeGpuReader:
+        def __init__(self, shm_key):
+            self.shm_key = shm_key
+
+        @classmethod
+        def from_event(cls, event):
+            return cls(event["shm_key"])
+
+        def read_qimage(self, event):
+            image = QImage(8, 8, QImage.Format.Format_RGBA8888)
+            image.fill(QColor("#112233"))
+            return image
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(preview_async, "NativeRendererProcess", SlowConfigureProcess)
+    monkeypatch.setattr(preview_async, "SharedFrameRingReader", FakeGpuReader)
+    monkeypatch.setattr(pg, "async_preview_enabled", lambda: True)
+    monkeypatch.setattr(pg, "gpu_preview_enabled", lambda: True)
+    monkeypatch.setattr(pg, "_RENDER_BUSY_DELAY_S", 0.0)
+
+    graphics = PreviewGraphicsView()
+    try:
+        track = TimingTrack(
+            lines=[TimingLine(chars=[TimingChar("歌", 0)], end_ms=1_000)]
+        )
+        graphics.set_track(track)
+        graphics.set_time(10_008)
+        # 初始场景构建（第一次 configure，fake 立即返回）+ 首帧回账。
+        deadline = time.monotonic() + 5.0
+        while graphics._render_pending_since is not None and time.monotonic() < deadline:
+            qapp.processEvents()
+            time.sleep(0.01)
+        assert configure_count == 1
+        assert graphics._render_pending_since is None
+
+        # 暂停态下改样式 → 全量重排（第二次 configure）阻塞在场景构建。
+        graphics.set_style(Style(font_size_px=96))
+        assert slow_configure_entered.wait(timeout=5.0)
+        qapp.processEvents()  # 投递 emit(80, "场景构建") 队列信号
+        graphics._update_render_busy_badge()
+
+        badge = graphics._render_busy_badge
+        assert not badge.isHidden()
+        assert "场景构建" in badge._text
+
+        # 场景构建完成、暂停位帧（吸附时刻 10_000）到达 → 徽标归隐、区间闭合。
+        release_slow_configure.set()
+        deadline = time.monotonic() + 5.0
+        while (graphics._render_pending_since is not None or badge.isHidden()) and (
+            time.monotonic() < deadline
+        ):
+            qapp.processEvents()
+            time.sleep(0.01)
+        assert graphics._render_pending_since is None
+        assert badge.isHidden()
+        assert graphics._subtitle_item._async_image is not None
+    finally:
+        release_slow_configure.set()
         graphics.close()
         graphics.deleteLater()
         qapp.processEvents()
