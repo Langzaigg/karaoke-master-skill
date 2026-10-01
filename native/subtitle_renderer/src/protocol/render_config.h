@@ -211,6 +211,12 @@ struct ResolvedStyle {
     // so switching the main text's stroke2 off must not erase the width an
     // explicitly enabled ruby still inherits.
     int stroke2RawWidthPx = 0;
+    // Latin-track stroke overrides for alnum characters; unset (or a
+    // non-positive width) follows the Japanese-track values above — mirroring
+    // the CPU painter's main_script_stroke_style fallback chain.
+    std::optional<int> latinStrokeWidthPx;
+    std::optional<bool> latinStroke2Enabled;
+    std::optional<int> latinStroke2WidthPx;
     QString decorationKind = QStringLiteral("shadow");
     int glowRadiusPx = 10;
     int glowBeforeRadiusPx = 10;

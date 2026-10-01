@@ -349,6 +349,12 @@ struct TextStyle {
     PaintStyle afterDecorPaint;
     float strokeWidth = 0.0f;
     float stroke2Width = 0.0f;
+    // Script-effective strokes for alnum characters (latin overrides with the
+    // Japanese-track fallback already applied); the projection materializes
+    // per-script style variants from them, mirroring the CPU painter's
+    // main_script_stroke_style.
+    float latinStrokeWidth = 0.0f;
+    float latinStroke2Width = 0.0f;
     std::string decorationKind = "none";
     float glowBeforeRadius = 10.0f;
     float glowAfterRadius = 10.0f;

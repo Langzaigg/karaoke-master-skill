@@ -1,5 +1,6 @@
 #include "gpu_scene_projection.h"
 
+#include "../text_semantics.h"
 #include "qt_character_animation.h"
 #include "qt_display_plan.h"
 #include "qt_font_factory.h"
@@ -149,6 +150,29 @@ void applyGpuResolvedStyle(
     target.afterDecorPaint = gpuPaint(source.afterShadowFill, source.afterShadowColor);
     target.strokeWidth = static_cast<float>(source.strokeWidthPx * scale);
     target.stroke2Width = static_cast<float>(source.stroke2WidthPx * scale);
+    // Latin-track strokes for alnum characters (CPU: main_script_stroke_style):
+    // an unset or non-positive latin width follows the Japanese-track value;
+    // the latin stroke2 flag follows the main flag when unset and gates the
+    // width exactly once, inheriting the ungated raw width so an explicitly
+    // enabled latin stroke2 survives a switched-off main track.
+    {
+        const int latinStrokePx =
+            (source.latinStrokeWidthPx.has_value()
+                && *source.latinStrokeWidthPx > 0)
+                ? *source.latinStrokeWidthPx
+                : source.strokeWidthPx;
+        const bool latinStroke2On = source.latinStroke2Enabled.value_or(
+            source.stroke2Enabled
+        );
+        const int latinStroke2RawPx =
+            (source.latinStroke2WidthPx.has_value()
+                && *source.latinStroke2WidthPx > 0)
+                ? *source.latinStroke2WidthPx
+                : source.stroke2RawWidthPx;
+        const int latinStroke2Px = latinStroke2On ? latinStroke2RawPx : 0;
+        target.latinStrokeWidth = static_cast<float>(latinStrokePx * scale);
+        target.latinStroke2Width = static_cast<float>(latinStroke2Px * scale);
+    }
     target.decorationKind = source.decorationKind.toStdString();
     target.glowBeforeRadius = static_cast<float>(source.glowBeforeRadiusPx * scale);
     target.glowAfterRadius = static_cast<float>(source.glowAfterRadiusPx * scale);
@@ -474,6 +498,26 @@ void applyGpuLineLayout(
 }
 }  // namespace
 
+// CPU 对齐（engine/text/layout.py main_script_stroke_style）：拉丁描边
+// 覆盖（未设或非正值跟日文轨）是否与日文轨实际不同——只有不同才需要
+// 为英数字符派生脚本变体样式，未设置的工程保持原 styleIndex 路径不变。
+bool latinStrokesDiffer(const protocol::ResolvedStyle &style) {
+    const int japaneseStroke2 = style.stroke2Enabled ? style.stroke2RawWidthPx : 0;
+    const int latinStroke =
+        (style.latinStrokeWidthPx.has_value() && *style.latinStrokeWidthPx > 0)
+            ? *style.latinStrokeWidthPx
+            : style.strokeWidthPx;
+    const bool latinStroke2On = style.latinStroke2Enabled.value_or(
+        style.stroke2Enabled
+    );
+    const int latinStroke2Raw =
+        (style.latinStroke2WidthPx.has_value() && *style.latinStroke2WidthPx > 0)
+            ? *style.latinStroke2WidthPx
+            : style.stroke2RawWidthPx;
+    const int latinStroke2 = latinStroke2On ? latinStroke2Raw : 0;
+    return latinStroke != style.strokeWidthPx || latinStroke2 != japaneseStroke2;
+}
+
 krok::subtitle::native::RenderScene gpuSceneFromConfig(const RenderConfig &config) {
     using krok::subtitle::native::RenderScene;
     using krok::subtitle::native::TextChar;
@@ -655,13 +699,30 @@ krok::subtitle::native::RenderScene gpuSceneFromConfig(const RenderConfig &confi
         line.chars.reserve(sourceLine.chars.size());
         for (std::size_t index = 0; index < sourceLine.chars.size(); ++index) {
             int styleIndex = -1;
+            // CPU 对齐（main_script_stroke_style）：横排时英数字符的描边走
+            // 拉丁轨，按脚本派生变体样式；竖排 CPU 本就逐字用行样式，不派生。
+            const protocol::TimingChar &sourceChar = sourceLine.chars[index];
+            const bool latinGlyph = !config.vertical
+                && sourceChar.vectorGlyph == nullptr
+                && !sourceChar.bitmapGuide.has_value()
+                && krok::subtitle::native::isLatinText(
+                    sourceChar.text.toStdWString()
+                );
+            const bool latinVariant =
+                latinGlyph
+                && latinStrokesDiffer(
+                    resolvedStyleForCharacter(config, sourceLine, sourceChar)
+                );
             // Painter's vertical path currently uses the resolved line style
             // for every glyph; inline role styles are a horizontal-only
             // contract until the CPU oracle itself gains vertical runs.
-            if (!config.vertical && !sourceLine.chars[index].roleLabel.isEmpty()) {
+            if (!config.vertical && !sourceChar.roleLabel.isEmpty()) {
                 QString key = resolvedStyleKey(
-                    sourceLine.singerId, sourceLine.chars[index].roleLabel
+                    sourceLine.singerId, sourceChar.roleLabel
                 );
+                if (latinVariant) {
+                    key += QStringLiteral("|latin");
+                }
                 if (sourceLine.layout.present) {
                     key += QStringLiteral("|layout:%1:%2:%3:%4:%5:%6")
                         .arg(sourceLine.layout.letterSpacingPx)
@@ -678,7 +739,7 @@ krok::subtitle::native::RenderScene gpuSceneFromConfig(const RenderConfig &confi
                     TextStyle charStyle = scene.lineStyles.back();
                     applyGpuResolvedStyle(
                         charStyle,
-                        resolvedStyleForCharacter(config, sourceLine, sourceLine.chars[index]),
+                        resolvedStyleForCharacter(config, sourceLine, sourceChar),
                         scale
                     );
                     applyGpuLineLayout(
@@ -691,6 +752,49 @@ krok::subtitle::native::RenderScene gpuSceneFromConfig(const RenderConfig &confi
                     charStyle.layoutOffsetY += static_cast<float>(
                         sourceLine.layoutOffsetY * scale
                     );
+                    if (latinVariant) {
+                        charStyle.strokeWidth = charStyle.latinStrokeWidth;
+                        charStyle.stroke2Width = charStyle.latinStroke2Width;
+                    }
+                    styleIndex = static_cast<int>(scene.charStyles.size());
+                    scene.charStyles.push_back(std::move(charStyle));
+                    charStyleIndices.insert(key, styleIndex);
+                }
+            } else if (latinVariant) {
+                // 无角色标注的英数字符同样需要脚本变体；键不含角色，仅
+                // 拉丁轨 + 布局参数。
+                QString key = QStringLiteral("latin");
+                if (sourceLine.layout.present) {
+                    key += QStringLiteral("|layout:%1:%2:%3:%4:%5:%6")
+                        .arg(sourceLine.layout.letterSpacingPx)
+                        .arg(sourceLine.layout.spaceWidthPercent)
+                        .arg(sourceLine.layout.allowBiting ? 1 : 0)
+                        .arg(sourceLine.layout.rubyIntervalPx)
+                        .arg(sourceLine.layout.rubyAlignment)
+                        .arg(sourceLine.layout.rubyGapPx);
+                }
+                const auto existing = charStyleIndices.constFind(key);
+                if (existing != charStyleIndices.constEnd()) {
+                    styleIndex = existing.value();
+                } else {
+                    TextStyle charStyle = scene.lineStyles.back();
+                    applyGpuResolvedStyle(
+                        charStyle,
+                        resolvedStyleForCharacter(config, sourceLine, sourceChar),
+                        scale
+                    );
+                    applyGpuLineLayout(
+                        charStyle, sourceLine.layout, sourceLine.lane,
+                        sourceLine.centerOverride, sourceLine.pageLineCount, scale
+                    );
+                    charStyle.layoutOffsetX += static_cast<float>(
+                        sourceLine.layoutOffsetX * scale
+                    );
+                    charStyle.layoutOffsetY += static_cast<float>(
+                        sourceLine.layoutOffsetY * scale
+                    );
+                    charStyle.strokeWidth = charStyle.latinStrokeWidth;
+                    charStyle.stroke2Width = charStyle.latinStroke2Width;
                     styleIndex = static_cast<int>(scene.charStyles.size());
                     scene.charStyles.push_back(std::move(charStyle));
                     charStyleIndices.insert(key, styleIndex);

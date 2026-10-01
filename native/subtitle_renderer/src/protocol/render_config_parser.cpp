@@ -556,6 +556,21 @@ void applyScalarStyleOverrides(ResolvedStyle &cfg, const QJsonObject &style) {
             cfg.stroke2RawWidthPx = cfg.stroke2WidthPx;
         }
     }
+    if (hasNonNull(style, QStringLiteral("latin_stroke_width_px"))) {
+        cfg.latinStrokeWidthPx = std::max(
+            0, intValue(style, QStringLiteral("latin_stroke_width_px"), 0)
+        );
+    }
+    if (hasNonNull(style, QStringLiteral("latin_stroke2_enabled"))) {
+        cfg.latinStroke2Enabled = style.value(
+            QStringLiteral("latin_stroke2_enabled")
+        ).toBool();
+    }
+    if (hasNonNull(style, QStringLiteral("latin_stroke2_width_px"))) {
+        cfg.latinStroke2WidthPx = std::max(
+            0, intValue(style, QStringLiteral("latin_stroke2_width_px"), 0)
+        );
+    }
     if (hasNonNull(style, QStringLiteral("decoration_kind"))) {
         cfg.decorationKind = stringValue(style, QStringLiteral("decoration_kind"), cfg.decorationKind);
     }
@@ -973,6 +988,21 @@ std::optional<RenderConfig> parseRenderConfig(const QJsonObject &ir, QString *er
         if (!base.stroke2Enabled) {
             base.stroke2WidthPx = 0;
         }
+    }
+    if (style.value(QStringLiteral("latin_stroke_width_px")).isDouble()) {
+        base.latinStrokeWidthPx = std::max(
+            0, intValue(style, QStringLiteral("latin_stroke_width_px"), 0)
+        );
+    }
+    if (style.value(QStringLiteral("latin_stroke2_enabled")).isBool()) {
+        base.latinStroke2Enabled = style.value(
+            QStringLiteral("latin_stroke2_enabled")
+        ).toBool();
+    }
+    if (style.value(QStringLiteral("latin_stroke2_width_px")).isDouble()) {
+        base.latinStroke2WidthPx = std::max(
+            0, intValue(style, QStringLiteral("latin_stroke2_width_px"), 0)
+        );
     }
     base.decorationKind = stringValue(style, QStringLiteral("decoration_kind"), base.decorationKind);
     base.glowRadiusPx = std::max(1, intValue(style, QStringLiteral("glow_radius_px"), base.glowRadiusPx));

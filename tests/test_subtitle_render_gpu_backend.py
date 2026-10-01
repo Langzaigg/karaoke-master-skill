@@ -4437,6 +4437,67 @@ def test_gpu_ruby_latin_strokes_override_for_alnum_readings(monkeypatch) -> None
 
 
 @pytest.mark.skipif(os.name != "nt", reason="Direct2D GPU backend is Windows-only")
+def test_gpu_latin_strokes_override_for_alnum_main_text(monkeypatch) -> None:
+    """主文字英数字符的一重/二重描边必须走拉丁轨（CPU 同口径）。
+
+    修复前协议/投影链没有拉丁描边字段：GPU 主文字英数永远用日文轨描边。
+    修复后投影按脚本派生变体样式——仅拉丁覆盖与日文轨实际不同才派生，
+    假名字符与未设置拉丁描边的工程不受影响。
+    """
+    monkeypatch.setenv("QT_QPA_PLATFORM", "offscreen")
+
+    def alnum_track() -> TimingTrack:
+        return TimingTrack(
+            lines=[TimingLine(chars=[TimingChar("L", 0), TimingChar("V", 800)], end_ms=2_000)]
+        )
+
+    def kana_track() -> TimingTrack:
+        return TimingTrack(
+            lines=[TimingLine(chars=[TimingChar("漢", 0), TimingChar("字", 800)], end_ms=2_000)]
+        )
+
+    def stroke_style(latin_stroke: int, latin_stroke2: int) -> Style:
+        return _g1_style(
+            font_family="Meiryo",
+            font_family_latin="Meiryo",
+            font_size_px=64,
+            dual_line_layout=False,
+            stroke_width_px=4,
+            stroke2_enabled=True,
+            stroke2_width_px=2,
+            latin_stroke_width_px=latin_stroke,
+            latin_stroke2_width_px=latin_stroke2,
+        )
+
+    def opaque_pixels(payload: bytes) -> int:
+        return sum(
+            payload[index + 3] > 0 for index in range(0, len(payload), 4)
+        )
+
+    thin = stroke_style(2, 1)
+    thick = stroke_style(16, 12)
+
+    with NativeRendererProcess(_renderer_path(), response_timeout_s=15.0) as renderer:
+        _configured, thin_frames = _render_g1_frames(
+            renderer, thin, (1_999,), force_warp=True, track=alnum_track()
+        )
+        _configured, thick_frames = _render_g1_frames(
+            renderer, thick, (1_999,), force_warp=True, track=alnum_track()
+        )
+        _configured, kana_thin_frames = _render_g1_frames(
+            renderer, thin, (1_999,), force_warp=True, track=kana_track()
+        )
+        _configured, kana_thick_frames = _render_g1_frames(
+            renderer, thick, (1_999,), force_warp=True, track=kana_track()
+        )
+
+    # 英数字符：拉丁描边加粗必须有可见增量（修复前两组逐字节相同）。
+    assert opaque_pixels(thick_frames[0]) > opaque_pixels(thin_frames[0]) + 60
+    # 假名字符：拉丁轨字段不得泄漏进日文轨。
+    assert opaque_pixels(kana_thick_frames[0]) == opaque_pixels(kana_thin_frames[0])
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Direct2D GPU backend is Windows-only")
 def test_gpu_next_line_ruby_is_not_cached_at_previous_line_end(monkeypatch) -> None:
     monkeypatch.setenv("QT_QPA_PLATFORM", "offscreen")
     track = TimingTrack(
@@ -5009,6 +5070,11 @@ def test_gpu_bitmap_guide_symbol_renders_during_utopia_exit(
         line_horizontal_layout="center",
         stroke_width_px=0,
         stroke2_enabled=False,
+        # 本测试专测动图导唱符的 utopia 退场；Ruby 描边钉 0 让逐对净空
+        # 恒为 0，避免无字体 offscreen 下回退字体的负 side bearing 把
+        # CPU/GPU 的行锚点漂移推过容差（真实字体下假名净空本就为 0）。
+        ruby_stroke_width_px=0,
+        ruby_stroke2_enabled=False,
         decoration_kind="none",
         exit_anim="utopia",
         karaoke_colors=KaraokeColors(
