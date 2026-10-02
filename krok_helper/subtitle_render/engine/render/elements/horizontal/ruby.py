@@ -47,6 +47,7 @@ from krok_helper.subtitle_render.engine.render.elements.horizontal.contracts imp
     RubyWipeSegment,
 )
 from krok_helper.subtitle_render.engine.render.elements.horizontal.layout import (
+    apply_signal_band_left,
     n3_main_fill_rect,
     role_main_fill_rects,
 )
@@ -594,8 +595,15 @@ def layout_rubies(
     main_ascent_px: int | None = None,
     text_layout: TextLayout | None = None,
     ruby_font: QFont | None = None,
+    signal_band_left: float | None = None,
 ) -> list[RubyLayout]:
-    """Build frame-independent horizontal ruby layouts."""
+    """Build frame-independent horizontal ruby layouts.
+
+    ``signal_band_left``：「真一组」渐变带画布左缘（音量柱与正文第一角色
+    共用渐变带时传入）——第一角色的 ruby 共享横向盒左缘同步拓宽，ruby
+    渐变与主文字/柱体保持同一条带（仅横向渐变消费，见
+    ``apply_signal_band_left``）。
+    """
     if not rubies:
         return []
     main_box_ascent: Optional[float] = None
@@ -769,6 +777,8 @@ def layout_rubies(
     if text_layout is not None and layouts:
         main_rect = n3_main_fill_rect(text_layout, main_baseline_y)
         role_rects = role_main_fill_rects(text_layout, main_baseline_y)
+        if signal_band_left is not None:
+            apply_signal_band_left(role_rects, text_layout, signal_band_left)
         roles_by_index = {
             glyph.index: glyph.role_label for glyph in text_layout.glyphs
         }

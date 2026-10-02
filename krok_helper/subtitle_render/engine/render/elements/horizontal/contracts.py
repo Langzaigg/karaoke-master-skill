@@ -48,6 +48,11 @@ class SayatooLineLayout:
     total_w: int
     signal_x: float | None = None
     signal_y: float | None = None
+    # 「真一组」渐变带的本地跨度（相对 text_x）：左 = 柱组左缘（volume_
+    # offset_x − group_width + stroke_extent），右 = 第一角色推进右缘。
+    # 仅 音量柱启用 + auto/role 装饰档 + 段首行 + 非 RTL 时非 None；
+    # 消费方：音量柱横向渐变画刷（resolve_signal_lit_groups 换算画布）。
+    signal_band: tuple[float, float] | None = None
 
 
 @dataclass(frozen=True)
@@ -109,3 +114,8 @@ class LineLayout:
     ink_x_ranges: list = field(default_factory=list)
     ruby_layouts: tuple[RubyLayout, ...] = ()
     render_line: TimingLine | None = None
+    # 「真一组」渐变带的画布左缘（x0 + 柱组左缘本地值）：柱体装饰源与
+    # 正文第一角色同源（auto 档或 role 档悬空回退）时非 None——第一角色
+    # 的横向渐变跨度左缘拓宽到这里，柱与文字共用同一条渐变带（role 档
+    # 解析到固定方案时为 None：柱体仍取并集跨度，正文渐变不动）。
+    signal_band_left: float | None = None

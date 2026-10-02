@@ -98,6 +98,12 @@ class SignalLitGroup:
     # 配色；role 档换成按名解析的固定方案。几何/尺寸仍来自全局投影样式；
     # None = 未解析（用组样式兜底）。
     bar_style: Style | None = None
+    # 「真一组」横向渐变跨度（画布坐标）：柱组外接框 ∪ 段首行第一角色
+    # 墨迹跨度的并集，auto/role 档柱体横向渐变画刷取此跨度——柱与正文
+    # 第一角色共用同一条渐变带（正文侧由行布局把第一角色跨度左缘拓宽
+    # 到柱左缘，见 horizontal/layout 的 signal_band_left）。None = 不参与
+    # （非音量柱 / 无 band 布局），横向渐变回落柱组自身外接框。
+    fill_band_rect: QRectF | None = None
 
 
 @dataclass(frozen=True)
@@ -1074,9 +1080,12 @@ def _draw_lit_decorated_group(
     if not entries:
         return
     state = colors.after
-    group_rect = entries[0][0]
-    for rect, _is_active, _pulse in entries[1:]:
-        group_rect = group_rect.united(rect)
+    # 渐变/图片填充的画刷跨度取**全部 count 个槽位**的外接框（基准位，不含
+    # 熄灭灯的转场位移）：倒计时从右往左逐个熄灭，若按可见灯取并集，跨度
+    # 会随熄灭收缩、渐变被逐帧重新压缩——整组配色随灯减少漂移（native
+    # litLampGroupRect 同口径）。逐灯缓冲（_entry_ink）仍按可见灯取。
+    full_span = (max(int(count) - 1, 0)) * pitch + size
+    group_rect = QRectF(group.x, group.y, full_span, size)
 
     def _draw_one(target: QPainter, rect: QRectF, pulse: float) -> None:
         # 单灯绘制单元：pulse 缩放 + （图片 | 装饰栈 + 高光）。高光必须与
@@ -1398,6 +1407,11 @@ def _draw_volume_decorated_group(
     glow_after = int(glow_radius(decor_style, after=True) * scale + 0.5)
     # 渐变/图片填充的画刷跨度：柱组自身外接框（未覆盖柱与覆盖柱共享）。
     group_rect = rects[0].united(rects[-1]) if rects else QRectF()
+    # 横向渐变专用跨度（「真一组」）：柱组 ∪ 第一角色墨迹跨度的并集，
+    # 柱与正文共用同一条渐变带（正文侧同步把第一角色跨度左缘拓宽到柱
+    # 左缘）。非横向填充不受影响——fill_brush_rect 只对 gradient_horizontal
+    # 取 horizontal 跨度，竖向渐变/分段/图片仍用柱组自身框。
+    fill_band = group.fill_band_rect
 
     pulse_enabled = effective_karaoke_zoom_pulse(decor_style)
     pulse_level = zoom_pulse_curve_level(decor_style)
@@ -1442,6 +1456,7 @@ def _draw_volume_decorated_group(
                     shadow_dy,
                     glow_after if covered else glow_before,
                     group_rect,
+                    fill_band,
                     pulse,
                 ),
             )
@@ -1561,6 +1576,7 @@ def _draw_volume_column_animated(
                 shadow_dy,
                 glow_r,
                 group_rect,
+                fill_band,
                 pulse,
             ) = decorated
             if pulse != 1.0:
@@ -1585,6 +1601,7 @@ def _draw_volume_column_animated(
                 shadow_dy=shadow_dy,
                 glow_radius=glow_r,
                 fill_rect=group_rect,
+                horizontal_fill_rect=fill_band,
             )
         elif solid is not None:
             fill, stroke, stroke_width = solid
@@ -1729,8 +1746,10 @@ def resolve_signal_lit_groups(
     # 跟随——独立悬浮模块靠自身倒计时转场完成渐变消失。
     lit_auto_independent = _lit_auto_decorated(style)
     if style.lit_style == "volume":
-        group_width = volume_signal_geometry(style).group_width
+        volume_geometry = volume_signal_geometry(style)
+        group_width = volume_geometry.group_width
     else:
+        volume_geometry = None
         group_width = count * size + max(count - 1, 0) * (size * 0.5 + tracking)
     signal_heads = signal_head_context(track, style)
     index_of = (
@@ -1899,6 +1918,25 @@ def resolve_signal_lit_groups(
             if line_offsets is not None
             else (0.0, 0.0)
         )
+        # 「真一组」横向渐变跨度：布局侧（_resolve_sayatoo_line_layouts）算
+        # 好的本地 band（左 = 柱左缘，右 = 第一角色推进右缘），换算到画布。
+        # y 高度取 1：横向渐变画刷只消费 x 跨度（fill_brush_rect/
+        # createPaintBrush 同口径）。
+        fill_band_rect = None
+        if (
+            volume_geometry is not None
+            and line_layout is not None
+            and getattr(line_layout, "signal_band", None) is not None
+        ):
+            band_left = x + offset_x + anim_dx + volume_geometry.stroke_extent
+            band_right = float(line_layout.text_x) + line_layout.signal_band[1]
+            if band_right > band_left:
+                fill_band_rect = QRectF(
+                    band_left,
+                    y + offset_y + anim_dy,
+                    band_right - band_left,
+                    1.0,
+                )
         groups.append(
             SignalLitGroup(
                 x=x + offset_x + anim_dx,
@@ -1914,6 +1952,7 @@ def resolve_signal_lit_groups(
                 anim_opacity=anim_opacity,
                 bar_animations=bar_animations,
                 bar_style=bar_style,
+                fill_band_rect=fill_band_rect,
             )
         )
     return groups

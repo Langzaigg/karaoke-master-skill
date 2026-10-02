@@ -58,6 +58,7 @@ from krok_helper.subtitle_render.engine.render.elements.horizontal.contracts imp
     LineLayout,
 )
 from krok_helper.subtitle_render.engine.render.elements.horizontal.layout import (
+    apply_signal_band_left,
     bitmap_guide_anchor_descent,
     bitmap_guide_glyphs,
     glyph_is_bitmap_guide,
@@ -471,6 +472,10 @@ def paint_line_direct(
     baseline_y = layout.baseline_y
     fill_rect = n3_main_fill_rect(layout.text_layout, baseline_y)
     role_fill_rects = role_main_fill_rects(layout.text_layout, baseline_y)
+    if layout.signal_band_left is not None:
+        apply_signal_band_left(
+            role_fill_rects, layout.text_layout, layout.signal_band_left
+        )
     fill_rect_for = lambda glyphs: role_fill_rects.get(
         glyphs[0].role_label, fill_rect
     )
@@ -906,6 +911,10 @@ def line_layer_stack(
     y = layout.baseline_y
     fill_rect = n3_main_fill_rect(layout.text_layout, y)
     role_fill_rects = role_main_fill_rects(layout.text_layout, y)
+    if layout.signal_band_left is not None:
+        apply_signal_band_left(
+            role_fill_rects, layout.text_layout, layout.signal_band_left
+        )
     fill_rect_for = lambda glyphs: role_fill_rects.get(
         glyphs[0].role_label, fill_rect
     )
@@ -1045,6 +1054,10 @@ def char_transition_layer_stack(
     rtl = layout.rtl
     fill_rect = n3_main_fill_rect(layout.text_layout, y)
     role_fill_rects = role_main_fill_rects(layout.text_layout, y)
+    if layout.signal_band_left is not None:
+        apply_signal_band_left(
+            role_fill_rects, layout.text_layout, layout.signal_band_left
+        )
     is_spin = transition.effect == "spin_flip"
     is_drip = transition.effect == "char_drip"
     before_glow_layers: list = []

@@ -2221,6 +2221,9 @@ def _resolve_sayatoo_line_layouts(
         text_line_w = max(int(round(text_w)) + left_ext + right_ext, 1)
         center_line = _line_center_override(track, line, line_style)
         signal_x: float | None = None
+        # 信号模块关闭时下方 if 不进入，但 _SayatooLineLayout 构造恒引用
+        # signal_band——必须在此默认初始化，否则无信号渲染全崩。
+        signal_band: tuple[float, float] | None = None
         # 独立音量柱参与 union 的窗口必须跟随音量柱时序（volume_* 投影后的
         # signals_duration_ms 等字段）；直接传 line_style 会读到形状灯的
         # signals_duration_ms，闪烁熄灭帧 union 失效，文字错误回到单独居中。
@@ -2275,6 +2278,46 @@ def _resolve_sayatoo_line_layouts(
             )
             text_x = float(union_x) - union_left
             signal_x = text_x + draw_left
+            # 「真一组」渐变带（本地，相对 text_x）：左 = 柱组左缘，右 =
+            # 第一角色（与柱体装饰源同款取法）推进右缘。柱体横向渐变画刷
+            # 取此跨度，正文第一角色跨度左缘同步拓宽到同一左缘（horizontal/
+            # layout 的 signal_band_left）——柱与文字共用一条渐变带。
+            signal_band: tuple[float, float] | None = None
+            if (
+                signal_metrics.is_volume
+                and active_signal_style.volume_appearance_mode in {"auto", "role"}
+                and not (line_style.right_to_left != line.wipe_reverse)
+            ):
+                # 首个非空白字符所属角色（role_label=None 是合法键：无角色
+                # 行的角色就是基础样式，与 style_for_role / role_fill_rects
+                # 的键口径一致）；哨兵区分「无可见字符」。
+                first_role = next(
+                    (
+                        char.role_label
+                        for char in render_line.chars
+                        if char.text and not char.text.isspace()
+                    ),
+                    "__none__",
+                )
+                if first_role != "__none__":
+                    lefts = _char_left_positions(
+                        char_widths,
+                        0,
+                        False,
+                        _letter_spacing(line_style),
+                        char_gaps=char_gaps,
+                        n3_no_backtracking=(
+                            line_style.layout_semantics == "n3_1074"
+                        ),
+                    )
+                    signal_band = (
+                        draw_left + signal_metrics.stroke_extent,
+                        max(
+                            float(lefts[index]) + float(char_widths[index])
+                            for index, char in enumerate(render_line.chars)
+                            if char.role_label == first_role
+                        ),
+                    )
         else:
             text_x = float(
                 _resolve_line_x_smart(
@@ -2310,6 +2353,7 @@ def _resolve_sayatoo_line_layouts(
                 if signal_metrics is not None and signal_x is not None
                 else None
             ),
+            signal_band=signal_band,
         )
         # Identity is authoritative for rendering because overlapping pages can
         # reuse a lane.  Keep the lane alias for older helpers/tests that inspect
@@ -4157,17 +4201,29 @@ def _paint_line_static(
                 rtl=layout.rtl, ink_x_ranges=layout.ink_x_ranges,
                 fill_segments=layout.fill_segments,
                 guide_anim_anchor_ms=guide_anim_anchor_ms,
+                signal_band_left=layout.signal_band_left,
             )
         else:
+            transition_fill_rect = _n3_main_fill_rect(
+                layout.text_layout, layout.baseline_y
+            )
+            if layout.signal_band_left is not None:
+                # 「真一组」渐变带：逐字转场路径的画刷跨度同样把左缘拓宽
+                # 到柱组左缘（与静态路径的 role 跨度拓宽同口径）。
+                transition_fill_rect = QRectF(transition_fill_rect)
+                transition_fill_rect.setLeft(
+                    min(
+                        float(transition_fill_rect.left()),
+                        float(layout.signal_band_left),
+                    )
+                )
             _paint_line_with_character_transition(
                 painter, render_line, layout.char_widths, layout.char_x_ranges, layout.intervals,
                 layout.active_rubies, layout.font, layout.baseline_y, layout.metrics,
                 style, layout.colors, layout.line_rect, t_ms, transition,
                 rtl=layout.rtl, font_for=layout.font_for, ink_x_ranges=layout.ink_x_ranges,
                 glyphs_by_index=_role_glyphs_by_index(render_line, layout.text_layout),
-                fill_rect=_n3_main_fill_rect(
-                    layout.text_layout, layout.baseline_y
-                ),
+                fill_rect=transition_fill_rect,
                 fill_segments=layout.fill_segments,
                 guide_anim_anchor_ms=guide_anim_anchor_ms,
             )
@@ -4699,10 +4755,16 @@ def _paint_role_line_with_character_transition(
     ink_x_ranges: list[tuple[int, int]] | None = None,
     fill_segments: list[_FillSegment] | None = None,
     guide_anim_anchor_ms: int = 0,
+    signal_band_left: float | None = None,
 ) -> None:
     # 走字 ratio 按墨水边界算（与静态路径一致）；缺省回退 advance 框。
     fill_ranges = ink_x_ranges if ink_x_ranges is not None else char_x_ranges
     fill_rect = _n3_main_fill_rect(layout, baseline_y)
+    if signal_band_left is not None:
+        # 「真一组」渐变带：逐字转场路径的画刷跨度左缘拓宽到柱组左缘
+        # （与静态路径的 role 跨度拓宽同口径，见 apply_signal_band_left）。
+        fill_rect = QRectF(fill_rect)
+        fill_rect.setLeft(min(float(fill_rect.left()), float(signal_band_left)))
     glyphs_by_index = _role_glyphs_by_index(line, layout)
     count = max(len(line.chars), 1)
     ruby_groups = _resolve_char_ruby_groups(active_rubies, line, intervals)
@@ -5682,6 +5744,7 @@ def _layout_rubies(
     main_ascent_px: int | None = None,
     text_layout: _TextLayout | None = None,
     ruby_font: QFont | None = None,
+    signal_band_left: float | None = None,
 ) -> list[_RubyLayout]:
     return _build_horizontal_ruby_layouts(
         ruby_metrics,
@@ -5695,6 +5758,7 @@ def _layout_rubies(
         main_ascent_px=main_ascent_px,
         text_layout=text_layout,
         ruby_font=ruby_font,
+        signal_band_left=signal_band_left,
     )
 
 

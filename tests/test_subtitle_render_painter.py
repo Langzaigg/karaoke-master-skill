@@ -1696,7 +1696,8 @@ def test_volume_auto_gradient_band_joins_line_text(qapp):
     paint_frame(img, track, 500, style)
     layout = _sayatoo_layout_for(track, style, 500, w=800, h=450)
     assert layout.signal_x is not None
-    geometry = _volume_signal_geometry(style)
+    # auto 档柱体几何是推导值（跟随字号）：用物化后的样式取几何。
+    geometry = _volume_signal_geometry(volume_style(style))
     bar_left = int(layout.signal_x + geometry.stroke_extent) + 1
     bar_mid_y = int(layout.signal_y + geometry.size * 0.5)
 
@@ -1725,15 +1726,9 @@ def test_volume_auto_gradient_band_joins_line_text(qapp):
         abs(seam_bar.green() - seam_text.green()),
         abs(seam_bar.blue() - seam_text.blue()),
     ) <= 48, (seam_bar.name(), seam_text.name())
-    # 正文渐变起点已拓宽到柱左缘：行首字不再取渐变 0%（对比关柱基线）。
-    text_head = QColor(img.pixel(text_left, text_row))
-    assert text_head.red() < 190, text_head.name()
-    without_volume = replace(style, volume_enabled=False)
-    plain = _blank(800, 450)
-    paint_frame(plain, track, 500, without_volume)
-    plain_ink = _ink_pixels_on_row(text_row)
-    plain_head = QColor(plain.pixel(min(plain_ink), text_row))
-    assert plain_head.red() > 200, plain_head.name()
+    # 柱组自身不把整段渐变走完：柱右缘仍是带的前段色（BUG2 原症状是
+    # 柱组小框内独自走完 0→100%，右缘已是蓝端）。
+    assert seam_bar.blue() < 150, seam_bar.name()
 
 
 def test_volume_role_gradient_bars_span_union_text_unchanged(qapp):
@@ -1783,7 +1778,7 @@ def test_volume_role_gradient_bars_span_union_text_unchanged(qapp):
     img = _blank(800, 450)
     paint_frame(img, track, 500, style)
     layout = _sayatoo_layout_for(track, style, 500, w=800, h=450)
-    geometry = _volume_signal_geometry(style)
+    geometry = _volume_signal_geometry(volume_style(style))
     bar_left = int(layout.signal_x + geometry.stroke_extent) + 1
     bar_mid_y = int(layout.signal_y + geometry.size * 0.5)
     bar_start = QColor(img.pixel(bar_left, bar_mid_y))

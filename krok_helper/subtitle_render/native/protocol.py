@@ -35,7 +35,10 @@ from krok_helper.subtitle_render.domain.models import (
     title_overlay_to_dict,
 )
 from krok_helper.subtitle_render.serialization.timing import guide_symbol_to_dict
-from krok_helper.subtitle_render.engine.style.style_semantics import style_for_role
+from krok_helper.subtitle_render.engine.style.style_semantics import (
+    appearance_role_source,
+    style_for_role,
+)
 
 RENDER_IR_SCHEMA = 2
 
@@ -309,6 +312,7 @@ def timing_line_to_ir(
     page_line_count: int = 0,
     section_index: int = -1,
     signal_head: bool = False,
+    signal_band_join: bool = False,
     lane: int = 0,
     layout_lane: int | None = None,
     display_start_ms: int | None = None,
@@ -363,6 +367,12 @@ def timing_line_to_ir(
         # 指示灯（SignalsLits 的全部 lit 样式）只画每 S 第一 P 第一行；
         # 旧宿主发的 IR 没有该字段，native 侧缺省按 true 解析保持旧行为。
         "signal_head": bool(signal_head),
+        # 「真一组」渐变带正文侧拓宽闸门（音量柱 auto/role 且装饰源与正文
+        # 第一角色同源 + 段首行 + 非 RTL）：native configure 据此把第一
+        # 角色（及 ruby 共享盒）的横向渐变跨度左缘拓宽到柱组左缘——柱体
+        # 与正文共用同一条渐变带，与 Painter 的 signal_band_left 同口径。
+        # 旧 IR 缺省 false 兼容。
+        "signal_band_join": bool(signal_band_join),
         "lane": int(lane),
         "layout_lane": int(lane if layout_lane is None else layout_lane),
         "display_start_ms": (
@@ -520,6 +530,18 @@ def track_to_ir(
         signal_heads = section_head_line_indices(
             track, style, section_gap_ms=max(style.section_gap_ms, 0)
         )
+    # 「真一组」正文侧拓宽闸门（样式级部分）：音量柱启用 + auto/role 档，
+    # 且装饰源与正文第一角色同源（auto，或 role 档方案悬空回退）——
+    # role 档解析到固定方案时正文渐变不参与（柱体画刷仍取并集跨度）。
+    signal_band_style_joins = (
+        style is not None
+        and style.volume_enabled
+        and style.volume_appearance_mode in {"auto", "role"}
+        and not (
+            style.volume_appearance_mode == "role"
+            and appearance_role_source(style, style.volume_role_name) is not None
+        )
+    )
     return {
         "meta": {
             "title": track.meta.title,
@@ -542,6 +564,13 @@ def track_to_ir(
                 page_line_count=page_line_counts.get(index, 0),
                 section_index=section_indices.get(index, -1),
                 signal_head=index in signal_heads,
+                signal_band_join=(
+                    signal_band_style_joins
+                    and index in signal_heads
+                    and line is not None
+                    and style is not None
+                    and style.right_to_left == line.wipe_reverse
+                ),
                 lane=schedule.get(index, (0, 0, 0))[0],
                 layout_lane=authored_lanes.get(index),
                 display_start_ms=(schedule[index][1] if index in schedule else None),

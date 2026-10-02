@@ -2472,6 +2472,52 @@ def test_build_render_ir_stamps_signal_head_for_every_lit_style():
     assert not any(line["signal_head"] for line in off_ir["track"]["lines"])
 
 
+def test_build_render_ir_stamps_signal_band_join_gates():
+    # 「真一组」渐变带正文侧拓宽闸门：auto（及 role 悬空回退）→ 段首行
+    # True；custom / role 解析到固定方案 → False；非段首行恒 False。
+    track = TimingTrack(
+        lines=[
+            TimingLine(chars=[TimingChar("あ", 10_000)], end_ms=11_000),
+            TimingLine(chars=[TimingChar("い", 12_000)], end_ms=13_000),
+        ]
+    )
+
+    def _joins(style: Style) -> list[bool]:
+        ir = build_render_ir(track, style, width=640, height=360, fps=60)
+        return [line["signal_band_join"] for line in ir["track"]["lines"]]
+
+    auto = Style(
+        volume_enabled=True,
+        volume_appearance_mode="auto",
+        volume_duration_ms=4_000,
+    )
+    assert _joins(auto) == [True, False]
+
+    custom = Style(
+        volume_enabled=True,
+        volume_appearance_mode="custom",
+        volume_duration_ms=4_000,
+    )
+    assert _joins(custom) == [False, False]
+
+    role_resolved = Style(
+        volume_enabled=True,
+        volume_appearance_mode="role",
+        volume_role_name="霓虹",
+        volume_duration_ms=4_000,
+        custom_style_schemes={"霓虹": SubtitleStyleScheme()},
+    )
+    assert _joins(role_resolved) == [False, False]
+
+    role_dangling = Style(
+        volume_enabled=True,
+        volume_appearance_mode="role",
+        volume_role_name="无此方案",
+        volume_duration_ms=4_000,
+    )
+    assert _joins(role_dangling) == [True, False]
+
+
 def test_build_render_ir_resolves_title_metadata_and_windows():
     track = TimingTrack(
         meta=TimingTrackMeta(title="曲名", artist="歌手"),

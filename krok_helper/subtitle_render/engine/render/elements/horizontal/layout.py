@@ -85,9 +85,88 @@ from krok_helper.subtitle_render.engine.render.elements.horizontal.wipe import (
     adjust_fill_release_edges,
     n3_char_wipe_ranges_by_index,
 )
+from krok_helper.subtitle_render.engine.layout.display.signal import (
+    signal_head_context,
+)
+from krok_helper.subtitle_render.engine.style.style_semantics import (
+    appearance_role_source,
+)
 from krok_helper.subtitle_render.sources.guide_symbols import (
     scaled_guide_symbol_path,
 )
+
+
+def signal_band_left_local(
+    track: TimingTrack, line: TimingLine, style: Style
+) -> float | None:
+    """「真一组」渐变带左缘（行本地，相对文字起点 = 柱组左缘）。
+
+    正文侧拓宽闸门：音量柱启用且装饰档为 auto/role、本行是信号宿主
+    （段首行）、非 RTL，且柱体装饰源与正文第一角色**同源**——auto 档，
+    或 role 档指向的方案悬空回退到 auto 口径。role 档解析到固定方案时
+    正文渐变不参与（柱体画刷仍取并集跨度，见 Sayatoo 布局的
+    ``signal_band``）。柱体侧（含 role 档）的跨度在 Painter 的
+    ``_resolve_sayatoo_line_layouts`` 同口径计算。
+    """
+    if (
+        not style.volume_enabled
+        or style.volume_appearance_mode not in {"auto", "role"}
+    ):
+        return None
+    if style.right_to_left != line.wipe_reverse:
+        return None
+    heads = signal_head_context(track, style)
+    if heads is None:
+        return None
+    index = next(
+        (
+            position
+            for position, candidate in enumerate(track.lines)
+            if candidate is line
+        ),
+        None,
+    )
+    if index is None or index not in heads:
+        return None
+    if (
+        style.volume_appearance_mode == "role"
+        and appearance_role_source(style, style.volume_role_name) is not None
+    ):
+        return None
+    # 函数内导入：elements.signal 经 horizontal 包 __init__ 反向依赖本模块，
+    # 顶层导入成环。
+    from krok_helper.subtitle_render.engine.render.elements.signal import (
+        volume_signal_geometry,
+        volume_style,
+    )
+
+    geometry = volume_signal_geometry(volume_style(style))
+    return (
+        float(style.volume_offset_x)
+        - geometry.group_width
+        + geometry.stroke_extent
+    )
+
+
+def apply_signal_band_left(
+    role_fill_rects: dict[str | None, QRectF],
+    text_layout: TextLayout,
+    band_left: float,
+) -> None:
+    """把第一角色（首个非空白字符所属角色）的填充跨度左缘拓宽到带左缘。
+
+    只有横向渐变消费 role 跨度的 x（``fill_brush_rect`` 对
+    gradient_horizontal 取 horizontal 跨度），竖向渐变/分段/图片不受
+    影响——主文字各消费点与 ruby 的共享横向盒都过这一处拓宽。
+    """
+    first_role = next(
+        (glyph.role_label for glyph in text_layout.glyphs if glyph.text.strip()),
+        None,
+    )
+    rect = role_fill_rects.get(first_role)
+    if rect is None:
+        return
+    rect.setLeft(min(float(rect.left()), float(band_left)))
 
 
 @dataclass(frozen=True)
@@ -976,6 +1055,7 @@ def layout_plain_line(
         float(metrics.height()),
     )
     colors = effective_karaoke_colors(style)
+    band_left_local = signal_band_left_local(track, source_line, style)
     ruby_layouts = tuple(
         ports.layout_rubies(
             ruby_metrics,
@@ -988,6 +1068,11 @@ def layout_plain_line(
             main_ascent_px=text_layout.ascent,
             text_layout=text_layout,
             ruby_font=ruby_font,
+            signal_band_left=(
+                float(x0) + band_left_local
+                if band_left_local is not None
+                else None
+            ),
         )
         if ruby_metrics is not None
         else ()
@@ -1016,6 +1101,11 @@ def layout_plain_line(
         ink_x_ranges=ink_x_ranges,
         ruby_layouts=ruby_layouts,
         render_line=line,
+        signal_band_left=(
+            float(x0) + band_left_local
+            if band_left_local is not None
+            else None
+        ),
     )
 
 
@@ -1150,6 +1240,7 @@ def layout_role_line(
         wipe_reverse=line.wipe_reverse,
         karaoke_effect=effective_karaoke_animation(style),
     )
+    band_left_local = signal_band_left_local(track, source_line, style)
     ruby_layouts = tuple(
         ports.layout_rubies(
             ruby_metrics,
@@ -1162,6 +1253,11 @@ def layout_role_line(
             main_ascent_px=text_layout.ascent,
             text_layout=text_layout,
             ruby_font=ruby_font,
+            signal_band_left=(
+                float(x0) + band_left_local
+                if band_left_local is not None
+                else None
+            ),
         )
         if ruby_metrics is not None
         else ()
@@ -1190,4 +1286,9 @@ def layout_role_line(
         ink_x_ranges=ink_x_ranges,
         ruby_layouts=ruby_layouts,
         render_line=line,
+        signal_band_left=(
+            float(text_layout.line_rect.left()) + band_left_local
+            if band_left_local is not None
+            else None
+        ),
     )

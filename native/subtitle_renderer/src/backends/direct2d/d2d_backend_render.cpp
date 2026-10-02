@@ -2610,6 +2610,36 @@ ProbeResult Direct2DGpuBackend::renderFrameInternal(
             }
             return bounds;
         };
+        // 「真一组」柱体横向渐变跨度：柱组外接框 ∪ 行内最左角色样式
+        // （= 第一角色）的横向跨度。auto 档正文侧已由 configure 把该样式
+        // 跨度左缘拓宽到柱左缘（同一左缘，两端一条渐变带）；role 档正文
+        // 渐变不动、柱体单独取并集跨度。仅横向渐变消费（镜像 Painter 的
+        // fill_band_rect / fill_brush_rect 口径）。
+        const auto volumeBandRect = [&](const D2D1_RECT_F &barGroupRect) {
+            D2D1_RECT_F band = barGroupRect;
+            const auto firstStyle = std::min_element(
+                line->horizontalFillBoundsByStyle.begin(),
+                line->horizontalFillBoundsByStyle.end(),
+                [](
+                    const std::pair<const int, D2D1_RECT_F> &left,
+                    const std::pair<const int, D2D1_RECT_F> &right
+                ) {
+                    return left.second.left < right.second.left;
+                }
+            );
+            if (firstStyle != line->horizontalFillBoundsByStyle.end()) {
+                band.left = std::min(band.left, firstStyle->second.left);
+                band.right = std::max(band.right, firstStyle->second.right);
+            }
+            return band;
+        };
+        const auto barBrushRect = [&](
+            const PaintStyle &paint, const D2D1_RECT_F &groupRect
+        ) {
+            return paint.mode == "gradient_horizontal"
+                ? volumeBandRect(groupRect)
+                : groupRect;
+        };
         // Image-fill brushes tile in logical canvas units (Painter parity):
         // physical layout already carries this factor, so the bitmap scale
         // must multiply it in or the sampled image region would drift with
@@ -5143,7 +5173,7 @@ ProbeResult Direct2DGpuBackend::renderFrameInternal(
                     );
                 }
                 Microsoft::WRL::ComPtr<ID2D1Brush> decorBrush = paintBrush(
-                    decorPaint, groupRect, decorColor
+                    decorPaint, barBrushRect(decorPaint, groupRect), decorColor
                 );
                 decorBrush->SetOpacity(
                     groupOpacityBase * animation.opacity
@@ -5243,8 +5273,11 @@ ProbeResult Direct2DGpuBackend::renderFrameInternal(
             );
         };
         auto litLampGroupRect = [&]() {
+            // 渐变/图片填充画刷跨度取全部 count 个槽位（基准位）：按可见
+            // 灯（0..activeIndex）取并集会随熄灭收缩、渐变被逐帧重新压缩
+            // ——整组配色随灯减少漂移（镜像 Painter 的全槽 group_rect）。
             D2D1_RECT_F groupRect = litLampRectAt(0);
-            for (int index = 1; index <= shapeState.activeIndex; ++index) {
+            for (int index = 1; index < shapeGeometry.count; ++index) {
                 const D2D1_RECT_F rect = litLampRectAt(index);
                 groupRect = D2D1::RectF(
                     std::min(groupRect.left, rect.left),
@@ -7363,7 +7396,11 @@ ProbeResult Direct2DGpuBackend::renderFrameInternal(
                                     + volumeDecorStroke2Width
                                 : volumeDecorStrokeWidth;
                             Microsoft::WRL::ComPtr<ID2D1Brush> decorBrush
-                                = paintBrush(decorPaint, groupRect, decorColor);
+                                = paintBrush(
+                                    decorPaint,
+                                    barBrushRect(decorPaint, groupRect),
+                                    decorColor
+                                );
                             decorBrush->SetOpacity(barOpacity);
                             const D2D1_RECT_F shadowRect = D2D1::RectF(
                                 rectF.left + shadowDx,
@@ -7397,7 +7434,11 @@ ProbeResult Direct2DGpuBackend::renderFrameInternal(
                     if (volumeDecorStroke2Width > 0.0f
                         && stroke2Color.alpha > 0) {
                         Microsoft::WRL::ComPtr<ID2D1Brush> stroke2Brush
-                            = paintBrush(stroke2Paint, groupRect, stroke2Color);
+                            = paintBrush(
+                                stroke2Paint,
+                                barBrushRect(stroke2Paint, groupRect),
+                                stroke2Color
+                            );
                         stroke2Brush->SetOpacity(barOpacity);
                         context->DrawRoundedRectangle(
                             rect,
@@ -7407,14 +7448,18 @@ ProbeResult Direct2DGpuBackend::renderFrameInternal(
                     }
                     if (volumeDecorStrokeWidth > 0.0f && strokeColor.alpha > 0) {
                         Microsoft::WRL::ComPtr<ID2D1Brush> strokeBrush
-                            = paintBrush(strokePaint, groupRect, strokeColor);
+                            = paintBrush(
+                                strokePaint,
+                                barBrushRect(strokePaint, groupRect),
+                                strokeColor
+                            );
                         strokeBrush->SetOpacity(barOpacity);
                         context->DrawRoundedRectangle(
                             rect, strokeBrush.Get(), volumeDecorStrokeWidth
                         );
                     }
                     Microsoft::WRL::ComPtr<ID2D1Brush> fillBrush = paintBrush(
-                        fillPaint, groupRect, fillColor
+                        fillPaint, barBrushRect(fillPaint, groupRect), fillColor
                     );
                     fillBrush->SetOpacity(barOpacity);
                     context->FillRoundedRectangle(rect, fillBrush.Get());

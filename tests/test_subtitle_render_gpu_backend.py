@@ -6155,6 +6155,107 @@ def test_gpu_g5_volume_auto_decorations_follow_first_role_painter(monkeypatch) -
 
 
 @pytest.mark.skipif(os.name != "nt", reason="Direct2D GPU backend is Windows-only")
+def test_gpu_g5_volume_gradient_band_matches_painter(monkeypatch) -> None:
+    # 「真一组」渐变带跨端对齐：auto 档横向渐变下柱组与正文共用同一条
+    # 带——柱组左缘取渐变 0%（红端）、柱组右缘未走完渐变（非蓝端），
+    # 且柱带两端像素与 Painter 逐通道一致（native configure 把第一角色
+    # 跨度左缘拓宽到柱左缘 + 柱画刷取并集跨度，镜像 Painter 的
+    # fill_band_rect / apply_signal_band_left）。
+    monkeypatch.setenv("QT_QPA_PLATFORM", "offscreen")
+    track = TimingTrack(
+        lines=[
+            TimingLine(
+                chars=[TimingChar("歌", 1_000), TimingChar("詞", 1_400)],
+                end_ms=2_000,
+            )
+        ]
+    )
+    gradient_fill = PaintFill(
+        mode="gradient_horizontal",
+        gradient_stops=((0, "#FF0000"), (100, "#0000FF")),
+    )
+    style = _g1_style(
+        font_family="Meiryo",
+        font_family_latin="Meiryo",
+        font_size_px=64,
+        stroke_width_px=0,
+        stroke2_enabled=False,
+        decoration_kind="none",
+        base_color="#FFFFFF",
+        fill_color="#FF2030",
+        dual_line_layout=False,
+        line_horizontal_layout="center",
+        line_lead_in_ms=0,
+        line_tail_ms=1_000,
+        volume_enabled=True,
+        volume_appearance_mode="auto",
+        volume_duration_ms=1_500,
+        volume_waiting_time_ms=0,
+        volume_time_offset_ms=0,
+        volume_flash_times=0,
+        volume_size=36,
+        volume_column_spacing=2,
+        karaoke_colors=KaraokeColors(
+            before=KaraokeColorState(text=gradient_fill),
+            after=KaraokeColorState(text=gradient_fill),
+        ),
+    )
+    t_ms = 900
+    painter_frame = _render_painter_oracle(style, t_ms=t_ms, track=track)
+    with NativeRendererProcess(_renderer_path(), response_timeout_s=15.0) as renderer:
+        _, (gpu_frame,) = _render_g1_frames(
+            renderer, style, (t_ms,), force_warp=True, track=track
+        )
+
+    def _channel_distance(a: bytes, b: bytes, x: int, y: int) -> int:
+        offset = (y * 640 + x) * 4
+        return max(
+            abs(a[offset + i] - b[offset + i]) for i in range(3)
+        )
+
+    # 柱组左缘 = 全帧最左墨迹；其所在列的墨迹行取中点为采样行。
+    leftmost = min(
+        x
+        for x in range(640)
+        for y in range(0, 360, 4)
+        if painter_frame[(y * 640 + x) * 4 + 3] > 60
+    )
+    rows = [
+        y
+        for y in range(360)
+        if painter_frame[(y * 640 + leftmost) * 4 + 3] > 60
+    ]
+    sample_y = (min(rows) + max(rows)) // 2
+    from krok_helper.subtitle_render.engine.render.elements.signal import (
+        volume_signal_geometry,
+        volume_style,
+    )
+
+    geometry = volume_signal_geometry(volume_style(style))
+    bar_right = leftmost + int(geometry.group_width) - 2
+    for x in (leftmost + 1, bar_right):
+        gpu_pixel = gpu_frame[(sample_y * 640 + x) * 4 : (sample_y * 640 + x) * 4 + 3]
+        painter_pixel = painter_frame[
+            (sample_y * 640 + x) * 4 : (sample_y * 640 + x) * 4 + 3
+        ]
+        assert _channel_distance(gpu_frame, painter_frame, x, sample_y) <= 45, (
+            x,
+            tuple(gpu_pixel),
+            tuple(painter_pixel),
+        )
+    head = painter_frame[
+        (sample_y * 640 + leftmost + 1) * 4 : (sample_y * 640 + leftmost + 1) * 4 + 3
+    ]
+    tail = painter_frame[
+        (sample_y * 640 + bar_right) * 4 : (sample_y * 640 + bar_right) * 4 + 3
+    ]
+    # 柱左 = 红端；柱右未走完渐变（非蓝端）——BUG2 的柱内自走 0→100%
+    # 症状在两端都不允许复现。
+    assert head[0] > 150 and head[2] < 110, tuple(head)
+    assert tail[2] < 150, tuple(tail)
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Direct2D GPU backend is Windows-only")
 def test_gpu_g5_volume_role_decorations_follow_named_scheme_painter(
     monkeypatch,
 ) -> None:

@@ -129,6 +129,9 @@ struct Direct2DGpuBackend::Impl {
         int compositeOrder = 0;
         int lane = 0;
         bool signalHead = false;
+        // 「真一组」渐变带正文侧拓宽闸门（协议注释见 render_config.h）：
+        // configure 据此拓宽第一角色的横向渐变跨度左缘。
+        bool signalBandJoin = false;
         // Python 在源加载入口已把整行时间戳严格逆序的行镜像理顺为顺序；configure
         // 期会把 chars 反转为时间序并反序配对窗口，render 期按本标记翻转走字方向。
         bool wipeReverse = false;
