@@ -5454,6 +5454,16 @@ ProbeResult Direct2DGpuBackend::renderFrameInternal(
                     && burst.kind == "ripple"
                     && (burst.fill.mode == "gradient_vertical"
                         || burst.fill.mode == "split_vertical");
+                // 横向渐变（任意层）→ 行级映射：文字的横向渐变以整行
+                // fillBounds 为跨度，粒子按其在行内的横向位置采样实心色
+                //（量化 1/32，镜像 painter；逐粒子换色不走静态笔刷）。
+                const bool lineMapped =
+                    burst.hasPaint
+                    && (burst.fill.mode == "gradient_horizontal"
+                        || (burst.strokeWidth >= 1.0f
+                            && burst.stroke.mode == "gradient_horizontal")
+                        || (burst.stroke2Width >= 1.0f
+                            && burst.stroke2.mode == "gradient_horizontal"));
                 const D2D1_RECT_F emRect = D2D1::RectF(
                     -500.0f, -500.0f, 500.0f, 500.0f
                 );
@@ -5520,15 +5530,18 @@ ProbeResult Direct2DGpuBackend::renderFrameInternal(
                     stroke2Em = burst.sizePx > 0.0f
                         ? burst.stroke2Width / burst.sizePx * 1000.0f
                         : 0.0f;
-                    // 径向环跳过静态填充笔刷（逐粒子换色）；其余配方
-                    // 用缓存的填充笔刷。宽度为 0 的描边层不建笔刷。
-                    if (!radialRing) {
+                    // 径向环跳过静态填充笔刷（逐粒子换色）；行级映射
+                    // 时仅非横向填充需要静态笔刷。宽度为 0 的描边层不建。
+                    if (!radialRing
+                        && burst.fill.mode != "gradient_horizontal") {
                         fillBrush = layerBrush(burst.fill);
                     }
-                    if (strokeEm >= 1.0f) {
+                    if (strokeEm >= 1.0f
+                        && burst.stroke.mode != "gradient_horizontal") {
                         strokeBrush = layerBrush(burst.stroke);
                     }
-                    if (stroke2Em >= 1.0f) {
+                    if (stroke2Em >= 1.0f
+                        && burst.stroke2.mode != "gradient_horizontal") {
                         stroke2Brush = layerBrush(burst.stroke2);
                     }
                     if ((strokeEm >= 1.0f || stroke2Em >= 1.0f)
@@ -5586,6 +5599,68 @@ ProbeResult Direct2DGpuBackend::renderFrameInternal(
                             context->FillGeometry(
                                 spriteIt->second.Get(), fillBrush.Get()
                             );
+                        }
+                        continue;
+                    }
+                    if (lineMapped) {
+                        // 行内横向位置 → 渐变轴采样（量化 1/32 与 painter
+                        // 同口径）；横向层用采样实心笔刷（走 LRU），其余
+                        // 层用已缓存的静态笔刷。
+                        const float boundsWidth = std::max(
+                            line->fillBounds.right - line->fillBounds.left,
+                            1.0f
+                        );
+                        float fraction =
+                            (particle.x - line->fillBounds.left)
+                            / boundsWidth;
+                        fraction = std::clamp(fraction, 0.0f, 1.0f);
+                        fraction = std::min(
+                            std::round(fraction * 32.0f), 32.0f
+                        ) / 32.0f;
+                        const auto mappedBrush =
+                            [&](const PaintStyle &paint)
+                                -> Microsoft::WRL::ComPtr<ID2D1Brush> {
+                            if (paint.mode != "gradient_horizontal") {
+                                return nullptr;
+                            }
+                            return layerBrush(
+                                solidPaint(paintColorAt(paint, fraction))
+                            );
+                        };
+                        if (stroke2Em >= 1.0f && roundStyle) {
+                            const auto b2 = mappedBrush(burst.stroke2);
+                            if (b2 || stroke2Brush) {
+                                (b2 ? b2 : stroke2Brush)->SetOpacity(alpha);
+                                context->DrawGeometry(
+                                    spriteIt->second.Get(),
+                                    (b2 ? b2 : stroke2Brush).Get(),
+                                    strokeEm + stroke2Em,
+                                    roundStyle.Get()
+                                );
+                            }
+                        }
+                        if (strokeEm >= 1.0f && roundStyle) {
+                            const auto b1 = mappedBrush(burst.stroke);
+                            if (b1 || strokeBrush) {
+                                (b1 ? b1 : strokeBrush)->SetOpacity(alpha);
+                                context->DrawGeometry(
+                                    spriteIt->second.Get(),
+                                    (b1 ? b1 : strokeBrush).Get(),
+                                    strokeEm,
+                                    roundStyle.Get()
+                                );
+                            }
+                        }
+                        if (fillBrush
+                            || burst.fill.mode == "gradient_horizontal") {
+                            const auto bf = mappedBrush(burst.fill);
+                            const auto &brush = bf ? bf : fillBrush;
+                            if (brush) {
+                                brush->SetOpacity(alpha);
+                                context->FillGeometry(
+                                    spriteIt->second.Get(), brush.Get()
+                                );
+                            }
                         }
                         continue;
                     }

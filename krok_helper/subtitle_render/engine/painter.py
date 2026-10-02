@@ -3810,9 +3810,29 @@ def _paint_line_fx_particles(
                 "gradient_vertical",
                 "split_vertical",
             }
-            if radial_ring:
+            # 横向渐变（任意层）→ 行级映射：文字的横向渐变以整条显示行为
+            # 跨度（fill_brush_rect 的 horizontal_bounds / GPU fillBounds），
+            # 粒子若在自身小框里重走整段渐变就与行配色口径不一致
+            #（2026-10 用户实测发现）。改为每颗粒子按其在行内的横向位置
+            # 采样实心色——粒子群整体还原行级色带。逐粒子换色，不能烘精
+            # 灵；其余层（非横向渐变描边等）走矢量绘制。
+            horizontal_mapped = (
+                fill.mode == "gradient_horizontal"
+                or (stroke_em >= 1.0 and stroke_fill.mode == "gradient_horizontal")
+                or (
+                    stroke2_em >= 1.0
+                    and stroke2_fill.mode == "gradient_horizontal"
+                )
+            )
+            if radial_ring or horizontal_mapped:
                 sprite_image = None
                 sprite_extent = 512.0
+                hgrad_box = None
+                if horizontal_mapped:
+                    box = getattr(layout, "horizontal_gradient_rect", None)
+                    if box is None or box.width() <= 0.0:
+                        box = QRectF(line_left, 0.0, max(line_right - line_left, 1.0), 1.0)
+                    hgrad_box = box
             else:
                 # 其余配方：整粒子精灵（含描边）只烘焙一次，逐粒子是一次
                 # 平移/旋转/缩放的平滑贴图。
@@ -3827,6 +3847,8 @@ def _paint_line_fx_particles(
         else:
             fill = None
             radial_ring = False
+            horizontal_mapped = False
+            hgrad_box = None
             sprite_image = None
             sprite_extent = 512.0
             color_key = str(burst["color"])
@@ -3864,6 +3886,61 @@ def _paint_line_fx_particles(
                 scale = state.size_px / 1000.0
                 painter.scale(scale, scale)
                 painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+                if horizontal_mapped:
+                    # 行内横向位置采样（量化 1/32，与 GPU 同口径）：横向渐
+                    # 变层取该位置的实心色，其余层（纵向渐变/纯色描边）用
+                    # 配方缓存笔刷照常矢量绘制。
+                    fraction = (
+                        (state.x - hgrad_box.left()) / max(hgrad_box.width(), 1.0)
+                    )
+                    fraction = min(max(fraction, 0.0), 1.0)
+                    fraction = min(round(fraction * 32.0), 32) / 32.0
+
+                    def _mapped_brush(layer_fill):
+                        if layer_fill.mode != "gradient_horizontal":
+                            return None  # 调用方回退配方笔刷
+                        key = ("h", _fill_signature(layer_fill), fraction)
+                        with _FX_BRUSH_CACHE_LOCK:
+                            cached = _FX_BRUSH_CACHE.get(key)
+                            if cached is not None:
+                                _FX_BRUSH_CACHE.move_to_end(key)
+                                return cached
+                        brush = QBrush(
+                            _fx_fill_color_at(layer_fill, fraction)
+                        )
+                        with _FX_BRUSH_CACHE_LOCK:
+                            if len(_FX_BRUSH_CACHE) >= _FX_BRUSH_CACHE_MAX:
+                                _FX_BRUSH_CACHE.popitem(last=False)
+                            _FX_BRUSH_CACHE[key] = brush
+                        return brush
+
+                    if stroke2_em >= 1.0:
+                        pen2 = QPen(
+                            _mapped_brush(stroke2_fill)
+                            or _fx_particle_brush(stroke2_fill),
+                            stroke_em + stroke2_em,
+                        )
+                        pen2.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
+                        pen2.setCapStyle(Qt.PenCapStyle.RoundCap)
+                        painter.setPen(pen2)
+                        painter.drawPath(sprite)
+                    if stroke_em >= 1.0:
+                        pen = QPen(
+                            _mapped_brush(stroke_fill)
+                            or _fx_particle_brush(stroke_fill),
+                            stroke_em,
+                        )
+                        pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
+                        pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+                        painter.setPen(pen)
+                        painter.drawPath(sprite)
+                    painter.setPen(Qt.PenStyle.NoPen)
+                    if fill.mode == "gradient_horizontal":
+                        painter.setBrush(_mapped_brush(fill))
+                    else:
+                        painter.setBrush(_fx_particle_brush(fill))
+                    painter.drawPath(sprite)
+                    continue
                 if radial_ring:
                     # 径向采样色：环半径由 0.25×size 扩散到 1.10×size，
                     # 归一化进度 = (size/size_burst - 0.25)/0.85，正好是

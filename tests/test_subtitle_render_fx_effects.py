@@ -1410,14 +1410,98 @@ def test_painter_follow_mode_uses_each_chars_role(qapp):
     img = QImage(800, 450, QImage.Format.Format_ARGB32_Premultiplied)
     img.fill(0xFF101010)
     paint_frame(img, track, 700, style)
-    greenish = 0
+    # 主唱字在行**左端**：行级横向映射下采样到渐变的橙端（#FF8800）；
+    # 行样式（纯红 #FF0000）不可能产生橙——橙像素存在即证明逐字角色
+    # 样式 + 行内位置采样同时生效（2026-10 口径）。
+    orangeish = 0
     for y in range(0, img.height(), 2):
         for x in range(0, img.width(), 2):
             px = img.pixel(x, y)
             r, g, b = (px >> 16) & 0xFF, (px >> 8) & 0xFF, px & 0xFF
-            if g > 130 and g > r + 30 and g > b + 10:
-                greenish += 1
-    # 「主唱」字符的粒子必须吃到横向渐变的绿端；行样式（纯红）不可能
-    # 产生绿——绿像素存在即证明逐字角色样式生效。
-    assert greenish > 10, f"逐字角色粒子未生效，绿端像素 {greenish}"
+            if r > 170 and 80 < g < 160 and b < 90:
+                orangeish += 1
+    assert orangeish > 10, f"逐字角色粒子未生效，橙端像素 {orangeish}"
+    clear_particle_paint_cache()
+
+
+def test_painter_horizontal_gradient_maps_to_line_span(qapp):
+    """横向渐变的行级映射（2026-10 用户实测 bug 的回归护栏）。
+
+    文字的横向渐变以整条显示行为跨度（n3_main_fill_rect 行墨迹并集 /
+    GPU fillBounds）；粒子若在自身小框里重走整段渐变，观感与行配色完全
+    不同。修复后每颗粒子按其在行内的横向位置采样实心色——左端字=起点
+    色、右端字=终点色，粒子群整体还原行级色带。
+    """
+    from PyQt6.QtGui import QImage
+
+    from krok_helper.subtitle_render.domain.models import SubtitleStyleScheme
+    from krok_helper.subtitle_render.domain.paint import (
+        KaraokeColorState,
+        KaraokeColors,
+        PaintFill,
+    )
+    from krok_helper.subtitle_render.domain.timing import TimingChar, TimingTrack
+    from krok_helper.subtitle_render.engine.painter import paint_frame
+    from krok_helper.subtitle_render.engine.render.effects.particles import (
+        clear_particle_paint_cache,
+    )
+
+    clear_particle_paint_cache()
+    grad = PaintFill(
+        mode="gradient_horizontal",
+        start_color="#FF0000",
+        end_color="#0000FF",
+        gradient_stops=[(0, "#FF0000"), (100, "#0000FF")],
+    )
+    dark = PaintFill(mode="solid", color="#202020")
+    scheme = SubtitleStyleScheme(
+        karaoke_colors=KaraokeColors(
+            after=KaraokeColorState(text=grad)
+        )
+    )
+    chars = [TimingChar("詞", 1000 + i * 400) for i in range(6)]
+    for char in chars:
+        char.role_label = "主唱"
+    track = TimingTrack(
+        lines=[TimingLine(chars=chars, end_ms=1000 + 6 * 400)]
+    )
+    style = Style(
+        font_size_px=64,
+        sing_fx="twinkle",
+        karaoke_anim="none",
+        fx_particle_size_em=0.7,
+        fx_particle_count=24,
+        fx_particle_color_mode="role",
+        fx_particle_role_name="主唱",
+        custom_style_schemes={"主唱": scheme},
+        stroke_width_px=0,
+        karaoke_colors=KaraokeColors(
+            before=KaraokeColorState(text=dark),
+            after=KaraokeColorState(text=dark),
+        ),
+    )
+    img = QImage(800, 450, QImage.Format.Format_ARGB32_Premultiplied)
+    img.fill(0xFF101010)
+    paint_frame(img, track, 2600, style)
+
+    def half_counts(left: bool):
+        red = blue = 0
+        xs = range(0, img.width() // 2) if left else range(
+            img.width() // 2, img.width()
+        )
+        for y in range(0, img.height(), 2):
+            for x in xs:
+                px = img.pixel(x, y)
+                r, g, b = (px >> 16) & 0xFF, (px >> 8) & 0xFF, px & 0xFF
+                if r > 100 and r > g + 30 and r > b + 30:
+                    red += 1
+                if b > 100 and b > r + 30 and b > g + 30:
+                    blue += 1
+        return red, blue
+
+    left_red, left_blue = half_counts(True)
+    right_red, right_blue = half_counts(False)
+    # 左半 = 起点红、右半 = 终点蓝，两侧互不越界（行级一条色带）。
+    assert left_red > 10 and left_blue == 0, (left_red, left_blue)
+    assert right_blue > 10 and right_red == 0, (right_red, right_blue)
     clear_particle_paint_cache()
