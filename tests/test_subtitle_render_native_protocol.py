@@ -587,7 +587,7 @@ def test_native_text_semantics_is_backend_independent_contract():
 
     for contract in (
         "bool isLatinText(",
-        "bool isAsciiAlnumText(",
+        "bool rubyAutoCenterLayout(",
         "bool isWhitespaceText(",
         "bool verticalRotates(",
         "std::pair<float, float> verticalGlyphOffset(",

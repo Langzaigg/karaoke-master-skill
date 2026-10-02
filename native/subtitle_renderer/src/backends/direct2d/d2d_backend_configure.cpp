@@ -1,5 +1,6 @@
 #include "d2d_backend.h"
 #include "d2d_backend_internal.h"
+#include "../signal_state.h"
 #include "d2d_font_fallback.h"
 #include "d2d_geometry_resources.h"
 #include "d2d_paint_resources.h"
@@ -10,6 +11,7 @@
 #include <d2d1helper.h>
 #include <dwrite.h>
 #include <dwrite_3.h>
+#include <optional>
 
 #include <algorithm>
 #include <bit>
@@ -771,6 +773,7 @@ void Direct2DGpuBackend::configure(const RenderScene &scene) {
         cached.pageIndex = sourceLine.pageIndex;
         cached.compositeOrder = sourceLine.compositeOrder;
         cached.signalHead = sourceLine.signalHead;
+        cached.signalBandJoin = sourceLine.signalBandJoin;
         cached.wipeReverse = sourceLine.wipeReverse;
         cached.centerOverride = sourceLine.centerOverride;
         cached.staticOverlay = sourceLine.staticOverlay;
@@ -1805,8 +1808,8 @@ void Direct2DGpuBackend::configure(const RenderScene &scene) {
             );
             const bool centered = rubyStyle.rubyAlignment == "center"
                 || (rubyStyle.rubyAlignment != "equal_space" && (
-                    isAsciiAlnumText(sourceRuby.baseText)
-                    || isAsciiAlnumText(sourceRuby.reading)
+                    rubyAutoCenterLayout(sourceRuby.baseText)
+                    || rubyAutoCenterLayout(sourceRuby.reading)
                 ));
             float baseGap = rubyStyle.rubyInterval;
             if (!centered && rubyGlyphs.size() > 1) {
@@ -2448,6 +2451,33 @@ void Direct2DGpuBackend::configure(const RenderScene &scene) {
                 found->second.right = std::max(
                     found->second.right, inkBounds.right
                 );
+            }
+        }
+        // 「真一组」渐变带正文侧拓宽：柱体装饰源与正文第一角色同源时
+        // （signalBandJoin，Python 侧同款闸门），把最左角色样式（= 行内
+        // 第一角色）的横向渐变跨度左缘拓宽到柱组左缘——主文字与 ruby
+        // 共享盒（下方 ruby 块读本表）随之共用柱体同一条渐变带，镜像
+        // Painter 的 apply_signal_band_left。band 左缘 = volumeOffsetX −
+        // groupWidth + strokeExtent（行本地，与渲染端 volumeBarRectAt(0)
+        // 同式）。
+        if (cached.signalBandJoin) {
+            const VolumeSignalGeometry bandGeometry = volumeSignalGeometry(style);
+            const float bandLeft = style.volumeOffsetX
+                - bandGeometry.groupWidth + bandGeometry.strokeExtent;
+            std::optional<int> firstStyleIndex;
+            float firstLeft = 0.0f;
+            for (const auto &[styleIndex, bounds]
+                 : cached.horizontalFillBoundsByStyle) {
+                if (!firstStyleIndex.has_value()
+                    || bounds.left < firstLeft) {
+                    firstStyleIndex = styleIndex;
+                    firstLeft = bounds.left;
+                }
+            }
+            if (firstStyleIndex.has_value()) {
+                D2D1_RECT_F &bounds =
+                    cached.horizontalFillBoundsByStyle[*firstStyleIndex];
+                bounds.left = std::min(bounds.left, bandLeft);
             }
         }
         if (!cached.rubies.empty()) {

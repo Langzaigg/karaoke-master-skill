@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cwctype>
+#include <utility>
 
 namespace krok::subtitle::native {
 
@@ -19,20 +20,49 @@ bool isLatinText(const std::wstring &text) {
     });
 }
 
-bool isAsciiAlnumText(const std::wstring &text) {
-    bool seen = false;
+bool rubyAutoCenterLayout(const std::wstring &text) {
+    static const std::pair<unsigned int, unsigned int> scriptLetterRanges[] = {
+        {0x0370, 0x04FF},  // Greek / Cyrillic
+        {0x1100, 0x11FF},  // Hangul Jamo
+        {0x3040, 0x30FF},  // Hiragana / Katakana (incl. prolonged mark)
+        {0x3130, 0x318F},  // Hangul compatibility letters
+        {0x3400, 0x9FFF},  // CJK ext-A + unified ideographs
+        {0xAC00, 0xD7A3},  // Hangul syllables
+        {0xF900, 0xFAFF},  // CJK compatibility ideographs
+    };
+    int latin = 0;
+    int other = 0;
+    int scriptLetters = 0;
+    bool visible = false;
     for (wchar_t value : text) {
         if (value == L' ' || value == L'\t' || value == L'\r' || value == L'\n') {
             continue;
         }
-        seen = true;
-        if (!((value >= L'0' && value <= L'9')
+        visible = true;
+        const bool latinChar = (value >= L'0' && value <= L'9')
             || (value >= L'A' && value <= L'Z')
-            || (value >= L'a' && value <= L'z'))) {
-            return false;
+            || (value >= L'a' && value <= L'z')
+            || (value >= 0x00C0 && value <= 0x00D6)
+            || (value >= 0x00D8 && value <= 0x00F6)
+            || (value >= 0x00F8 && value <= 0x00FF);
+        if (latinChar) {
+            ++latin;
+        } else {
+            ++other;
+        }
+        for (const auto &range : scriptLetterRanges) {
+            if (static_cast<unsigned int>(value) >= range.first
+                && static_cast<unsigned int>(value) <= range.second) {
+                ++scriptLetters;
+                break;
+            }
         }
     }
-    return seen;
+    if (latin > other) {
+        return true;
+    }
+    // "Symbols and spaces only": no Latin alnum and no script letter at all.
+    return visible && latin == 0 && scriptLetters == 0;
 }
 
 bool isWhitespaceText(const std::wstring &text) {

@@ -4498,6 +4498,67 @@ def test_gpu_latin_strokes_override_for_alnum_main_text(monkeypatch) -> None:
 
 
 @pytest.mark.skipif(os.name != "nt", reason="Direct2D GPU backend is Windows-only")
+def test_gpu_ruby_auto_alignment_keeps_symbol_mixed_alnum_centered(monkeypatch) -> None:
+    """auto 对齐：含符号的英数读音（e-bay）居中成簇，不被均分撑开。
+
+    N3 原「全文纯 ASCII 字母数字」判定下一个连字符就把整条读音踢进
+    均分；现按「拉丁占多数或纯符号」居中（CPU/D2D 同口径，
+    text_semantics.cpp rubyAutoCenterLayout），假名读音仍均分。
+    """
+    monkeypatch.setenv("QT_QPA_PLATFORM", "offscreen")
+
+    def track(reading: str) -> TimingTrack:
+        base = "漢" * 8
+        return TimingTrack(
+            lines=[
+                TimingLine(
+                    chars=[TimingChar(text, 1_000) for text in base],
+                    end_ms=2_000,
+                )
+            ],
+            rubies=[
+                RubyAnnotation(base, reading, pos_start_ms=0, pos_end_ms=2_000)
+            ],
+        )
+
+    style = _g1_style(
+        font_family="Meiryo",
+        font_family_latin="Meiryo",
+        font_size_px=64,
+        dual_line_layout=False,
+        stroke_width_px=0,
+        stroke2_enabled=False,
+        decoration_kind="none",
+    )
+
+    def ruby_band_width(payload: bytes) -> int:
+        # 只统计注音带（主文字行上方 y<160）的不透明像素跨度；主文字无
+        # 描边、无装饰，墨迹集中在行带内，不干扰注音带测量。
+        xs = [
+            (index // 4) % 640
+            for index in range(0, len(payload), 4)
+            if payload[index + 3] > 0 and (index // 4) // 640 < 160
+        ]
+        assert xs
+        return max(xs) - min(xs)
+
+    with NativeRendererProcess(_renderer_path(), response_timeout_s=15.0) as renderer:
+        _configured, ebay_frames = _render_g1_frames(
+            renderer, style, (1_999,), force_warp=True, track=track("e-bay")
+        )
+        _configured, kana_frames = _render_g1_frames(
+            renderer, style, (1_999,), force_warp=True, track=track("ありがとう")
+        )
+
+    ebay_width = ruby_band_width(ebay_frames[0])
+    kana_width = ruby_band_width(kana_frames[0])
+    # e-bay 居中成簇（自然宽度），ありがとう 均分铺满八字正文跨度。
+    assert ebay_width < 250
+    assert kana_width > 350
+    assert ebay_width < kana_width - 150
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Direct2D GPU backend is Windows-only")
 def test_gpu_next_line_ruby_is_not_cached_at_previous_line_end(monkeypatch) -> None:
     monkeypatch.setenv("QT_QPA_PLATFORM", "offscreen")
     track = TimingTrack(

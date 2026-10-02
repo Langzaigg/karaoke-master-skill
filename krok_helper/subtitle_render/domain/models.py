@@ -933,8 +933,10 @@ class Style:
     为负时视为用户主动压紧，不再做描边避让（允许叠压）。
     """
     ruby_alignment: RubyAlignment = "auto"
-    """注音相对正文范围的排布（N3 ``RubyAlignment``）：``auto`` = 正文或注音全为
-    英数时居中、否则均等分布；``center`` = 整组居中；``equal_space`` = 均等分布。"""
+    """注音相对正文范围的排布（N3 ``RubyAlignment``）：``auto`` = 正文或注音的
+    拉丁字母数字多于其他可见字符、或全部可见字符均为符号时居中，否则均等
+    分布（含符号的英数读音如 ``e-bay`` 也居中，不再被均分撑开）；
+    ``center`` = 整组居中；``equal_space`` = 均等分布。"""
     ruby_stroke_width_px: Optional[int] = 10
     ruby_stroke2_enabled: Optional[bool] = True
     """注音描边 2 开关；``None`` 为未设定（面板半选，跟随主文字开关）。"""

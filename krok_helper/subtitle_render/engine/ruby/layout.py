@@ -26,6 +26,7 @@ from krok_helper.subtitle_render.engine.text import (
     char_glyph_ink_box,
     char_layout_width,
     char_path_left_offset,
+    is_n3_latin_text,
     letter_spacing,
     truncate_div,
 )
@@ -53,16 +54,56 @@ def resolve_ruby_alignment(
     mode = str(getattr(style, "ruby_alignment", "auto") or "auto")
     if mode in {"center", "equal_space"}:
         return mode
-    if (base_text and _is_ascii_alnum(base_text)) or _is_ascii_alnum(reading):
+    if _ruby_auto_prefers_center(base_text or "") or _ruby_auto_prefers_center(
+        reading
+    ):
         return "center"
     return "equal_space"
 
 
-def _is_ascii_alnum(text: str) -> bool:
-    stripped = [char for char in text if not char.isspace()]
-    return bool(stripped) and all(
-        ord(char) < 128 and char.isalnum() for char in stripped
-    )
+# auto 判定的「脚本字母」区间：假名 / CJK / 谚文 / 希腊 / 西里尔。
+# 与 D2D text_semantics.cpp rubyAutoCenterLayout 的区间完全一致。
+_RUBY_SCRIPT_LETTER_RANGES = (
+    (0x0370, 0x04FF),
+    (0x1100, 0x11FF),
+    (0x3040, 0x30FF),
+    (0x3130, 0x318F),
+    (0x3400, 0x9FFF),
+    (0xAC00, 0xD7A3),
+    (0xF900, 0xFAFF),
+)
+
+
+def _ruby_auto_prefers_center(text: str) -> bool:
+    """auto 模式的居中判定（CPU/D2D 同口径，字符区间枚举）。
+
+    N3 原判定要求全文纯 ASCII 字母数字，含一个符号（如 ``e-bay`` 的连
+    字符）的英数读音会整体落进均分、字母被撑开。现改为两条规则：
+
+    1. 拉丁字母数字（含 Latin-1 带调字母）多于其他可见字符 → 居中；
+    2. 全部可见字符均为符号（既非拉丁字母数字、也非脚本字母区间，
+       即「全由符号和空格组成」）→ 居中。
+
+    空白不参与计数；平手（拉丁 == 其他）按均分处理。
+    """
+    latin = 0
+    other = 0
+    script_letters = 0
+    for char in text:
+        if char.isspace():
+            continue
+        if is_n3_latin_text(char):
+            latin += 1
+        else:
+            other += 1
+        if any(
+            low <= ord(char) <= high
+            for low, high in _RUBY_SCRIPT_LETTER_RANGES
+        ):
+            script_letters += 1
+    if latin > other:
+        return True
+    return text.strip() != "" and latin == 0 and script_letters == 0
 
 
 def ruby_layout_gap(

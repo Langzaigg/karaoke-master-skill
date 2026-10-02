@@ -1615,6 +1615,191 @@ def test_volume_role_global_and_dangling_sources(qapp):
     assert not region_has(dangling_style, "#2030FF")
 
 
+def _gradient_karaoke(stops=((0, "#FF0000"), (100, "#0000FF"))) -> KaraokeColors:
+    paint = PaintFill(
+        mode="gradient_horizontal",
+        gradient_stops=tuple((position, color) for position, color in stops),
+    )
+    return KaraokeColors(
+        before=KaraokeColorState(text=paint),
+        after=KaraokeColorState(text=paint),
+    )
+
+
+def test_lit_auto_gradient_span_stable_while_extinguishing(qapp):
+    # 回归（2026-10 用户反馈）：auto 档形状灯的横向渐变跨度必须取全部
+    # count 个槽位——按可见灯取并集会随熄灭收缩，渐变被逐帧重新压缩，
+    # 剩余灯的取样位置逐帧漂移（「灯减少时整组逐渐变色」）。
+    track = _singer_track(singer_id=0)
+    style = Style(
+        lit_style="circle",
+        karaoke_colors=_gradient_karaoke(),
+        **_lit_auto_pixel_base(lit_size=28),
+    )
+    samples = []
+    for t_ms in (20, 780):
+        # 窗口 [0,1000]：t=20 → 4 盏全亮；t=780 → 只剩最左 1 盏。
+        group, resolved = _lit_auto_group(track, style, t_ms)
+        assert resolved.lit_number == 4
+        img = _blank(160, 90)
+        paint_frame(img, track, t_ms, style)
+        x = int(group.x + resolved.lit_size * 0.5)
+        y = int(group.y + resolved.lit_size * 0.5)
+        samples.append(QColor(img.pixel(x, y)))
+    first, last = samples
+    assert first.red() > 140 and first.blue() < 120, first.name()
+    assert max(
+        abs(first.red() - last.red()),
+        abs(first.green() - last.green()),
+        abs(first.blue() - last.blue()),
+    ) <= 6, (first.name(), last.name())
+
+
+def test_volume_auto_gradient_band_joins_line_text(qapp):
+    # 「真一组」渐变带：auto 档音量柱与正文第一角色共用同一条横向渐变
+    # ——柱组左缘 = 渐变 0%、文字墨迹右缘 = 100%，接缝两侧颜色连续，
+    # 且正文渐变起点从自身墨迹左缘拓宽到柱组左缘（对比关柱基线可证）。
+    track = TimingTrack(
+        lines=[
+            TimingLine(
+                chars=[
+                    TimingChar("A", 1000),
+                    TimingChar("B", 1400),
+                    TimingChar("C", 1800),
+                ],
+                end_ms=2400,
+            )
+        ]
+    )
+    style = Style(
+        font_family="Arial",
+        font_family_latin="Arial",
+        font_size_px=48,
+        karaoke_colors=_gradient_karaoke(),
+        stroke_width_px=0,
+        stroke2_enabled=False,
+        decoration_kind="none",
+        dual_line_layout=False,
+        volume_enabled=True,
+        volume_appearance_mode="auto",
+        volume_duration_ms=1000,
+        volume_waiting_time_ms=0,
+        volume_time_offset_ms=0,
+        volume_flash_times=0,
+        volume_size=40,
+        volume_column_count=4,
+        volume_column_width=12,
+        volume_column_spacing=2,
+        volume_stroke_width=0,
+    )
+    img = _blank(800, 450)
+    paint_frame(img, track, 500, style)
+    layout = _sayatoo_layout_for(track, style, 500, w=800, h=450)
+    assert layout.signal_x is not None
+    geometry = _volume_signal_geometry(style)
+    bar_left = int(layout.signal_x + geometry.stroke_extent) + 1
+    bar_mid_y = int(layout.signal_y + geometry.size * 0.5)
+
+    def _ink_pixels_on_row(row: int) -> list[int]:
+        return [
+            x
+            for x in range(img.width())
+            if QColor(img.pixel(x, row)).lightness() > 40
+        ]
+
+    text_row = int(layout.baseline_y - 12)
+    text_ink = _ink_pixels_on_row(text_row)
+    assert text_ink
+    text_left, text_right = min(text_ink), max(text_ink)
+
+    bar_start = QColor(img.pixel(bar_left, bar_mid_y))
+    text_end = QColor(img.pixel(text_right, text_row))
+    assert bar_start.red() > 170 and bar_start.blue() < 90, bar_start.name()
+    assert text_end.blue() > 150 and text_end.red() < 110, text_end.name()
+    # 接缝连续：柱右缘与正文墨迹左缘在带上的取样位置几乎相同。
+    bars_right = int(layout.signal_x + geometry.group_width) - 1
+    seam_bar = QColor(img.pixel(bars_right, bar_mid_y))
+    seam_text = QColor(img.pixel(text_left, text_row))
+    assert max(
+        abs(seam_bar.red() - seam_text.red()),
+        abs(seam_bar.green() - seam_text.green()),
+        abs(seam_bar.blue() - seam_text.blue()),
+    ) <= 48, (seam_bar.name(), seam_text.name())
+    # 正文渐变起点已拓宽到柱左缘：行首字不再取渐变 0%（对比关柱基线）。
+    text_head = QColor(img.pixel(text_left, text_row))
+    assert text_head.red() < 190, text_head.name()
+    without_volume = replace(style, volume_enabled=False)
+    plain = _blank(800, 450)
+    paint_frame(plain, track, 500, without_volume)
+    plain_ink = _ink_pixels_on_row(text_row)
+    plain_head = QColor(plain.pixel(min(plain_ink), text_row))
+    assert plain_head.red() > 200, plain_head.name()
+
+
+def test_volume_role_gradient_bars_span_union_text_unchanged(qapp):
+    # role 档：柱体横向渐变跨度仍取 柱组 ∪ 第一角色 的并集（不把整段
+    # 渐变压进柱组小框），但装饰源是固定方案、与正文渐变不同源——正文
+    # 渐变跨度保持自身口径不变。
+    track = TimingTrack(
+        lines=[
+            TimingLine(
+                chars=[
+                    TimingChar("A", 1000),
+                    TimingChar("B", 1400),
+                ],
+                end_ms=2200,
+            )
+        ]
+    )
+    style = Style(
+        font_family="Arial",
+        font_family_latin="Arial",
+        font_size_px=48,
+        karaoke_colors=_gradient_karaoke(),
+        stroke_width_px=0,
+        stroke2_enabled=False,
+        decoration_kind="none",
+        dual_line_layout=False,
+        volume_enabled=True,
+        volume_appearance_mode="role",
+        volume_role_name="霓虹",
+        volume_duration_ms=1000,
+        volume_waiting_time_ms=0,
+        volume_time_offset_ms=0,
+        volume_flash_times=0,
+        volume_size=40,
+        volume_column_count=4,
+        volume_column_width=12,
+        volume_column_spacing=2,
+        volume_stroke_width=0,
+        custom_style_schemes={
+            "霓虹": SubtitleStyleScheme(
+                karaoke_colors=_gradient_karaoke(
+                    ((0, "#00FF00"), (100, "#FFFF00"))
+                )
+            )
+        },
+    )
+    img = _blank(800, 450)
+    paint_frame(img, track, 500, style)
+    layout = _sayatoo_layout_for(track, style, 500, w=800, h=450)
+    geometry = _volume_signal_geometry(style)
+    bar_left = int(layout.signal_x + geometry.stroke_extent) + 1
+    bar_mid_y = int(layout.signal_y + geometry.size * 0.5)
+    bar_start = QColor(img.pixel(bar_left, bar_mid_y))
+    # 柱体 = 方案渐变（绿端起），不再是自身小框内走完的红→蓝。
+    assert bar_start.green() > 150 and bar_start.red() < 110, bar_start.name()
+    text_row = int(layout.baseline_y - 12)
+    text_ink = [
+        x
+        for x in range(img.width())
+        if QColor(img.pixel(x, text_row)).lightness() > 40
+    ]
+    text_head = QColor(img.pixel(min(text_ink), text_row))
+    # 正文渐变不受柱体影响：行首仍是正文渐变 0%（红端）。
+    assert text_head.red() > 190 and text_head.blue() < 90, text_head.name()
+
+
 def test_volume_auto_colors_reach_painting(qapp):
     # 覆盖柱填充跟随 fill_color：auto 模式下柱区出现「已唱填充色」像素。
     img = _blank(160, 90)
@@ -11214,11 +11399,36 @@ def test_ruby_alignment_center_keeps_natural_spacing_in_wide_target(qapp):
     assert group_mid == pytest.approx(100 + target / 2, abs=8)
 
 
-def test_ruby_alignment_auto_matches_n3_rules(qapp):
+def test_ruby_alignment_auto_prefers_dominant_script(qapp):
+    """auto 判定：拉丁字符占多数 → 居中；纯符号与空格 → 居中；其余均分。
+
+    N3 原「全文纯 ASCII 字母数字」判定下，含一个符号的英数读音
+    （如 e-bay）会整体落进均分、字母被撑开；纯符号读音同理。
+    """
     style = Style()  # 默认 auto
-    assert _resolve_ruby_alignment(style, "星", "ほし") == "equal_space"
-    assert _resolve_ruby_alignment(style, "STAR", "すたー") == "center"
-    assert _resolve_ruby_alignment(style, "星", "hoshi") == "center"
+
+    def resolve(base: str, reading: str) -> str:
+        return _resolve_ruby_alignment(style, base, reading)
+
+    # 方块字读音/底文：均分（含平手与方块字占多数的混合）。
+    assert resolve("星", "ほし") == "equal_space"
+    assert resolve("星", "あいAB") == "equal_space"
+    assert resolve("星", "-A-") == "equal_space"  # 拉丁 1 : 符号 2，非纯符号
+    assert resolve("星", "あー") == "equal_space"  # 长音符属脚本字母区间
+
+    # 拉丁占多数（旧规则的纯英数场景 + 含符号/带调字母场景）。
+    assert resolve("STAR", "すたー") == "center"  # 底文纯英数
+    assert resolve("星", "hoshi") == "center"
+    assert resolve("愛", "e-bay") == "center"  # 4 : 1
+    assert resolve("星", "あAB") == "center"  # 2 : 1 混合
+    assert resolve("星", "café") == "center"  # Latin-1 带调字母计拉丁
+
+    # 全由符号与空格组成：居中。
+    assert resolve("愛", "-") == "center"
+    assert resolve("愛", "♪×!?") == "center"
+    assert resolve("愛", "、。") == "center"  # CJK 标点是符号非字母
+
+    # 显式模式不受 auto 判定影响。
     assert (
         _resolve_ruby_alignment(Style(ruby_alignment="center"), "星", "ほし")
         == "center"
