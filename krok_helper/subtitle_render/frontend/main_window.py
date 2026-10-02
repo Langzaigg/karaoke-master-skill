@@ -408,7 +408,7 @@ SUBTITLE_FILTER = "SUG 项目 / Nicokara LRC (*.sug *.lrc);;SUG 项目 (*.sug);;
 
 _UNDO_STACK_LIMIT = 200
 """撤销栈上限（字幕轨道显示/隐藏时间编辑）。"""
-_PREVIEW_STYLE_REFRESH_MS = 220
+_PREVIEW_STYLE_REFRESH_MS = 150
 """预览重刷的纯尾沿防抖窗口：属性面板连打停止后过这么久才渲一帧。"""
 VIDEO_FILTER = "视频文件 (*.mp4 *.mkv *.mov *.webm *.avi *.flv);;所有文件 (*.*)"
 IMAGE_FILTER = "图片文件 (*.png *.jpg *.jpeg *.bmp *.webp *.tif *.tiff);;所有文件 (*.*)"
