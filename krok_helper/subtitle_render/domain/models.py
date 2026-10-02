@@ -1797,6 +1797,9 @@ def style_to_dict(style: Style) -> dict:
     # 扫字线像素字段的存储基准标记:值恒为 SCANLINE_BASE_HEIGHT(1080)下的
     # 基准值。读取端据此区分新旧格式(见 ``style_from_dict`` 的一次性迁移)。
     data["scanline_px_base"] = SCANLINE_BASE_HEIGHT
+    # 信号偏移基准标记：旧 payload 无此标记，读取时按工程基准高度一次性
+    # 折算到 1080 基准（见 _migrate_signal_offset_px_base）。
+    data["signal_offset_px_base"] = SIGNAL_OFFSET_BASE_HEIGHT
     return data
 
 
@@ -2286,6 +2289,7 @@ def style_from_dict(payload: object) -> Style:
         changes["volume_opacity_pct"] = changes.get("lit_opacity_pct", 100)
     _migrate_title_references(changes)
     _migrate_scanline_px_base(changes, payload)
+    _migrate_signal_offset_px_base(changes, payload)
     return _migrate_ruby_follow_independence(ensure_page_layout_defaults(Style(**changes)))
 
 
@@ -2308,6 +2312,30 @@ def _migrate_scanline_px_base(changes: dict, payload: dict) -> None:
     for name in _SCANLINE_SIZE_FIELDS:
         if name in changes:
             changes[name] = scanline_base_px_from_output(changes[name], reference)
+
+
+def _migrate_signal_offset_px_base(changes: dict, payload: dict) -> None:
+    """旧数据迁移：信号偏移改为固定 1080 基准存储（同扫字线口径）。
+
+    新版 ``style_to_dict`` 恒写 ``signal_offset_px_base`` 标记；旧 payload
+    （无标记）里的偏移是其工程 ``font_reference_height`` 画布下的绝对值，
+    读取时一次性折算到 1080 基准，画面保持不变。
+    """
+    if payload.get("signal_offset_px_base") == SIGNAL_OFFSET_BASE_HEIGHT:
+        return
+    if not any(name in changes for name in _SIGNAL_OFFSET_FIELDS):
+        return
+    reference = _int_value(
+        payload.get("font_reference_height"), SIGNAL_OFFSET_BASE_HEIGHT
+    )
+    reference = max(int(reference), 1)
+    if reference == SIGNAL_OFFSET_BASE_HEIGHT:
+        return
+    for name in _SIGNAL_OFFSET_FIELDS:
+        if name in changes:
+            changes[name] = signal_offset_base_px_from_output(
+                changes[name], reference
+            )
 
 
 def _migrate_title_references(changes: dict) -> None:
@@ -2553,7 +2581,8 @@ SCANLINE_BASE_HEIGHT = 1080
 """扫字线像素字段（:data:`_SCANLINE_SIZE_FIELDS`）的固定存储基准高度。"""
 
 
-def _scanline_scaled_px(value: int, source_height: int, target_height: int) -> int:
+def _base_scaled_px(value: int, source_height: int, target_height: int) -> int:
+    """基准↔输出高度的通用像素换算（扫字线像素 / 信号偏移共用）。"""
     source = max(int(source_height), 1)
     target = max(int(target_height), 1)
     value = int(value)
@@ -2564,12 +2593,12 @@ def _scanline_scaled_px(value: int, source_height: int, target_height: int) -> i
 
 def scanline_px_for_output(value: int, output_height: int) -> int:
     """1080 基准的扫字线像素值 → 目标输出高度下的实画值。"""
-    return _scanline_scaled_px(value, SCANLINE_BASE_HEIGHT, output_height)
+    return _base_scaled_px(value, SCANLINE_BASE_HEIGHT, output_height)
 
 
 def scanline_base_px_from_output(value: int, output_height: int) -> int:
     """输出高度下的实画值 → 1080 基准存储值（编辑写回用，反方向换算）。"""
-    return _scanline_scaled_px(value, output_height, SCANLINE_BASE_HEIGHT)
+    return _base_scaled_px(value, output_height, SCANLINE_BASE_HEIGHT)
 
 
 def style_with_output_scanline(style: Style, output_height: int) -> Style:
@@ -2584,6 +2613,48 @@ def style_with_output_scanline(style: Style, output_height: int) -> Style:
         style,
         scanline_width_px=scanline_px_for_output(style.scanline_width_px, height),
         scanline_glow_px=scanline_px_for_output(style.scanline_glow_px, height),
+    )
+
+
+# 指示灯/音量柱偏移字段（lit_offset_x/y、volume_offset_x/y）与扫字线像素
+# 字段同口径：**固定 1080 基准**存储——内部与存盘恒为 1080 画布下的值，
+# 不随输出高度 rescale；前台（编辑 spin、渲染）按当前画布高度从基准值
+# 映射，任何画布切换都从同一基准重新推导，与切换历史无关。
+_SIGNAL_OFFSET_FIELDS: tuple[str, ...] = (
+    "lit_offset_x",
+    "lit_offset_y",
+    "volume_offset_x",
+    "volume_offset_y",
+)
+
+SIGNAL_OFFSET_BASE_HEIGHT = 1080
+"""指示灯/音量柱偏移字段的固定存储基准高度。"""
+
+
+def signal_offset_px_for_output(value: int, output_height: int) -> int:
+    """1080 基准的信号偏移值 → 目标输出高度下的实画值。"""
+    return _base_scaled_px(value, SIGNAL_OFFSET_BASE_HEIGHT, output_height)
+
+
+def signal_offset_base_px_from_output(value: int, output_height: int) -> int:
+    """输出高度下的实画值 → 1080 基准存储值（编辑写回用，反方向换算）。"""
+    return _base_scaled_px(value, output_height, SIGNAL_OFFSET_BASE_HEIGHT)
+
+
+def style_with_output_signal_offsets(style: Style, output_height: int) -> Style:
+    """渲染入口用：把基准语义的信号偏移换算为输出高度下的实画值。
+
+    1080 输出（或非法高度）原样返回同一对象，避免等值替换造成对象 churn。
+    """
+    height = int(output_height)
+    if height <= 0 or height == SIGNAL_OFFSET_BASE_HEIGHT:
+        return style
+    return replace(
+        style,
+        **{
+            name: signal_offset_px_for_output(getattr(style, name), height)
+            for name in _SIGNAL_OFFSET_FIELDS
+        },
     )
 
 

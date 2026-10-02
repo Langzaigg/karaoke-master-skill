@@ -171,8 +171,15 @@ class EffectsPropertyPageBuilder:
         self._add_canvas_spin(add, "_volume_ratio_spin", "首尾高度比", 1, 20, "volume_ratio", "hard", transform=float)
         host._volume_align_combo = self._combo(section, (("顶部", 0), ("居中", 1), ("底部", 2)), "volume_align", transform=int)
         add("垂直对齐", host._volume_align_combo)
-        self._add_canvas_spin(add, "_volume_x_spin", "水平偏移", -4000, 4000, "volume_offset_x", "x", suffix=" px")
-        self._add_canvas_spin(add, "_volume_y_spin", "垂直偏移", -4000, 4000, "volume_offset_y", "y", suffix=" px")
+        offset_base = getattr(host, "_offset_base_px", None)
+        self._add_canvas_spin(
+            add, "_volume_x_spin", "水平偏移", -100_000, 100_000, "volume_offset_x", "offset_x",
+            suffix=" px", transform=offset_base,
+        )
+        self._add_canvas_spin(
+            add, "_volume_y_spin", "垂直偏移", -100_000, 100_000, "volume_offset_y", "offset_y",
+            suffix=" px", transform=offset_base,
+        )
         add = group("动画", collapsed=True, max_columns=3)
         self._add_spin(add, "_volume_flash_times_spin", "闪烁次数", 1, 20, "volume_flash_times")
         self._add_spin(add, "_volume_flash_duration_spin", "闪烁占比", 0, 100, "volume_flash_duration_ratio", suffix=" %", transform=lambda value: value / 100.0)

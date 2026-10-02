@@ -675,8 +675,10 @@ from krok_helper.subtitle_render.domain.models import (
     TitleOverlay,
     effective_karaoke_animation,
     effective_karaoke_scanline,
+    resolve_lit_appearance,
     style_for_track,
     style_with_output_scanline,
+    style_with_output_signal_offsets,
 )
 
 
@@ -985,9 +987,11 @@ def paint_frame_to_painter(
     如コーラス轨）。每轨独立分页 / 分 lane / 计算显示窗口，依次叠绘到同一帧；
     标题 overlay 只随主轨绘制一次。
     """
-    # 扫字线像素字段存储恒为 1080 基准,绘制入口一次性换算成当前输出高度
-    # 下的实画值;深处的 scanline_params_for_style 等继续直读画布值。
-    style = style_with_output_scanline(style, logical_h)
+    # 扫字线像素字段与指示灯/音量柱偏移存储恒为 1080 基准,绘制入口一次
+    # 性换算成当前输出高度下的实画值;深处的各消费点继续直读画布值。
+    style = style_with_output_signal_offsets(
+        style_with_output_scanline(style, logical_h), logical_h
+    )
     with layout_pass():
         if track is not None:
             _paint_track_to_painter(

@@ -2670,6 +2670,125 @@ def test_volume_auto_appearance_mode_roundtrips_through_payload():
     )
 
 
+def test_lit_auto_appearance_disables_and_displays_derived_controls(qapp):
+    panel = PropertyPanel()
+    panel.set_style(
+        Style(
+            lit_enabled=True,
+            lit_style="circle",
+            font_size_px=100,
+            stroke_width_px=8,
+            base_color="#010203",
+            fill_color="#040506",
+            stroke_color="#070809",
+        )
+    )
+
+    # auto（出厂默认）：被接管的控件停用，但回显推导值（字号 100 →
+    # 灯边长 50 / 描边 4）；「相对字号」是 auto 专属可调参数，保持可用。
+    assert panel._lit_appearance_mode_combo.currentData() == "auto"
+    assert panel._lit_auto_size_ratio_spin.value() == 50
+    assert panel._lit_auto_size_ratio_spin.isEnabled()
+    for control in (
+        panel._lit_size_spin,
+        panel._lit_fill_btn,
+        panel._lit_stroke_btn,
+        panel._lit_stroke_width_spin,
+        panel._lit_stroke_soften_spin,
+        panel._lit_shadow_check,
+    ):
+        assert not control.isEnabled()
+    assert panel._lit_size_spin.value() == 50
+    assert panel._lit_stroke_width_spin.value() == 4
+    assert panel._lit_fill_btn.color == "#040506"
+    assert panel._lit_stroke_btn.color == "#070809"
+    # 未被接管的参数保持可编辑：高光两档共用（auto 画在装饰栈之上）。
+    assert panel._lit_edge_brightness_spin.isEnabled()
+    assert panel._lit_number_spin.isEnabled()
+    assert panel._lit_tracking_spin.isEnabled()
+
+    # 切回自定义：控件恢复可用并回到手动值（默认 45/2 + 蓝白配色）；
+    # 相对字号只在 auto 档有意义，切回自定义时停用。
+    panel._lit_appearance_mode_combo.setCurrentIndex(
+        panel._lit_appearance_mode_combo.findData("custom")
+    )
+    assert panel._style.lit_appearance_mode == "custom"
+    assert not panel._lit_auto_size_ratio_spin.isEnabled()
+    for control in (
+        panel._lit_size_spin,
+        panel._lit_fill_btn,
+        panel._lit_stroke_btn,
+        panel._lit_stroke_width_spin,
+        panel._lit_stroke_soften_spin,
+        panel._lit_shadow_check,
+    ):
+        assert control.isEnabled()
+    assert panel._lit_size_spin.value() == 45
+    assert panel._lit_stroke_width_spin.value() == 2
+    assert panel._lit_fill_btn.color == "#0000FF"
+
+    # auto 模式随字号联动刷新回显（宿主回流 set_style 的全量同步路径）。
+    panel.set_style(Style(lit_enabled=True, font_size_px=40))
+    assert panel._lit_size_spin.value() == 20
+
+
+def test_signal_offsets_display_in_output_scale_and_store_base(qapp):
+    # 偏移存储恒为 1080 基准（同扫字线）：面板按当前输出高度显示折算值，
+    # 编辑写回基准值；切换输出高度显示值重推导、存储值不动。
+    panel = PropertyPanel()
+    panel.set_style(Style(lit_enabled=True, lit_offset_y=-24, volume_offset_x=100))
+    assert panel._lit_y_spin.value() == -24
+    assert panel._volume_x_spin.value() == 100
+
+    # 输出高度（与扫字线共用 N3 模板目标高度）切到 2160：显示值翻倍、
+    # 存储基准不动。
+    panel.set_n3_template_target_height(2160)
+    assert panel._lit_y_spin.value() == -48
+    assert panel._volume_x_spin.value() == 200
+    assert panel._style.lit_offset_y == -24
+
+    panel._lit_y_spin.setValue(-96)
+    assert panel._style.lit_offset_y == -48
+
+    panel.set_n3_template_target_height(1080)
+    assert panel._lit_y_spin.value() == -48
+
+
+def test_signal_offsets_legacy_payload_migrates_to_base():
+    # 旧工程载荷（无 signal_offset_px_base 标记）：偏移按工程基准高度一次
+    # 性折算到 1080 基准，画面不变；新载荷恒带标记不再折算。
+    style = Style(lit_offset_y=-24, font_reference_height=2160)
+    payload = style_to_dict(style)
+    del payload["signal_offset_px_base"]
+    migrated = style_from_dict(payload)
+    assert migrated.lit_offset_y == -12
+    fresh = style_from_dict(style_to_dict(style))
+    assert fresh.lit_offset_y == -24
+
+
+def test_lit_auto_appearance_mode_roundtrips_through_payload():
+    style = Style(
+        lit_enabled=True,
+        lit_style="circle",
+        lit_appearance_mode="custom",
+        lit_auto_size_ratio_pct=120,
+    )
+
+    payload = style_to_dict(style)
+    assert payload["lit_appearance_mode"] == "custom"
+    assert payload["lit_auto_size_ratio_pct"] == 120
+    restored = style_from_dict(payload)
+    assert restored.lit_appearance_mode == "custom"
+    assert restored.lit_auto_size_ratio_pct == 120
+    # 旧工程载荷没有该字段时回退出厂 auto，未知值也按 auto 处理。
+    assert style_from_dict({}).lit_appearance_mode == "auto"
+    assert style_from_dict({}).lit_auto_size_ratio_pct == 50
+    assert (
+        style_from_dict({"lit_appearance_mode": "bogus"}).lit_appearance_mode
+        == "auto"
+    )
+
+
 def test_property_panel_does_not_shadow_qwidget_style(qapp):
     panel = PropertyPanel()
 

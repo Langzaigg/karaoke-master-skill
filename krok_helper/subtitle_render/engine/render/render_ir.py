@@ -28,10 +28,12 @@ from krok_helper.subtitle_render.domain.models import (
     TitleOverlay,
     normalize_title_char_role_labels,
     normalize_title_guide_symbols,
+    resolve_lit_appearance,
     resolve_volume_appearance,
     style_for_track,
     style_to_dict,
     style_with_output_scanline,
+    style_with_output_signal_offsets,
 )
 from krok_helper.subtitle_render.serialization.timing import guide_symbol_to_dict
 from krok_helper.subtitle_render.engine.guide.semantics import guide_symbol_is_bitmap
@@ -190,9 +192,12 @@ def build_render_ir(
     其余取值一律按全量处理（防御）。
     """
 
-    # 扫字线像素字段存储恒为 1080 基准:发给 sidecar 前一次性换算成本 IR
-    # 输出高度下的实画值(C++ 端继续直读,不感知基准语义)。
-    style = style_with_output_scanline(style, height)
+    # 扫字线像素字段与指示灯/音量柱偏移存储恒为 1080 基准:发给 sidecar
+    # 前一次性换算成本 IR 输出高度下的实画值(C++ 端继续直读,不感知基准
+    # 语义)。
+    style = style_with_output_signal_offsets(
+        style_with_output_scanline(style, height), height
+    )
     # 局部复用仅对已知 scope 生效;未知值按全量。
     use_plan_cache = relayout_scope in {"titles", "paint"}
     with layout_pass():

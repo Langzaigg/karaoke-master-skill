@@ -143,6 +143,9 @@ from krok_helper.subtitle_render.engine.timing.timeline import DisplayLine  # no
 from krok_helper.subtitle_render.engine.render.elements.signal import (  # noqa: E402
     volume_style,
 )
+from krok_helper.subtitle_render.domain.models import (
+    style_with_output_signal_offsets,
+)
 from krok_helper.subtitle_render.domain.models import (  # noqa: E402
     GuideSymbol,
     KaraokeColors,
@@ -944,7 +947,13 @@ def test_signal_lits_render_during_signal_window(qapp):
 
     paint_frame(img, _singer_track(singer_id=0), 50, style)
 
-    layout = _sayatoo_layout_for(_singer_track(singer_id=0), style, 50, w=120, h=80)
+    layout = _sayatoo_layout_for(
+            _singer_track(singer_id=0),
+            style_with_output_signal_offsets(style, 80),
+            50,
+            w=120,
+            h=80,
+        )
     bounds = _ink_bounds(img)
     assert bounds[0] == int(layout.signal_x)
     assert layout.text_x > layout.signal_x
@@ -1019,9 +1028,16 @@ def test_signal_lits_extend_the_lyric_text_window(qapp):
 
     paint_frame(img, _singer_track(singer_id=0), 50, style)
 
-    layout = _sayatoo_layout_for(_singer_track(singer_id=0), style, 50, w=120, h=80)
+    layout = _sayatoo_layout_for(
+            _singer_track(singer_id=0),
+            style_with_output_signal_offsets(style, 80),
+            50,
+            w=120,
+            h=80,
+        )
     bounds = _ink_bounds(img)
-    assert bounds[0] == int(layout.signal_x)
+    # 圆灯抗锯齿边缘可比矩形左缘外扩 ~2px。
+    assert abs(bounds[0] - int(layout.signal_x)) <= 2
     assert bounds[2] >= layout.text_x
     _assert_light_pixels_in(
         img,
@@ -1446,6 +1462,651 @@ def test_volume_auto_colors_reach_painting(qapp):
     layout = _sayatoo_layout_for(_singer_track(singer_id=0), style, 800)
     assert layout.signal_x is not None
     _assert_blue_pixels_in(img, left=int(layout.signal_x), right=int(layout.text_x) - 1)
+
+
+def _lit_auto_group(
+    track: TimingTrack,
+    style: Style,
+    t_ms: int,
+    *,
+    w: int = 160,
+    h: int = 90,
+):
+    """auto 解析后的形状灯组锚点（与 paint_frame 的布局通道同源，
+    custom 样式为恒等解析）。"""
+    from krok_helper.subtitle_render.domain.models import (
+        resolve_lit_appearance,
+        style_with_output_signal_offsets,
+    )
+    from types import SimpleNamespace
+
+    resolved = resolve_lit_appearance(style)
+    # 偏移字段存储恒为 1080 基准：与 paint_frame 入口同口径先换算成当前
+    # 画布高度下的实画值，布局坐标才与绘制输出一致。
+    display_style = style_with_output_signal_offsets(style, h)
+    layout = _sayatoo_layout_for(track, display_style, t_ms, w=w, h=h)
+    assert layout.signal_x is not None, "应在给定时刻解析出指示灯布局"
+    assert layout.signal_y is not None
+    return (
+        SimpleNamespace(
+            x=float(layout.signal_x),
+            y=float(layout.signal_y),
+            active_index=None,
+        ),
+        resolved,
+    )
+
+
+def _lit_active_index(track: TimingTrack, style: Style, t_ms: int) -> int:
+    from krok_helper.subtitle_render.engine.render.elements.signal import (
+        shape_active_index_and_phase,
+    )
+
+    duration = style.signals_duration_ms - style.lit_waiting_time_ms
+    index, _phase = shape_active_index_and_phase(t_ms, duration, style.lit_number)
+    return index
+
+
+def _lit_band_row_span(
+    track: TimingTrack,
+    style: Style,
+    t_ms: int,
+    *,
+    pad: int = 18,
+    w: int = 160,
+    h: int = 160,
+) -> int:
+    """灯带（灯组外接框 ± pad）内非背景墨迹的纵向跨度。
+
+    用 160 高画布 + 居中行把灯带与正文墨迹上下分开，pad 只覆盖装饰外扩。
+    """
+    group, resolved = _lit_auto_group(track, style, t_ms, w=w, h=h)
+    img = _blank(w, h)
+    paint_frame(img, track, t_ms, style)
+    pitch = resolved.lit_size * 1.5 + resolved.lit_tracking
+    x0 = max(int(math.floor(group.x)) - pad, 0)
+    x1 = min(
+        int(math.ceil(group.x + resolved.lit_number * pitch)) + pad,
+        img.width() - 1,
+    )
+    y0 = max(int(math.floor(group.y)) - pad, 0)
+    y1 = min(
+        int(math.ceil(group.y + resolved.lit_size)) + pad,
+        img.height() - 1,
+    )
+    rows = [
+        y
+        for y in range(y0, y1 + 1)
+        if any(
+            QColor(img.pixel(x, y)) != QColor("#101010")
+            for x in range(x0, x1 + 1, 2)
+        )
+    ]
+    return (max(rows) - min(rows) + 1) if rows else 0
+
+
+def test_lit_auto_appearance_derives_size_and_colors_from_font():
+    # auto 模式（出厂默认）：灯边长 = 字号 × 50%，描边宽 = 文字描边 ×
+    # 灯尺寸/字号（上限半个灯宽）；颜色跟随主文字走字后填充/描边。
+    # 工程字段不被改写。
+    from krok_helper.subtitle_render.domain.models import resolve_lit_appearance
+
+    style = Style(
+        lit_enabled=True,
+        font_size_px=100,
+        stroke_width_px=8,
+        base_color="#010203",
+        fill_color="#040506",
+        stroke_color="#070809",
+    )
+    assert Style().lit_appearance_mode == "auto"
+    projected = resolve_lit_appearance(style)
+    assert (projected.lit_size, projected.lit_stroke_width) == (50, 4)
+    assert projected.lit_fill_color == "#040506"
+    assert projected.lit_stroke_color == "#070809"
+    # 原始样式保持手动字段原值（渲染期解析，不回写工程）。
+    assert style.lit_size == 45
+    assert style.lit_fill_color == "#0000FF"
+    # custom 模式与未启用模块时原样返回。
+    custom = resolve_lit_appearance(
+        replace(style, lit_appearance_mode="custom")
+    )
+    assert custom.lit_size == 45
+    assert custom.lit_fill_color == "#0000FF"
+    disabled = resolve_lit_appearance(replace(style, lit_enabled=False))
+    assert disabled.lit_size == 45
+    legacy = replace(style, lit_style="volume")
+    assert resolve_lit_appearance(legacy) is legacy
+    smaller = resolve_lit_appearance(replace(style, font_size_px=40))
+    assert (smaller.lit_size, smaller.lit_stroke_width) == (20, 4)
+
+
+def test_lit_auto_appearance_layout_follows_font_size(qapp):
+    # 字号变化必须反映到灯组布局量（painter 的 signal metrics 路径）。
+    from krok_helper.subtitle_render.domain.models import resolve_lit_appearance
+
+    base = Style(lit_enabled=True)
+    small_metrics = _signal_layout_metrics(
+        resolve_lit_appearance(replace(base, font_size_px=40))
+    )
+    big_metrics = _signal_layout_metrics(
+        resolve_lit_appearance(replace(base, font_size_px=80))
+    )
+    assert big_metrics.size == 2 * small_metrics.size
+    assert big_metrics.group_width > small_metrics.group_width
+
+
+def test_lit_auto_size_ratio_scales_geometry(qapp):
+    # 「相对字号」参数：auto 灯边长 = 字号 × ratio%（默认 50%），
+    # 比例变化反映到灯组布局量。
+    from krok_helper.subtitle_render.domain.models import resolve_lit_appearance
+
+    base = Style(lit_enabled=True, font_size_px=100, stroke_width_px=0)
+    default = resolve_lit_appearance(base)
+    assert default.lit_size == 50
+    bigger = resolve_lit_appearance(replace(base, lit_auto_size_ratio_pct=100))
+    assert bigger.lit_size == 100
+    assert (
+        _signal_layout_metrics(bigger).group_width
+        > _signal_layout_metrics(default).group_width
+    )
+    tiny = resolve_lit_appearance(replace(base, lit_auto_size_ratio_pct=5))
+    assert tiny.lit_size == 5
+
+
+def _lit_auto_pixel_base(**overrides) -> dict:
+    base = dict(
+        font_size_px=32,
+        line_y_margin_px=10,
+        dual_line_layout=False,
+        line_lead_in_ms=2000,
+        entry_anim="none",
+        exit_anim="none",
+        section_head_anim="none",
+        lit_enabled=True,
+        signals_duration_ms=1000,
+        lit_waiting_time_ms=0,
+        lit_time_offset_ms=0,
+        lit_number=4,
+        # 偏移字段存储恒为 1080 基准（同扫字线）：小画布测试（h=90）下
+        # -24 会被折算成 -2、灯贴上正文，采样分区重叠；基准取 -240 让
+        # 90 画布下仍有 ~20px 间隔。
+        lit_offset_y=-240,
+        # 颜色/几何类取样用 none：激活灯满亮到窗口终点，避免采到淡出尾帧。
+        lit_transition_mode="none",
+        stroke_width_px=0,
+        stroke2_enabled=False,
+        decoration_kind="none",
+    )
+    base.update(overrides)
+    return base
+
+
+def test_lit_auto_uses_after_colors_only(qapp):
+    # 指示灯不区分走字前后、直接淡化消失：全部灯取「走字后」填充
+    # （fill_color），走字前色（base_color）不出现在灯内。
+    track = _singer_track(singer_id=0)
+    style = Style(
+        base_color="#FF0000",
+        fill_color="#0000FF",
+        **_lit_auto_pixel_base(),
+    )
+    group, resolved = _lit_auto_group(track, style, 500)
+    img = _blank(160, 90)
+    paint_frame(img, track, 500, style)
+    active_index = _lit_active_index(track, style, 500)
+    assert active_index == 2
+    pitch = resolved.lit_size * 1.5 + resolved.lit_tracking
+    for index in range(active_index + 1):
+        # 取灯心偏下像素，避开左上高光与边缘抗锯齿。
+        cx = int(group.x + index * pitch + resolved.lit_size * 0.5)
+        cy = int(group.y + resolved.lit_size * 0.62)
+        color = QColor(img.pixel(cx, cy))
+        assert color.blue() > 120 and color.red() < 120, (index, color.name())
+
+
+def test_lit_auto_colors_follow_first_role(qapp):
+    # auto 档装饰源 = 段首行第一个角色：灯体用该角色的走字后填充，
+    # 而不是全局 fill_color。
+    track = TimingTrack(
+        lines=[
+            TimingLine(
+                chars=[
+                    TimingChar(text="あ", start_ms=1000, role_label="赤"),
+                    TimingChar(text="い", start_ms=1300),
+                ],
+                end_ms=2000,
+            )
+        ]
+    )
+    style = Style(
+        fill_color="#2030FF",
+        custom_style_schemes={
+            "赤": SubtitleStyleScheme(
+                font_family="Arial",
+                font_family_latin="Arial",
+                font_size_px=32,
+                stroke_width_px=0,
+                decoration_kind="none",
+                fill_color="#20FF50",
+            ),
+        },
+        **_lit_auto_pixel_base(),
+    )
+    group, resolved = _lit_auto_group(track, style, 500)
+    img = _blank(160, 90)
+    paint_frame(img, track, 500, style)
+    pitch = resolved.lit_size * 1.5 + resolved.lit_tracking
+    for index in range(_lit_active_index(track, style, 500) + 1):
+        cx = int(group.x + index * pitch + resolved.lit_size * 0.5)
+        cy = int(group.y + resolved.lit_size * 0.62)
+        color = QColor(img.pixel(cx, cy))
+        assert color.green() > 120 and color.blue() < 120, (index, color.name())
+
+
+def test_lit_auto_decorations_follow_text_pipeline(qapp):
+    # auto 档矢量灯走文字装饰管线：发光装饰在灯体外扩出光晕（灯带纵向
+    # 墨迹显著多于关装饰帧）。
+    track = _singer_track(singer_id=0)
+    glow_span = _lit_band_row_span(
+        track,
+        Style(
+            **_lit_auto_pixel_base(
+                stroke_width_px=6,
+                stroke2_enabled=True,
+                stroke2_width_px=3,
+                decoration_kind="glow",
+                glow_radius_px=10,
+                glow_before_radius_px=10,
+                glow_after_radius_px=10,
+            )
+        ),
+        500,
+    )
+    plain_span = _lit_band_row_span(
+        track,
+        Style(**_lit_auto_pixel_base()),
+        500,
+    )
+    assert glow_span > plain_span * 1.5
+
+
+def test_lit_auto_zoom_pulse_scales_extinguishing_lamp(qapp):
+    # 「整字放大」唱字动画开启时，倒计时扫到的灯按同一曲线在其熄灭窗口
+    # 内放大-缩回：窗口中段灯带纵向墨迹高于关闭整字放大的同帧。
+    track = _singer_track(singer_id=0)
+    base = _lit_auto_pixel_base(lit_transition_mode="none")
+
+    def span(karaoke: str) -> int:
+        style = Style(karaoke_anim=karaoke, **base)
+        # t=375：2 号灯窗口 [250, 500] 的中点。
+        return _lit_band_row_span(track, style, 375, pad=30)
+
+    assert span("zoom_pulse") > span("none")
+
+
+def _assert_lit_fade_composites_lamp_as_unit(
+    track: TimingTrack,
+    style: Style,
+    *,
+    w: int = 160,
+    h: int = 90,
+):
+    """整灯一次乘 α：淡出帧像素 ≈ 底色 + (满亮度帧像素 − 底色) × α。
+
+    fade 转场无位移，同一颗灯的几何在满亮度帧与淡出帧完全一致；「先合成、
+    后整体乘 α」因此可逐像素线性验证。稳态灯与正文两帧一致（不参与淡出），
+    由等值分支放行。
+    """
+    from krok_helper.subtitle_render.engine.render.elements.signal import (
+        lit_extinguish_transition_state,
+        shape_active_index_and_phase,
+    )
+
+    duration = style.signals_duration_ms - style.lit_waiting_time_ms
+    count = style.lit_number
+    frames: list[tuple[int, float]] = []
+    for t_ms in range(1, duration):
+        index, phase = shape_active_index_and_phase(t_ms, duration, count)
+        if index != count - 1:
+            break
+        alpha = lit_extinguish_transition_state(phase, style)[0]
+        if 0.45 <= alpha <= 0.6 or 0.08 <= alpha <= 0.2:
+            frames.append((t_ms, alpha))
+    solid = next(
+        (t for t in range(1, duration // count + 1) if t > 0), None
+    )
+    assert frames, "fade 曲线应存在 α 高低两帧"
+    assert solid is not None
+    alpha_by_t = {t: alpha for t, alpha in frames}
+    render = {
+        t: paint_frame(_blank(w, h), track, t, style) for t in [solid, *alpha_by_t]
+    }
+    group, resolved = _lit_auto_group(track, style, solid, w=w, h=h)
+    pitch = resolved.lit_size * 1.5 + resolved.lit_tracking
+    pad = 34
+    # 断言区域取熄灭灯的右半 + 右侧光晕尾：左侧光晕会与左邻稳态灯的
+    # 光晕叠加（常数分量），破坏「整灯 × α」的逐像素线性关系。
+    lamp_left = group.x + (count - 1) * pitch
+    x0 = max(int(lamp_left + resolved.lit_size * 0.5), 0)
+    x1 = min(int(lamp_left + resolved.lit_size) + pad, render[solid].width() - 1)
+    y0 = max(int(group.y) - pad, 0)
+    y1 = min(int(group.y + resolved.lit_size) + pad, render[solid].height() - 1)
+    bg = QColor("#101010")
+    bg_rgb = (bg.red(), bg.green(), bg.blue())
+    solid_pixels: dict[tuple[int, int], tuple[int, int, int]] = {}
+    for y in range(y0, y1 + 1):
+        for x in range(x0, x1 + 1):
+            color = QColor(render[solid].pixel(x, y))
+            solid_pixels[(x, y)] = (color.red(), color.green(), color.blue())
+    for t_ms, alpha in alpha_by_t.items():
+        faded = 0
+        frame = render[t_ms]
+        for (x, y), solid_rgb in solid_pixels.items():
+            if solid_rgb == bg_rgb:
+                continue
+            faded_color = QColor(frame.pixel(x, y))
+            faded_rgb = (
+                faded_color.red(),
+                faded_color.green(),
+                faded_color.blue(),
+            )
+            if faded_rgb == solid_rgb:
+                continue
+            for solid_c, faded_c, bg_c in zip(solid_rgb, faded_rgb, bg_rgb):
+                expected = bg_c + (solid_c - bg_c) * alpha
+                assert abs(faded_c - expected) <= 3, (
+                    t_ms,
+                    alpha,
+                    x,
+                    y,
+                    solid_rgb,
+                    faded_rgb,
+                )
+            faded += 1
+        assert faded > 20, f"淡出帧 {t_ms} 应有足量像素整体乘 α"
+
+
+def test_lit_auto_fade_composites_decorated_lamp_as_unit(qapp):
+    # auto 档：发光多 pass + 描边/二重描边/填充/高光作为整体明灭
+    # （逐层各自乘 α 会让发光环比灯体褪色慢，残留"空心灯"残影）。
+    track = _singer_track(singer_id=0)
+    style = Style(
+        **_lit_auto_pixel_base(
+            lit_transition_mode="fade",
+            lit_offset_y=-48,
+            stroke_width_px=4,
+            stroke2_enabled=True,
+            stroke2_width_px=2,
+            decoration_kind="glow",
+            glow_radius_px=10,
+            glow_before_radius_px=10,
+            glow_after_radius_px=10,
+            glow_concentration_level=2,
+        )
+    )
+    _assert_lit_fade_composites_lamp_as_unit(track, style)
+
+
+def test_lit_custom_fade_composites_lamp_as_unit(qapp):
+    # custom 档：阴影 + 灯体 + 高光整灯一次乘 α（高光是半透明层，
+    # 逐层各自乘会在渐入渐出中段让高光相对灯体提前显灰）。
+    track = _singer_track(singer_id=0)
+    style = Style(
+        lit_fill_color="#0000FF",
+        lit_stroke_color="#0000FF",
+        lit_stroke_width=0,
+        lit_shadow=True,
+        lit_edge_brightness_pct=100,
+        **_lit_auto_pixel_base(
+            lit_appearance_mode="custom",
+            lit_size=24,
+            lit_transition_mode="fade",
+        ),
+    )
+    _assert_lit_fade_composites_lamp_as_unit(track, style, w=240)
+
+
+def test_lit_custom_highlight_is_constant_on_all_lamps(qapp):
+    # 修复回归：高光（原「边缘亮度」）常驻所有未熄灯——稳态灯也带高光，
+    # 而不是只在灯开始熄灭的瞬间弹出一颗灰色圆形。
+    track = _singer_track(singer_id=0)
+    style = Style(
+        lit_fill_color="#0000FF",
+        lit_stroke_width=0,
+        lit_shadow=False,
+        lit_edge_brightness_pct=100,
+        **_lit_auto_pixel_base(
+            lit_appearance_mode="custom",
+            lit_size=24,
+            lit_transition_mode="none",
+        ),
+    )
+    group, resolved = _lit_auto_group(track, style, 500)
+    img = _blank(160, 90)
+    paint_frame(img, track, 500, style)
+    active_index = _lit_active_index(track, style, 500)
+    assert active_index == 2
+    pitch = resolved.lit_size * 1.5 + resolved.lit_tracking
+    inset = resolved.lit_size * 0.18 + resolved.lit_size * 0.16
+    for index in range(active_index + 1):
+        # 每颗可见灯的高光中心（含稳态灯 0/1）都应是「蓝底叠白」的浅色。
+        hx = int(group.x + index * pitch + inset)
+        hy = int(group.y + inset)
+        color = QColor(img.pixel(hx, hy))
+        assert color.red() > 80 and color.green() > 80, (index, color.name())
+
+
+def test_lit_auto_follows_entry_but_not_exit_animation(qapp):
+    # auto 档灯组跟随行**入场**动画（与正文同步淡入），但**退场**动画
+    # 不跟随——独立悬浮模块靠自身倒计时转场完成渐变消失。
+    track = _singer_track(singer_id=0)
+
+    def band_weight(anim_field: str, anim: str, t_ms: int) -> tuple[int, int]:
+        overrides = {
+            anim_field: anim,
+            "section_head_anim": anim if anim_field == "entry_anim" else "none",
+            "section_tail_anim": anim if anim_field == "exit_anim" else "none",
+        }
+        style = Style(
+            fill_color="#0000FF",
+            **_lit_auto_pixel_base(
+                entry_lead_ms=1000,
+                exit_fade_ms=800,
+                line_lead_in_ms=1000,
+                **overrides,
+            ),
+        )
+        group, resolved = _lit_auto_group(track, style, t_ms)
+        img = _blank(160, 90)
+        paint_frame(img, track, t_ms, style)
+        pitch = resolved.lit_size * 1.5 + resolved.lit_tracking
+        x0 = max(int(group.x) - 20, 0)
+        x1 = min(
+            int(group.x + resolved.lit_number * pitch) + 20, img.width() - 1
+        )
+        bg = QColor("#101010")
+
+        def weight(y0: int, y1: int) -> int:
+            # 亮度权重（与背景的通道距离和）：淡变只改亮度不消墨迹。
+            total = 0
+            for y in range(y0, y1 + 1):
+                for x in range(x0, x1 + 1, 2):
+                    color = QColor(img.pixel(x, y))
+                    total += (
+                        abs(color.red() - bg.red())
+                        + abs(color.green() - bg.green())
+                        + abs(color.blue() - bg.blue())
+                    )
+            return total
+
+        lamp_top = max(int(group.y) - 20, 0)
+        lamp_bottom = min(
+            int(group.y + resolved.lit_size) + 20, img.height() - 1
+        )
+        lamp_weight = weight(lamp_top, lamp_bottom)
+        text_weight = (
+            weight(0, lamp_top - 1) + weight(lamp_bottom + 1, img.height() - 1)
+        )
+        return lamp_weight, text_weight
+
+    # 入场淡变中段（t=300）：灯带与文字一起变暗。
+    lamp_none, text_none = band_weight("entry_anim", "none", 300)
+    lamp_fade, text_fade = band_weight("entry_anim", "fade", 300)
+    assert lamp_fade < lamp_none * 0.9
+    assert text_fade < text_none * 0.9
+
+    # 退场淡变中段：把信号窗口推到行退场期间（offset +2000、duration 5000
+    # → 灯组在 [−2000, 3000) 存活，行退场窗 [2700, 3500)）仍有灯可见。
+    def exit_weight(anim: str, t_ms: int) -> tuple[int, int]:
+        overrides = {
+            "exit_anim": anim,
+            "section_tail_anim": anim,
+            "exit_fade_ms": 800,
+            "signals_duration_ms": 5000,
+            "lit_time_offset_ms": 2000,
+            "line_tail_ms": 1500,
+            "line_lead_in_ms": 2500,
+        }
+        style = Style(
+            fill_color="#0000FF",
+            **_lit_auto_pixel_base(**overrides),
+        )
+        group, resolved = _lit_auto_group(track, style, t_ms)
+        img = _blank(160, 90)
+        paint_frame(img, track, t_ms, style)
+        pitch = resolved.lit_size * 1.5 + resolved.lit_tracking
+        x0 = max(int(group.x) - 20, 0)
+        x1 = min(
+            int(group.x + resolved.lit_number * pitch) + 20, img.width() - 1
+        )
+        bg = QColor("#101010")
+        lamp_weight = 0
+        text_weight = 0
+        for y in range(img.height()):
+            row = sum(
+                abs(QColor(img.pixel(x, y)).red() - bg.red())
+                + abs(QColor(img.pixel(x, y)).green() - bg.green())
+                + abs(QColor(img.pixel(x, y)).blue() - bg.blue())
+                for x in range(x0, x1 + 1, 2)
+            )
+            if group.y - 20 <= y <= group.y + resolved.lit_size + 20:
+                lamp_weight += row
+            else:
+                text_weight += row
+        return lamp_weight, text_weight
+
+    lamp_exit_none, text_exit_none = exit_weight("none", 2800)
+    lamp_exit_fade, text_exit_fade = exit_weight("fade", 2800)
+    # 灯带不随行退场变化（允许轻微抖动）；文字明显变暗。
+    assert abs(lamp_exit_fade - lamp_exit_none) <= max(
+        60, lamp_exit_none // 20
+    )
+    assert text_exit_fade < text_exit_none * 0.9
+
+
+def test_signal_offsets_render_from_1080_base(qapp):
+    # 指示灯/音量柱偏移与扫字线同口径：存储恒为 1080 基准，画布减半时
+    # 灯组相对文字基线的间隔等比减半（与切换历史无关，同一基准推导）。
+    from krok_helper.subtitle_render.domain.models import (
+        style_with_output_signal_offsets,
+    )
+
+    track = _singer_track(singer_id=0)
+    style = Style(**_lit_auto_pixel_base(lit_offset_y=-240))
+    ascent = QFontMetrics(_build_font(style)).ascent()
+    gaps: list[float] = []
+    for h in (1080, 540):
+        group, resolved = _lit_auto_group(track, style, 500, w=160, h=h)
+        layout = _sayatoo_layout_for(
+            track,
+            style_with_output_signal_offsets(style, h),
+            500,
+            w=160,
+            h=h,
+        )
+        # 灯底到文字顶的间隔 = ascent − 折算后偏移（基准 -240）。
+        gaps.append(layout.baseline_y - group.y - resolved.lit_size - ascent)
+    assert gaps[0] == pytest.approx(240.0, abs=2)
+    assert gaps[1] == pytest.approx(120.0, abs=2)
+
+
+def test_lit_star_and_note_shapes_render_with_distinct_highlights(qapp):
+    # 星型/音符族形状：灯体正常渲染（auto 装饰管线），高光锚点按形状适配
+    # ——星型取星核上部、单音符取符头（左下）、组合取左符头；旧口径的
+    # 左上 34% 位置在音符上落在符干区域、无高光。
+    track = _singer_track(singer_id=0)
+    probes = {
+        "star": ((0.5, 0.36), (0.5, 0.5)),
+        "note8": ((0.29, 0.745), (0.42, 0.78)),
+        "note16": ((0.29, 0.745), (0.42, 0.78)),
+        "notepair": ((0.20, 0.705), (0.30, 0.74)),
+    }
+    for lit_style, ((hx, hy), (bx, by)) in probes.items():
+        style = Style(
+            fill_color="#0000FF",
+            lit_style=lit_style,
+            **_lit_auto_pixel_base(lit_size=28),
+        )
+        group, resolved = _lit_auto_group(track, style, 500)
+        img = _blank(160, 90)
+        paint_frame(img, track, 500, style)
+        size = resolved.lit_size
+        lamp_left = group.x
+        lamp_top = group.y
+        # 形状本体有墨迹（星核中心 / 音符符头为走字后填充色）。
+        body = QColor(
+            img.pixel(int(lamp_left + bx * size), int(lamp_top + by * size))
+        )
+        assert body.blue() > 120 and body.red() < 120, (lit_style, body.name())
+        # 高光在形状锚点处提亮（白 55% 叠加），旧口径位置无高光。
+        lit_highlight = QColor(
+            img.pixel(int(lamp_left + hx * size), int(lamp_top + hy * size))
+        )
+        assert lit_highlight.red() > 80, (lit_style, lit_highlight.name())
+        legacy = QColor(
+            img.pixel(
+                int(lamp_left + size * 0.34), int(lamp_top + size * 0.34)
+            )
+        )
+        assert legacy.red() < 80, (lit_style, legacy.name())
+
+
+def test_lit_auto_image_mode_slot_follows_font(qapp):
+    # auto + 图片模式：推导只作用于槽位大小（图片 contain 进推导槽位），
+    # 描边等矢量装饰不绘制。
+    track = _singer_track(singer_id=0)
+    style = Style(
+        fill_color="#0000FF",
+        lit_style="image",
+        lit_image_path=str(_tmp_lamp_sprite()),
+        **_lit_auto_pixel_base(),
+    )
+    group, resolved = _lit_auto_group(track, style, 500)
+    img = _blank(160, 90)
+    paint_frame(img, track, 500, style)
+    pitch = resolved.lit_size * 1.5 + resolved.lit_tracking
+    cx = int(group.x + resolved.lit_size * 0.5)
+    cy = int(group.y + resolved.lit_size * 0.5)
+    color = QColor(img.pixel(cx, cy))
+    assert color.red() > 120 and color.blue() < 120
+    # 缺图回退：auto 档回退为装饰版圆形（走字后填充）。
+    missing = replace(style, lit_image_path="")
+    img2 = _blank(160, 90)
+    paint_frame(img2, track, 500, missing)
+    color2 = QColor(img2.pixel(cx, cy))
+    assert color2.blue() > 120 and color2.red() < 120
+
+
+def _tmp_lamp_sprite():
+    import tempfile
+    from pathlib import Path
+
+    sprite = QImage(24, 16, QImage.Format.Format_ARGB32)
+    sprite.fill(QColor("#FF0000"))
+    path = Path(tempfile.gettempdir()) / "krok_lit_auto_lamp.png"
+    assert sprite.save(str(path))
+    return path
 
 
 def _region_color_weight(

@@ -183,6 +183,8 @@ from krok_helper.subtitle_render.domain.models import (
     SCANLINE_GLOBAL_ROLE_KEY,
     scanline_base_px_from_output,
     scanline_px_for_output,
+    signal_offset_base_px_from_output,
+    signal_offset_px_for_output,
     TITLE_SCHEME_NAME,
     TitleOverlay,
     TitleTimeWindow,
@@ -975,6 +977,20 @@ class PropertyPanel(QWidget):
         # 扫字线像素字段与 N3 模板预设共用这个「当前输出高度」：编辑/显示
         # 值从 1080 基准重新映射，存储基准值不变。
         self._sync_scanline_size_controls()
+        # 指示灯/音量柱偏移同口径：显示值从 1080 基准重映射，基准不动。
+        self._sync_lit_controls()
+
+    def _offset_display_px(self, base_value: int) -> int:
+        """1080 基准的信号偏移 → 当前输出高度下的编辑/显示值。"""
+        return signal_offset_px_for_output(
+            base_value, self._n3_template_target_height
+        )
+
+    def _offset_base_px(self, display_value: int) -> int:
+        """当前输出高度下的偏移编辑值 → 1080 基准存储值。"""
+        return signal_offset_base_px_from_output(
+            display_value, self._n3_template_target_height
+        )
 
     def _scanline_display_px(self, base_value: int) -> int:
         """1080 基准存储值 → 当前输出高度下的编辑/显示值。"""
@@ -4440,23 +4456,42 @@ class PropertyPanel(QWidget):
             self._lit_image_clear_btn,
         ):
             control.setEnabled(image_mode)
+        # auto 模式下大小/颜色由主文字推导：控件停用但回显推导值，让用户
+        # 看到「自动配合字体」实际产出的数字与颜色。
+        lit_display_style = resolve_lit_appearance(self._style)
+        lit_manual = self._style.lit_appearance_mode == "custom"
+        self._lit_appearance_mode_combo.setCurrentIndex(
+            max(
+                0,
+                self._lit_appearance_mode_combo.findData(
+                    self._style.lit_appearance_mode
+                ),
+            )
+        )
+        self._lit_auto_size_ratio_spin.setValue(
+            self._style.lit_auto_size_ratio_pct
+        )
+        self._lit_auto_size_ratio_spin.setEnabled(not lit_manual)
         for control in (
             self._lit_stroke_btn,
             self._lit_stroke_width_spin,
             self._lit_stroke_soften_spin,
-            self._lit_edge_brightness_spin,
             self._lit_shadow_check,
         ):
-            control.setEnabled(not image_mode)
+            control.setEnabled(not image_mode and lit_manual)
+        # 高光两档共用（auto 画在装饰栈之上），仅图片模式下停用。
+        self._lit_edge_brightness_spin.setEnabled(not image_mode)
+        self._lit_size_spin.setEnabled(lit_manual)
+        self._lit_fill_btn.setEnabled(lit_manual)
         self._lit_number_spin.setValue(self._style.lit_number)
-        self._lit_size_spin.setValue(self._style.lit_size)
-        self._lit_x_spin.setValue(self._style.lit_offset_x)
-        self._lit_y_spin.setValue(self._style.lit_offset_y)
+        self._lit_size_spin.setValue(lit_display_style.lit_size)
+        self._lit_x_spin.setValue(self._offset_display_px(self._style.lit_offset_x))
+        self._lit_y_spin.setValue(self._offset_display_px(self._style.lit_offset_y))
         self._lit_tracking_spin.setValue(self._style.lit_tracking)
         self._lit_duration_spin.setValue(self._style.signals_duration_ms)
-        self._lit_stroke_width_spin.setValue(self._style.lit_stroke_width)
-        self._lit_fill_btn.set_color(self._style.lit_fill_color)
-        self._lit_stroke_btn.set_color(self._style.lit_stroke_color)
+        self._lit_stroke_width_spin.setValue(lit_display_style.lit_stroke_width)
+        self._lit_fill_btn.set_color(lit_display_style.lit_fill_color)
+        self._lit_stroke_btn.set_color(lit_display_style.lit_stroke_color)
         self._lit_stroke_soften_spin.setValue(self._style.lit_stroke_soften)
         self._lit_opacity_spin.setValue(self._style.lit_opacity_pct)
         self._lit_edge_brightness_spin.setValue(self._style.lit_edge_brightness_pct)
@@ -4495,8 +4530,12 @@ class PropertyPanel(QWidget):
         self._volume_time_offset_spin.setValue(self._style.volume_time_offset_ms)
         self._volume_stroke_width_spin.setValue(volume_display_style.volume_stroke_width)
         self._volume_opacity_spin.setValue(self._style.volume_opacity_pct)
-        self._volume_x_spin.setValue(self._style.volume_offset_x)
-        self._volume_y_spin.setValue(self._style.volume_offset_y)
+        self._volume_x_spin.setValue(
+            self._offset_display_px(self._style.volume_offset_x)
+        )
+        self._volume_y_spin.setValue(
+            self._offset_display_px(self._style.volume_offset_y)
+        )
         self._volume_column_width_spin.setValue(volume_display_style.volume_column_width)
         self._volume_column_count_spin.setValue(self._style.volume_column_count)
         self._volume_column_spacing_spin.setValue(self._style.volume_column_spacing)
