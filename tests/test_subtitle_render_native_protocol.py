@@ -4040,7 +4040,7 @@ def test_native_gpu_title_uses_title_latin_size_and_reconfigures_when_exe_exists
 
 
 def test_native_gpu_title_rows_follow_layout_alignments_when_exe_exists(
-    qapp, monkeypatch
+    qapp, monkeypatch, request
 ):
     """标题块=一页：GPU 按行对齐贴屏定位（left 贴左余白 / right 贴右余白），与 Painter 同口径。"""
     renderer_path = resolve_native_renderer_path(root=Path.cwd())
@@ -4054,8 +4054,25 @@ def test_native_gpu_title_rows_follow_layout_alignments_when_exe_exists(
 
     # offscreen 平台不枚举系统字体：注册 Arial 让 Painter(Qt) 与 GPU(DWrite)
     # 解析到同一个字体文件，否则 Qt 静默回退到全角面，进宽口径不一致。
-    if QFontDatabase.addApplicationFont(r"C:\Windows\Fonts\arial.ttf") < 0:
+    # 应用字体是进程级污染：结束后必须注销并失效 N3/SUG 字体缓存（与
+    # test_subtitle_render_gpu_backend 的 _gpu_test_application_fonts 同口径），
+    # 否则 Arial 常驻会改变后续用例的字体解析与像素差异基准。
+    arial_handle = QFontDatabase.addApplicationFont(r"C:\Windows\Fonts\arial.ttf")
+    if arial_handle < 0:
         pytest.skip("arial.ttf unavailable")
+
+    def _remove_arial():
+        QFontDatabase.removeApplicationFont(arial_handle)
+        from krok_helper.subtitle_render.n3.font_catalog import (
+            invalidate_n3_font_caches,
+        )
+
+        invalidate_n3_font_caches()
+        from strange_uta_game.frontend import font_cache as sug_font_cache
+
+        sug_font_cache.invalidate()
+
+    request.addfinalizer(_remove_arial)
     assert QFontInfo(QFont("Arial")).family() == "Arial"
 
     width, height = 320, 180
