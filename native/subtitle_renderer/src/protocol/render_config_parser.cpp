@@ -275,6 +275,9 @@ void applySignalStyleOverrides(ResolvedStyle &cfg, const QJsonObject &style) {
     if (hasNonNull(style, QStringLiteral("lit_style"))) {
         cfg.litStyle = stringValue(style, QStringLiteral("lit_style"), cfg.litStyle);
     }
+    cfg.litAppearanceMode = stringValue(
+        style, QStringLiteral("lit_appearance_mode"), cfg.litAppearanceMode
+    );
     cfg.litImagePath = stringValue(
         style, QStringLiteral("lit_image_path"), cfg.litImagePath
     );

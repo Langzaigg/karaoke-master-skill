@@ -405,6 +405,10 @@ struct TextStyle {
     float rubyShadowOffsetY = 1.0f;
     bool litEnabled = false;
     std::string litStyle = "circle";
+    // auto 外观模式：矢量灯走主文字装饰管线（全程取走字后配色、含
+    // 二重描边/发光/阴影，且不跟随行入退场动画），镜像 Painter 的
+    // _draw_lit_decorated_group；大小/颜色已由 IR 物化成数值。
+    std::string litAppearanceMode = "custom";
     int litNumber = 4;
     float litSize = 45.0f;
     float litOffsetX = 0.0f;

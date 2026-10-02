@@ -2640,6 +2640,8 @@ def test_collect_layout_issues_caches_by_layout_signature(qapp, monkeypatch):
     style_fx.volume_fill_color = "#101010"
     style_fx.volume_column_width = 9
     style_fx.lit_style = "heart"
+    style_fx.lit_appearance_mode = "custom"
+    style_fx.lit_auto_size_ratio_pct = 80
     win._collect_layout_issues(
         tracks=[track], style=style_fx, logical_w=1920, logical_h=1080
     )

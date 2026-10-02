@@ -1168,6 +1168,13 @@ def _paint_track_to_painter(
                     track_t_ms,
                     line_plans,
                 ),
+                line_entry_animations=_signal_line_animations(
+                    display_style,
+                    signal_lines,
+                    track_t_ms,
+                    line_plans,
+                    entry_only=True,
+                ),
             )
     finally:
         painter.restore()
@@ -1354,6 +1361,9 @@ def _subtitle_lines_vertical_bounds(
                 line_offsets=line_offsets,
                 line_animations=_signal_line_animations(
                     style, signal_lines, track_t_ms, {}
+                ),
+                line_entry_animations=_signal_line_animations(
+                    style, signal_lines, track_t_ms, {}, entry_only=True
                 ),
             ),
         )
@@ -2136,10 +2146,12 @@ def _resolve_sayatoo_line_layouts(
             return hit
     layouts: dict[int, _SayatooLineLayout] = {}
     # 只有音量柱插入字幕行首并参与 union；形状灯悬浮，不改变文字布局。
+    # 形状灯 auto 外观（灯大小跟随主文字字号）在这里物化：signal_y 的
+    # y 锚点要拿推导后的灯尺寸（与 signal.resolve_signal_layers 同门）。
     signal_layout_style = (
         _volume_style(style)
         if style.volume_enabled
-        else style
+        else resolve_lit_appearance(style)
     )
     signal_metrics = (
         _signal_layout_metrics(signal_layout_style)
@@ -2355,12 +2367,15 @@ def _signal_line_animations(
     signal_lines: list[DisplayLine],
     t_ms: int,
     line_plans: dict[int, LineLayoutPlan] | None,
+    *,
+    entry_only: bool = False,
 ) -> dict[int, tuple[float, float, float]]:
     """段首行的入退场动画状态，供柱体/灯组与正文同步位移与淡变。
 
     与 :func:`_paint_line` / :func:`_display_line_vertical_bounds` 同一来源
     （``line_animation_state`` + 同一口径的行样式/显示窗口）；native 侧在
     行级 OpacityLayer 内绘制信号并对 dx/dy 加 ``animation``，两端语义一致。
+    ``entry_only=True`` 只取入场分量：auto 档指示灯入场同步、退场不跟随。
     """
     animations: dict[int, tuple[float, float, float]] = {}
     for display_line in signal_lines:
@@ -2386,6 +2401,7 @@ def _signal_line_animations(
             if display_line.display_end_ms is not None
             else _line_end_ms(line),
             lane=display_line.lane if line_style.dual_line_layout else None,
+            entry_only=entry_only,
         )
         animations[id(line)] = (animation.dx, animation.dy, animation.opacity)
     return animations
@@ -2404,6 +2420,7 @@ def _paint_signal_lits(
     line_layouts: dict[int, _SayatooLineLayout] | None = None,
     line_offsets: dict[int, tuple[float, float]] | None = None,
     line_animations: dict[int, tuple[float, float, float]] | None = None,
+    line_entry_animations: dict[int, tuple[float, float, float]] | None = None,
 ) -> None:
     _paint_signal_lits_with_ports(
         painter,
@@ -2419,6 +2436,7 @@ def _paint_signal_lits(
         line_layouts=line_layouts,
         line_offsets=line_offsets,
         line_animations=line_animations,
+        line_entry_animations=line_entry_animations,
     )
 
 

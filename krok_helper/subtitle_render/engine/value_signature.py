@@ -47,6 +47,8 @@ _LYRIC_LAYOUT_EXCLUDED_STYLE_FIELDS = _LYRIC_LAYOUT_TITLE_ONLY_EXCLUDED_STYLE_FI
     "lit_style",
     "lit_number",
     "lit_size",
+    "lit_appearance_mode",
+    "lit_auto_size_ratio_pct",
     "lit_offset_x",
     "lit_offset_y",
     "lit_tracking",

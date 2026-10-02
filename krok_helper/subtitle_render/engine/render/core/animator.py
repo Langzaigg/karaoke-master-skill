@@ -22,8 +22,14 @@ def line_animation_state(
     display_start_ms: int,
     display_end_ms: int,
     lane: int | None,
+    entry_only: bool = False,
 ) -> LineAnimationState:
-    """Return opacity and translation for the current display line."""
+    """Return opacity and translation for the current display line.
+
+    ``entry_only=True`` 只取入场分量（native 侧 ``lineEntryAnimationAt``
+    镜像）：auto 档指示灯跟随行入场动画与正文同步出现，但退场不跟随
+    （独立悬浮模块靠自身倒计时转场完成渐变消失）。
+    """
     opacity = 1.0
     dx = 0.0
     dy = 0.0
@@ -40,6 +46,13 @@ def line_animation_state(
         elif style.entry_anim == "rise":
             opacity *= progress
             dy += (1.0 - progress) * _rise_distance(style)
+
+    if entry_only:
+        return LineAnimationState(
+            opacity=max(0.0, min(1.0, opacity)),
+            dx=dx,
+            dy=dy,
+        )
 
     exit_duration = max(style.exit_fade_ms, 0)
     if style.exit_anim != "none" and exit_duration > 0:

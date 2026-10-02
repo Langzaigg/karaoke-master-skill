@@ -44,6 +44,10 @@ VARIANTS = {
     "lit_transition_angle_deg": -70,
     "lit_transition_distance": 60,
     "signals_duration_ms": 2_500,
+    # auto 外观切换（基准钉在 custom；auto 档大小/配色由主文字推导，
+    # 与基准帧必然不同）。lit_auto_size_ratio_pct 只在 auto 档生效，
+    # 由 painter 专属用例覆盖（test_lit_auto_size_ratio_scales_geometry）。
+    "lit_appearance_mode": "auto",
     "volume_duration_ms": 2_500,
     "volume_waiting_time_ms": 1_200,
     "volume_time_offset_ms": 700,
@@ -80,6 +84,9 @@ def _base_style() -> Style:
         entry_anim="none",
         lit_enabled=True,
         lit_style="circle",
+        # 翻转审计要覆盖 lit_* 独立字段，须钉在 custom 档；出厂默认 auto
+        # 下大小/颜色由主文字字号/配色推导，改值不落画面（与 volume 同理）。
+        lit_appearance_mode="custom",
         lit_number=4,
         lit_size=34,
         lit_offset_x=-6,

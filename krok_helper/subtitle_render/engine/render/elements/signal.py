@@ -18,6 +18,7 @@ from PyQt6.QtGui import (
     QPainter,
     QPainterPath,
     QPen,
+    QPolygonF,
 )
 
 from krok_helper.subtitle_render.engine.layout.line.style import (
@@ -40,6 +41,7 @@ from krok_helper.subtitle_render.engine.render.image_resource import (
 from krok_helper.subtitle_render.domain.models import (
     Style,
     effective_karaoke_zoom_pulse,
+    resolve_lit_appearance,
     resolve_volume_appearance,
 )
 from krok_helper.subtitle_render.engine.render.elements.horizontal.transitions import (
@@ -691,6 +693,8 @@ class SignalLitsLayer:
                 painter.setOpacity(painter.opacity() * self.group.opacity)
                 if self.is_volume:
                     _draw_volume_lit_group(painter, self.group, self.style)
+                elif _lit_auto_decorated(self.style):
+                    _draw_lit_decorated_group(painter, self, self.group)
                 else:
                     _paint_shape_signal_group(painter, self)
             finally:
@@ -729,6 +733,20 @@ class SignalLitsLayer:
         return _shape_signal_vertical_bounds(self)
 
 
+def _lit_shape_ink_rect(rect: QRectF, layer: SignalLitsLayer) -> QRectF:
+    """Bound one custom lamp's ink (shadow + soften + body) for fade compositing."""
+    ink = QRectF(rect)
+    if layer.style.lit_shadow:
+        ink = ink.united(
+            rect.translated(
+                max(rect.width() * 0.08, 1.0),
+                max(rect.height() * 0.08, 1.0),
+            )
+        )
+    pad = float(layer.stroke_width + layer.soften) + 2.0
+    return ink.adjusted(-pad, -pad, pad, pad)
+
+
 def _paint_shape_signal_group(
     painter: QPainter,
     layer: SignalLitsLayer,
@@ -742,22 +760,405 @@ def _paint_shape_signal_group(
         dy = group.dy if is_active else 0.0
         x = group.x + dx + index * (layer.size * 1.5 + layer.tracking)
         rect = QRectF(x, group.y + dy, float(layer.size), float(layer.size))
-        painter.save()
+        # 高光（原「边缘亮度」）常驻所有未熄灯：仅画在激活灯上会在其开始
+        # 熄灭的瞬间无淡入地弹出一颗灰色圆形（2026-10 修复，native 同口径）。
+        # 正在淡出的激活灯必须整灯（阴影+柔化+灯体+高光）先离屏合成再一次
+        # 乘 alpha——高光/阴影是半透明层，逐层各自乘 alpha 会让灯体在渐入
+        # 渐出中段提前透出背景（与音量柱闪烁整体烘焙同一口径）。
+        lamp_alpha = group.active_opacity if is_active else 1.0
+        if lamp_alpha >= 1.0:
+            painter.save()
+            try:
+                _draw_lit_shape(
+                    painter,
+                    rect,
+                    layer.style,
+                    layer.fill,
+                    layer.stroke,
+                    layer.stroke_width,
+                    layer.soften,
+                    layer.edge_brightness,
+                )
+            finally:
+                painter.restore()
+            continue
+        ink = _lit_shape_ink_rect(rect, layer)
+        left = math.floor(ink.left())
+        top = math.floor(ink.top())
+        width = max(1, math.ceil(ink.right()) - left)
+        height = max(1, math.ceil(ink.bottom()) - top)
+        image = QImage(width, height, QImage.Format.Format_ARGB32_Premultiplied)
+        image.fill(Qt.GlobalColor.transparent)
+        layer_painter = QPainter(image)
         try:
-            if is_active:
-                painter.setOpacity(painter.opacity() * group.active_opacity)
+            layer_painter.setRenderHints(
+                QPainter.RenderHint.Antialiasing
+                | QPainter.RenderHint.TextAntialiasing
+                | QPainter.RenderHint.SmoothPixmapTransform
+            )
+            layer_painter.translate(-left, -top)
             _draw_lit_shape(
-                painter,
+                layer_painter,
                 rect,
                 layer.style,
                 layer.fill,
                 layer.stroke,
                 layer.stroke_width,
                 layer.soften,
-                layer.edge_brightness if is_active else 0.0,
+                layer.edge_brightness,
             )
         finally:
+            layer_painter.end()
+        painter.save()
+        try:
+            painter.setOpacity(painter.opacity() * lamp_alpha)
+            painter.drawImage(QPointF(float(left), float(top)), image)
+        finally:
             painter.restore()
+
+
+def _lit_auto_decorated(style: Style) -> bool:
+    """形状指示灯 auto 外观：矢量灯走主文字装饰管线。
+
+    与 ``_draw_volume_lit_group`` 的 auto 分支闸门同理：legacy volume 兼容
+    路径（lit_style="volume"）不经 resolve_lit_appearance 物化，这里若只看
+    模式字段会让 Painter 走推导、native 读物化前的原始值，两后端岔开。
+    """
+    return (
+        style.lit_enabled
+        and style.lit_style != "volume"
+        and style.lit_appearance_mode == "auto"
+    )
+
+
+_LIT_NOTE_STYLES = ("note8", "note16", "notepair")
+"""音符族灯形：八分音符 / 十六分音符 / 组合（双音符加横梁）。"""
+
+
+def _lit_star_note_path(rect: QRectF, lit_style: str) -> QPainterPath:
+    """星型 / 音符族复合路径（边长比例口径与 native lampShapeGeometry 镜像）。
+
+    音符各部件先各自成子路径再 ``united()`` 成单一轮廓——描边只画外形，
+    不在符干与符头的接缝处画内线（native 侧用布尔并集同口径镜像）。
+    """
+    w = rect.width()
+    h = rect.height()
+    left = rect.left()
+    top = rect.top()
+    path = QPainterPath()
+    if lit_style == "star":
+        # 五角星：外接半径 0.5×边长，内切半径 0.45×外接，顶点朝上。
+        outer = min(w, h) * 0.5
+        inner = outer * 0.45
+        center_x = left + w * 0.5
+        center_y = top + h * 0.5
+        polygon = QPolygonF()
+        for step in range(10):
+            radius = outer if step % 2 == 0 else inner
+            angle = -math.pi / 2.0 + step * math.pi / 5.0
+            polygon.append(
+                QPointF(
+                    center_x + radius * math.cos(angle),
+                    center_y + radius * math.sin(angle),
+                )
+            )
+        path.addPolygon(polygon)
+        path.closeSubpath()
+        return path
+
+    def _ellipse(cx: float, cy: float, rx: float, ry: float) -> QPainterPath:
+        head = QPainterPath()
+        head.addEllipse(QPointF(left + w * cx, top + h * cy), w * rx, h * ry)
+        return head
+
+    def _rect(x: float, y: float, rw: float, rh: float) -> QPainterPath:
+        part = QPainterPath()
+        part.addRect(left + w * x, top + h * y, w * rw, h * rh)
+        return part
+
+    def _flag(y0: float) -> QPainterPath:
+        # 符旗：附着在符干顶部、向右下弯的三角旗面（十六分音符的第二面
+        # 旗 = 同形下移 0.16h）。
+        flag = QPainterPath()
+        flag.moveTo(left + w * 0.565, top + h * y0)
+        flag.cubicTo(
+            left + w * 0.78, top + h * (y0 + 0.06),
+            left + w * 0.86, top + h * (y0 + 0.20),
+            left + w * 0.74, top + h * (y0 + 0.36),
+        )
+        flag.lineTo(left + w * 0.665, top + h * (y0 + 0.285))
+        flag.cubicTo(
+            left + w * 0.755, top + h * (y0 + 0.18),
+            left + w * 0.68, top + h * (y0 + 0.09),
+            left + w * 0.565, top + h * (y0 + 0.055),
+        )
+        flag.closeSubpath()
+        return flag
+
+    if lit_style in ("note8", "note16"):
+        # 单音符：符头（左下椭圆）+ 符干（右侧竖线）+ 符旗（十六分两面）。
+        path = _ellipse(0.34, 0.78, 0.20, 0.12).united(
+            _rect(0.50, 0.10, 0.065, 0.68)
+        )
+        path = path.united(_flag(0.10))
+        if lit_style == "note16":
+            path = path.united(_flag(0.26))
+        return path
+
+    # 组合（♪♪ 横梁）：左符头低、右符头高，双符干接顶部斜横梁。
+    path = _ellipse(0.24, 0.74, 0.17, 0.11).united(_rect(0.375, 0.16, 0.06, 0.58))
+    path = path.united(_ellipse(0.62, 0.60, 0.17, 0.11))
+    path = path.united(_rect(0.755, 0.04, 0.06, 0.56))
+    beam = QPainterPath()
+    beam.moveTo(left + w * 0.375, top + h * 0.08)
+    beam.lineTo(left + w * 0.815, top + h * 0.02)
+    beam.lineTo(left + w * 0.815, top + h * 0.12)
+    beam.lineTo(left + w * 0.375, top + h * 0.18)
+    beam.closeSubpath()
+    return path.united(beam)
+
+
+def _lit_shape_path(rect: QRectF, lit_style: str) -> QPainterPath:
+    """灯形矢量路径，与 `_draw_lit_shape_raw` 的形状口径一致。"""
+    path = QPainterPath()
+    if lit_style == "square":
+        path.addRect(rect)
+    elif lit_style == "rounded":
+        radius = max(rect.width() * 0.22, 1.0)
+        path.addRoundedRect(rect, radius, radius)
+    elif lit_style == "star" or lit_style in _LIT_NOTE_STYLES:
+        path = _lit_star_note_path(rect, lit_style)
+    else:
+        path.addEllipse(rect)
+    return path
+
+
+def _lit_highlight_geometry(
+    lit_style: str,
+    rect: QRectF,
+) -> tuple[float, float, float]:
+    """高光锚点（圆心 + 半径，占位形边长比例）。
+
+    圆/方/圆角取左上 34% 处（原口径）；星型取星核上部居中（五角星顶臂
+    与中心的连接处）；音符取符头中心——两种新形状的受光面与方形灯不同。
+    """
+    size = min(rect.width(), rect.height())
+    if lit_style == "star":
+        return (
+            rect.left() + rect.width() * 0.5,
+            rect.top() + rect.height() * 0.36,
+            size * 0.10,
+        )
+    if lit_style in ("note8", "note16"):
+        # 单音符：高光落在符头（左下）。
+        return (
+            rect.left() + rect.width() * 0.29,
+            rect.top() + rect.height() * 0.745,
+            size * 0.075,
+        )
+    if lit_style == "notepair":
+        # 组合：高光落在左符头。
+        return (
+            rect.left() + rect.width() * 0.20,
+            rect.top() + rect.height() * 0.705,
+            size * 0.075,
+        )
+    return (
+        rect.left() + rect.width() * 0.34,
+        rect.top() + rect.height() * 0.34,
+        size * 0.16,
+    )
+
+
+def _draw_lit_decorated_group(
+    painter: QPainter,
+    layer: SignalLitsLayer,
+    group: SignalLitGroup,
+) -> None:
+    """auto 档形状灯走主文字装饰管线。
+
+    装饰源是段首行第一个角色的有效样式（``group.bar_style``，无角色时
+    为该行样式）：指示灯不区分走字前后、直接淡化消失，全程取其配色矩阵
+    的 **after（走字后）** 状态；填充（含渐变/图片填充）跨度为灯组自身
+    外接框，描边/二重描边宽度、发光半径与阴影偏移按 灯尺寸/该角色字号
+    同比缩放（上限半个灯宽）。「整字放大」唱字动画开启时，正在熄灭的灯
+    按同一曲线在其倒计时窗口内放大-缩回；高光常驻所有未熄灯且画在装饰
+    栈之上。
+
+    组级透明度（lit_opacity_pct）与熄灭灯的转场透明度都必须先把整灯
+    （发光多 pass + 描边 + 填充 + 高光）离屏合成、再一次乘 alpha：逐层
+    各自乘 alpha 会让发光环比灯体褪色慢，淡出中段残留"空心灯"残影（与
+    音量柱闪烁整体烘焙同一口径）。native 端以 OpacityLayer 镜像本语义。
+    """
+    style = layer.style
+    decor_style = group.bar_style if group.bar_style is not None else style
+    colors = effective_karaoke_colors(decor_style)
+    font_size = max(int(decor_style.font_size_px), 1)
+    size = float(layer.size)
+    scale = size / float(font_size)
+    stroke_width = min(
+        max(int(int(decor_style.stroke_width_px or 0) * scale + 0.5), 0),
+        max(int(size) // 2, 0),
+    )
+    stroke2_width = min(
+        max(int(main_stroke2_width(decor_style) * scale + 0.5), 0),
+        max(int(size) // 2, 0),
+    )
+    shadow_dx = _scaled_signed_px(decor_style.shadow_offset_x, scale)
+    shadow_dy = _scaled_signed_px(decor_style.shadow_offset_y, scale)
+    glow_after = int(glow_radius(decor_style, after=True) * scale + 0.5)
+    glow_pad = (
+        float(glow_extent(stroke_width, stroke2_width, glow_after))
+        if decor_style.decoration_kind == "glow"
+        else 0.0
+    )
+    half_pen = (stroke_width + stroke2_width) * 0.5
+    pad_x = max(glow_pad, half_pen + abs(shadow_dx)) + 2.0
+    pad_y = max(glow_pad, half_pen + abs(shadow_dy)) + 2.0
+    edge_brightness = layer.edge_brightness
+    lit_image = (
+        cached_lit_image(style.lit_image_path)
+        if style.lit_style == "image"
+        else None
+    )
+
+    duration = max(int(group.duration_ms), 0)
+    pulse_enabled = effective_karaoke_zoom_pulse(decor_style)
+    pulse_level = zoom_pulse_curve_level(decor_style)
+    count = max(int(layer.count), 1)
+
+    # 可见灯：index 0..active_index；active_index 处为正在熄灭的灯（带
+    # 转场位移/透明度）。整字放大窗口 = 该灯自身的倒计时窗口（镜像音量柱
+    # 「覆盖窗口」公式，方向相反：countdown 从右往左熄灭）。
+    pitch = size * 1.5 + float(layer.tracking)
+    entries: list[tuple[QRectF, bool, float]] = []
+    if group.active_index is not None and group.active_index >= 0:
+        for index in range(group.active_index + 1):
+            is_active = index == group.active_index
+            dx = group.dx if is_active else 0.0
+            dy = group.dy if is_active else 0.0
+            rect = QRectF(
+                group.x + dx + index * pitch,
+                group.y + dy,
+                size,
+                size,
+            )
+            pulse = 1.0
+            if pulse_enabled and duration > 0:
+                lamp_start = duration * (count - index - 1) // count
+                lamp_end = duration * (count - index) // count
+                pulse = zoom_pulse_wipe_scale(
+                    int(group.elapsed_ms), lamp_start, lamp_end, pulse_level
+                )
+            entries.append((rect, is_active, pulse))
+    if not entries:
+        return
+    state = colors.after
+    group_rect = entries[0][0]
+    for rect, _is_active, _pulse in entries[1:]:
+        group_rect = group_rect.united(rect)
+
+    def _draw_one(target: QPainter, rect: QRectF, pulse: float) -> None:
+        # 单灯绘制单元：pulse 缩放 + （图片 | 装饰栈 + 高光）。高光必须与
+        # 灯体同一单元——淡出时整灯一次乘 alpha，不能逐层各自乘。
+        target.save()
+        try:
+            if pulse != 1.0:
+                center = rect.center()
+                target.translate(center.x(), center.y())
+                target.scale(pulse, pulse)
+                target.translate(-center.x(), -center.y())
+            if lit_image is not None:
+                _draw_lit_image(target, rect, lit_image)
+                return
+            path = _lit_shape_path(rect, style.lit_style)
+            paint_text_layer_stack(
+                target,
+                path,
+                rect,
+                state,
+                decor_style,
+                stroke_width=stroke_width,
+                stroke2_width=stroke2_width,
+                shadow_dx=shadow_dx,
+                shadow_dy=shadow_dy,
+                glow_radius=glow_after,
+                fill_rect=group_rect,
+            )
+            if edge_brightness > 0.0:
+                hx, hy, radius = _lit_highlight_geometry(
+                    style.lit_style, rect
+                )
+                highlight = QColor("#FFFFFF")
+                highlight.setAlphaF(min(edge_brightness * 0.55, 1.0))
+                target.setPen(Qt.PenStyle.NoPen)
+                target.setBrush(QBrush(highlight))
+                target.drawEllipse(QPointF(hx, hy), radius, radius)
+        finally:
+            target.restore()
+
+    def _entry_ink(rect: QRectF, is_active: bool, pulse: float) -> QRectF:
+        animation = (
+            (1.0, group.dx, group.dy, 0.0, 1.0, 1.0, 0.0)
+            if is_active
+            else None
+        )
+        return _volume_decorated_bar_ink_rect(
+            rect, animation, pulse, pad_x, pad_y
+        )
+
+    def _composite_buffer(
+        items: list[tuple[QRectF, bool, float]], alpha: float
+    ) -> None:
+        ink = _entry_ink(*items[0])
+        for rect, is_active, pulse in items[1:]:
+            ink = ink.united(_entry_ink(rect, is_active, pulse))
+        left = math.floor(ink.left())
+        top = math.floor(ink.top())
+        width = max(1, math.ceil(ink.right()) - left)
+        height = max(1, math.ceil(ink.bottom()) - top)
+        image = QImage(width, height, QImage.Format.Format_ARGB32_Premultiplied)
+        image.fill(Qt.GlobalColor.transparent)
+        layer_painter = QPainter(image)
+        try:
+            layer_painter.setRenderHints(
+                QPainter.RenderHint.Antialiasing
+                | QPainter.RenderHint.TextAntialiasing
+                | QPainter.RenderHint.SmoothPixmapTransform
+            )
+            layer_painter.translate(-left, -top)
+            for rect, _is_active, pulse in items:
+                _draw_one(layer_painter, rect, pulse)
+        finally:
+            layer_painter.end()
+        painter.save()
+        try:
+            painter.setOpacity(painter.opacity() * alpha)
+            painter.drawImage(QPointF(float(left), float(top)), image)
+        finally:
+            painter.restore()
+
+    group_alpha = painter.opacity()
+    steady_entries = [
+        (rect, is_active, pulse)
+        for rect, is_active, pulse in entries
+        if not (is_active and group.active_opacity < 1.0)
+    ]
+    fading_entries = [
+        (rect, is_active, pulse)
+        for rect, is_active, pulse in entries
+        if is_active and group.active_opacity < 1.0
+    ]
+    # 组级透明度（lit_opacity_pct）作用在整组上：先合成再一次乘；全透明
+    # 走直绘快路径。
+    if group_alpha < 1.0 and steady_entries:
+        _composite_buffer(steady_entries, 1.0)
+    elif steady_entries:
+        for rect, _is_active, pulse in steady_entries:
+            _draw_one(painter, rect, pulse)
+    # 正在熄灭的灯：整灯独立合成，一次乘 组级×转场 alpha。
+    if fading_entries:
+        _composite_buffer(fading_entries, group.active_opacity)
 
 
 def _volume_signal_vertical_bounds(
@@ -800,6 +1201,37 @@ def _shape_signal_vertical_bounds(
     if not rects:
         return None
     pad = signal_stroke_extent(layer.style, is_volume=False) + 2
+    if _lit_auto_decorated(layer.style):
+        # auto 装饰灯的墨迹可远超灯体（发光晕/二重描边/阴影偏移），
+        # 导出条带/避让包络必须按装饰外扩，否则裁掉光晕。
+        decor_style = (
+            group.bar_style if group.bar_style is not None else layer.style
+        )
+        font_size = max(int(decor_style.font_size_px), 1)
+        scale = float(layer.size) / font_size
+        stroke_width = min(
+            max(int(int(decor_style.stroke_width_px or 0) * scale + 0.5), 0),
+            max(int(layer.size) // 2, 0),
+        )
+        stroke2_width = min(
+            max(int(main_stroke2_width(decor_style) * scale + 0.5), 0),
+            max(int(layer.size) // 2, 0),
+        )
+        glow_pad = (
+            float(
+                glow_extent(
+                    stroke_width,
+                    stroke2_width,
+                    int(glow_radius(decor_style, after=True) * scale + 0.5),
+                )
+            )
+            if decor_style.decoration_kind == "glow"
+            else 0.0
+        )
+        half_pen = (stroke_width + stroke2_width) * 0.5
+        shadow_dy = abs(_scaled_signed_px(decor_style.shadow_offset_y, scale))
+        decor_pad = max(glow_pad, half_pen + shadow_dy) + 2.0
+        pad = max(pad, decor_pad)
     top = min(rect.top() for rect in rects) - pad
     bottom = max(rect.bottom() for rect in rects) + pad
     return int(math.floor(top)), int(math.ceil(bottom))
@@ -1262,6 +1694,7 @@ def resolve_signal_lit_groups(
     line_layouts: Mapping[int, SignalLineLayout] | None = None,
     line_offsets: Mapping[int, tuple[float, float]] | None = None,
     line_animations: Mapping[int, tuple[float, float, float]] | None = None,
+    line_entry_animations: Mapping[int, tuple[float, float, float]] | None = None,
     text_anchor: bool = False,
 ) -> list[SignalLitGroup]:
     del item_width
@@ -1273,6 +1706,9 @@ def resolve_signal_lit_groups(
         return []
     groups: list[SignalLitGroup] = []
     time_offset = int(style.lit_time_offset_ms)
+    # auto 档形状灯跟随行**入场**动画（与正文同步出现、含位移）；退场不
+    # 跟随——独立悬浮模块靠自身倒计时转场完成渐变消失。
+    lit_auto_independent = _lit_auto_decorated(style)
     if style.lit_style == "volume":
         group_width = volume_signal_geometry(style).group_width
     else:
@@ -1294,7 +1730,16 @@ def resolve_signal_lit_groups(
             if line_animations is not None
             else (0.0, 0.0, 1.0)
         )
-        # 与正文同口径：动画透明度归零的帧整行不画，柱体/灯组同样跳过。
+        if lit_auto_independent:
+            # auto 档：只取入场分量（无入场数据时按恒等，退场不隐藏灯组）。
+            if line_entry_animations is not None:
+                anim_dx, anim_dy, anim_opacity = line_entry_animations.get(
+                    id(line), (0.0, 0.0, 1.0)
+                )
+            else:
+                anim_dx, anim_dy, anim_opacity = 0.0, 0.0, 1.0
+        # 与正文同口径：动画透明度归零的帧整行不画，柱体/灯组同样跳过
+        # （auto 档的透明度来自入场分量，退场归零不影响灯组）。
         if anim_opacity <= 0.0:
             continue
         line_layout = (
@@ -1321,7 +1766,18 @@ def resolve_signal_lit_groups(
 
         elapsed = max(t_ms - active_start, 0)
         bar_animations = None
-        bar_style = None
+        # 装饰源样式：段首行第一个非空白字符的角色方案叠加进行样式
+        # （native 端取第一个有几何字符的 styleIndex，两端口径一致）。
+        # 音量柱 auto 装饰与形状灯 auto 装饰共用该源。
+        first_role = next(
+            (
+                char.role_label
+                for char in line.chars
+                if char.text and not char.text.isspace()
+            ),
+            None,
+        )
+        bar_style = style_for_role(line_style, first_role)
         if style.lit_style == "volume":
             elapsed = min(elapsed, max(active_duration - 1, 0))
             active_index, phase, opacity = volume_signal_state(
@@ -1340,17 +1796,6 @@ def resolve_signal_lit_groups(
                 count,
                 img_h,
             )
-            # 装饰源样式：段首行第一个非空白字符的角色方案叠加进行样式
-            # （native 端取第一个有几何字符的 styleIndex，两端口径一致）。
-            first_role = next(
-                (
-                    char.role_label
-                    for char in line.chars
-                    if char.text and not char.text.isspace()
-                ),
-                None,
-            )
-            bar_style = style_for_role(line_style, first_role)
         else:
             active_index, phase = shape_active_index_and_phase(
                 elapsed,
@@ -1439,13 +1884,16 @@ def resolve_signal_layers(
     line_layouts: Mapping[int, SignalLineLayout] | None = None,
     line_offsets: Mapping[int, tuple[float, float]] | None = None,
     line_animations: Mapping[int, tuple[float, float, float]] | None = None,
+    line_entry_animations: Mapping[int, tuple[float, float, float]] | None = None,
 ) -> list[SignalLitsLayer]:
     styles: list[Style] = []
     legacy_volume = style.lit_enabled and style.lit_style == "volume"
     if style.volume_enabled or legacy_volume:
         styles.append(volume_style(style) if style.volume_enabled else style)
     if style.lit_enabled and not legacy_volume:
-        styles.append(style)
+        # auto 外观（大小/颜色跟随主文字）在这里物化，与 painter 布局、
+        # native IR（render_ir 同门）消费同一组数值。
+        styles.append(resolve_lit_appearance(style))
     layers: list[SignalLitsLayer] = []
     for active_style in styles:
         metrics = signal_layout_metrics(active_style)
@@ -1472,6 +1920,7 @@ def resolve_signal_layers(
             line_layouts=line_layouts,
             line_offsets=line_offsets,
             line_animations=line_animations,
+            line_entry_animations=line_entry_animations,
             text_anchor=shape_over_volume,
         )
         layers.extend(build_signal_layers(groups, active_style))
@@ -1493,6 +1942,7 @@ def paint_signal_lits(
     line_layouts: Mapping[int, SignalLineLayout] | None = None,
     line_offsets: Mapping[int, tuple[float, float]] | None = None,
     line_animations: Mapping[int, tuple[float, float, float]] | None = None,
+    line_entry_animations: Mapping[int, tuple[float, float, float]] | None = None,
 ) -> None:
     layers = resolve_signal_layers(
         track,
@@ -1506,6 +1956,7 @@ def paint_signal_lits(
         line_layouts=line_layouts,
         line_offsets=line_offsets,
         line_animations=line_animations,
+        line_entry_animations=line_entry_animations,
     )
     if not layers:
         return

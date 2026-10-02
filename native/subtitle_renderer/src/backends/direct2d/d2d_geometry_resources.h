@@ -4,6 +4,8 @@
 #include "d2d_device.h"
 
 #include <d2d1_2.h>
+
+#include <string>
 #include <wrl/client.h>
 
 namespace krok::subtitle::native::direct2d {

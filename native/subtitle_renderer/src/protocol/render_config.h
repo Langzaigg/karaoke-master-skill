@@ -261,6 +261,9 @@ struct ResolvedStyle {
     std::optional<int> rubyGlowConcentrationLevel;
     bool litEnabled = false;
     QString litStyle = QStringLiteral("volume");
+    // 指示灯 auto 外观模式：矢量灯走主文字装饰管线（镜像 Painter 的
+    // _draw_lit_decorated_group）；大小/颜色已在 IR 侧物化成数值。
+    QString litAppearanceMode = QStringLiteral("custom");
     int litNumber = 4;
     int litSize = 32;
     int litOffsetX = 0;

@@ -2286,6 +2286,53 @@ def test_build_render_ir_materializes_volume_auto_appearance():
     assert manual_ir["style"]["volume_fill_color"] == "#ABCDEF"
 
 
+def test_build_render_ir_materializes_lit_auto_appearance():
+    # auto 外观模式的指示灯大小/颜色必须在 IR 序列化前物化成具体数值：
+    # native 端只消费数值（render_config_parser 直接读 lit_size 等 key），
+    # 与 Painter 的 resolve_lit_appearance 投影同源，C++ 无需理解推导逻辑。
+    track = TimingTrack(lines=[TimingLine(chars=[TimingChar("A", 100)], end_ms=500)])
+    style = Style(
+        font_size_px=100,
+        stroke_width_px=8,
+        lit_enabled=True,
+        lit_style="circle",
+        lit_appearance_mode="auto",
+        lit_size=7,
+        lit_stroke_width=9,
+        lit_fill_color="#ABCDEF",
+        base_color="#010203",
+        fill_color="#040506",
+        stroke_color="#070809",
+    )
+
+    ir = build_render_ir(track, style, width=640, height=360, fps=30)
+
+    assert ir["style"]["lit_appearance_mode"] == "auto"
+    assert ir["style"]["lit_size"] == 50
+    assert ir["style"]["lit_stroke_width"] == 4
+    assert ir["style"]["lit_fill_color"] == "#040506"
+    assert ir["style"]["lit_stroke_color"] == "#070809"
+    # custom 工程的手动值原样下发，不受 auto 解析影响。
+    manual_ir = build_render_ir(
+        track,
+        replace(style, lit_appearance_mode="custom"),
+        width=640,
+        height=360,
+        fps=30,
+    )
+    assert manual_ir["style"]["lit_size"] == 7
+    assert manual_ir["style"]["lit_fill_color"] == "#ABCDEF"
+    # 未启用模块时不物化。
+    disabled_ir = build_render_ir(
+        track,
+        replace(style, lit_enabled=False),
+        width=640,
+        height=360,
+        fps=30,
+    )
+    assert disabled_ir["style"]["lit_size"] == 7
+
+
 def test_shared_track_layout_plan_is_the_gpu_ir_semantic_source():
     track = TimingTrack(
         lines=[

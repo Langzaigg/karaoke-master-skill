@@ -365,7 +365,10 @@ ProbeResult Direct2DGpuBackend::renderFrameInternal(
         float dx = 0.0f;
         float dy = 0.0f;
     };
-    auto lineAnimationAt = [&](const Impl::CachedLine &line) {
+    auto lineEntryAnimationAt = [&](const Impl::CachedLine &line) {
+        // 入场分量（镜像 Painter 的 line_animation_state(entry_only=True)）：
+        // auto 档指示灯入场与正文同步、退场不跟随（独立悬浮模块靠自身
+        // 倒计时转场淡出）。
         LineAnimationState state;
         if (line.staticOverlay || line.displayWindows.empty()) {
             return state;
@@ -397,6 +400,25 @@ ProbeResult Direct2DGpuBackend::renderFrameInternal(
                     * std::max(line.style.fontSize * 0.35f, 18.0f);
             }
         }
+        state.opacity = std::clamp(state.opacity, 0.0f, 1.0f);
+        return state;
+    };
+    auto lineAnimationAt = [&](const Impl::CachedLine &line) {
+        LineAnimationState state = lineEntryAnimationAt(line);
+        if (line.staticOverlay || line.displayWindows.empty()) {
+            return state;
+        }
+        const DisplayWindow &window = line.displayWindows.front();
+        const auto progress = [](int elapsedMs, int durationMs) {
+            if (durationMs <= 0) {
+                return 1.0f;
+            }
+            return std::clamp(
+                static_cast<float>(elapsedMs) / static_cast<float>(durationMs),
+                0.0f,
+                1.0f
+            );
+        };
         if (line.exitAnimation != "none" && line.exitDurationMs > 0) {
             const float linear = progress(window.endMs - tMs, line.exitDurationMs);
             const float eased = linear * linear;
@@ -607,8 +629,38 @@ ProbeResult Direct2DGpuBackend::renderFrameInternal(
                 break;
             }
         }
+        // auto 档形状灯跟随行**入场**动画、退场不跟随（独立悬浮模块，
+        // 镜像 Painter resolve_signal_lit_groups 的 entry-only 取值）：行
+        // 透明度归零时——入场淡变起点（入场分量也归零）正文与灯组一起
+        // 跳过；退场淡变终点（入场分量=1）行继续执行，正文由 alpha=0 的
+        // 行级图层/逐笔刷兜底保持不可见，auto 灯画在层外按自身窗口绘制。
+        const bool litAutoDecorated = line->style.litEnabled
+            && line->style.litStyle != "volume"
+            && line->style.litAppearanceMode == "auto";
         if (animation.opacity <= 0.0f) {
-            continue;
+            bool litAutoLampVisible = false;
+            if (litAutoDecorated && lineEntryAnimationAt(*line).opacity > 0.0f) {
+                int litGuardEndMs = line->endMs
+                    + std::max(line->style.tailMs, 0);
+                for (const DisplayWindow &window : line->displayWindows) {
+                    if (tMs >= window.startMs && tMs < window.endMs) {
+                        litGuardEndMs = window.endMs;
+                        break;
+                    }
+                }
+                const ShapeSignalState litGuardState = shapeSignalState(
+                    line->startMs,
+                    line->style,
+                    tMs,
+                    litGuardEndMs,
+                    line->signalHead
+                );
+                litAutoLampVisible =
+                    litGuardState.visible && litGuardState.activeIndex >= 0;
+            }
+            if (!litAutoLampVisible) {
+                continue;
+            }
         }
         // Fade the composed line, not every brush inside it (see
         // OpacityLayerScope).  If the layer cannot be created, fall back to the
@@ -1612,6 +1664,24 @@ ProbeResult Direct2DGpuBackend::renderFrameInternal(
             std::max(barDecor.stroke2Width * volumeDecorScale, 0.0f),
             std::floor(signalGeometry.columnWidth * 0.5f)
         );
+        // auto 档形状灯装饰参数：与柱体共用装饰源 barDecor，缩放与上限
+        // （半个灯宽）口径镜像 Painter 的 _draw_lit_decorated_group。
+        const float litDecorScale = barDecor.fontSize > 0.0f
+            ? shapeGeometry.size / barDecor.fontSize
+            : 1.0f;
+        const float litDecorStrokeWidth = std::min(
+            std::max(barDecor.strokeWidth * litDecorScale, 0.0f),
+            std::floor(shapeGeometry.size * 0.5f)
+        );
+        const float litDecorStroke2Width = std::min(
+            std::max(barDecor.stroke2Width * litDecorScale, 0.0f),
+            std::floor(shapeGeometry.size * 0.5f)
+        );
+        // 整字放大：与音量柱同 gate（utopia 走字 + zoomPulse 开启），
+        // 熄灭灯在自身倒计时窗口内放大-缩回。
+        const bool litZoomPulse = litAutoDecorated
+            && line->karaokeAnimation == "utopia"
+            && line->zoomPulseEnabled;
         // 柱体逐字入退场动画：镜像 Painter 的
         // volume_bar_transition_states —— 同一行、同一显示窗口，柱
         // index 走字符交错公式（count = 柱数）。utopia 退场文字按
@@ -1820,6 +1890,8 @@ ProbeResult Direct2DGpuBackend::renderFrameInternal(
             int barIndex = 0;
         };
         std::vector<VolumeBarGlowLayer> volumeBarGlowLayers;
+        // auto 档形状灯发光层：与柱体同结构，逐灯一枚（全程走字后配色）。
+        std::vector<VolumeBarGlowLayer> litGlowLayers;
         const int signalActiveDuration = std::max(
             (independentVolume ? style.volumeDurationMs : style.signalsDurationMs)
                 - std::max(
@@ -5011,6 +5083,221 @@ ProbeResult Direct2DGpuBackend::renderFrameInternal(
             }
         }
 
+        // auto 档形状灯：灯形 primitive（与 _draw_lit_shape_raw / Painter 的
+        // _lit_shape_path 同口径）与发光源预烘焙。灯体绘制在行级图层之外
+        // （lineOpacityLayer.pop() 之后），这里只备好 primitive 与源位图。
+        auto litLampShapeGeometry = [&]() -> ID2D1PathGeometry * {
+            // 星型/音符路径按 (litStyle, size) 缓存（configure 时随场景清空）；
+            // 单位坐标 0..size，绘制点平移到灯位。
+            if (style.litStyle != "star" && style.litStyle != "note8"
+                && style.litStyle != "note16" && style.litStyle != "notepair") {
+                return nullptr;
+            }
+            const auto key = std::make_pair(style.litStyle, shapeGeometry.size);
+            const auto found = impl_->lampShapeGeometries.find(key);
+            if (found != impl_->lampShapeGeometries.end()) {
+                return found->second.Get();
+            }
+            Microsoft::WRL::ComPtr<ID2D1PathGeometry> geometry =
+                direct2d::lampShapeGeometry(
+                    device_.d2dFactory(), style.litStyle, shapeGeometry.size, device_
+                );
+            ID2D1PathGeometry *raw = geometry.Get();
+            impl_->lampShapeGeometries[key] = std::move(geometry);
+            return raw;
+        };
+        auto litHighlightEllipse = [&](const D2D1_RECT_F &rect) {
+            // 高光锚点按形状适配（镜像 Painter 的 _lit_highlight_geometry）：
+            // 星型取星核上部、音符取符头；圆/方/圆角维持原左上口径。
+            const float size = shapeGeometry.size;
+            if (style.litStyle == "star") {
+                return D2D1::Ellipse(
+                    D2D1::Point2F(
+                        rect.left + (rect.right - rect.left) * 0.5f,
+                        rect.top + (rect.bottom - rect.top) * 0.36f
+                    ),
+                    size * 0.10f,
+                    size * 0.10f
+                );
+            }
+            if (style.litStyle == "note") {
+                return D2D1::Ellipse(
+                    D2D1::Point2F(
+                        rect.left + (rect.right - rect.left) * 0.29f,
+                        rect.top + (rect.bottom - rect.top) * 0.745f
+                    ),
+                    size * 0.075f,
+                    size * 0.075f
+                );
+            }
+            return D2D1::Ellipse(
+                D2D1::Point2F(
+                    rect.left + size * 0.34f,
+                    rect.top + size * 0.34f
+                ),
+                size * 0.16f,
+                size * 0.16f
+            );
+        };
+        auto litLampRectAt = [&](int index) {
+            const bool active = index == shapeState.activeIndex;
+            const float x = style.litOffsetX
+                + static_cast<float>(index)
+                    * (shapeGeometry.size * 1.5f + shapeGeometry.tracking)
+                + (active ? shapeState.dx : 0.0f);
+            const float y = shapeGroupY + (active ? shapeState.dy : 0.0f);
+            return D2D1::RectF(
+                x, y, x + shapeGeometry.size, y + shapeGeometry.size
+            );
+        };
+        auto litLampGroupRect = [&]() {
+            D2D1_RECT_F groupRect = litLampRectAt(0);
+            for (int index = 1; index <= shapeState.activeIndex; ++index) {
+                const D2D1_RECT_F rect = litLampRectAt(index);
+                groupRect = D2D1::RectF(
+                    std::min(groupRect.left, rect.left),
+                    std::min(groupRect.top, rect.top),
+                    std::max(groupRect.right, rect.right),
+                    std::max(groupRect.bottom, rect.bottom)
+                );
+            }
+            return groupRect;
+        };
+        auto strokeLitDecorShape = [&](
+            const D2D1_RECT_F &rect, ID2D1Brush *brush, float penWidth
+        ) {
+            if (style.litStyle == "square") {
+                context->DrawRectangle(rect, brush, penWidth);
+            } else if (style.litStyle == "rounded") {
+                const float radius = std::max(
+                    (rect.right - rect.left) * 0.22f, 1.0f
+                );
+                context->DrawRoundedRectangle(
+                    D2D1::RoundedRect(rect, radius, radius), brush, penWidth
+                );
+            } else if (ID2D1PathGeometry *lampPath = litLampShapeGeometry()) {
+                // 单位坐标几何：平移到灯位后描边（并集轮廓，无接缝内线）。
+                D2D1_MATRIX_3X2_F previous;
+                context->GetTransform(&previous);
+                context->SetTransform(
+                    D2D1::Matrix3x2F::Translation(rect.left, rect.top)
+                    * previous
+                );
+                context->DrawGeometry(lampPath, brush, penWidth);
+                context->SetTransform(previous);
+            } else {
+                const D2D1_ELLIPSE ellipse = D2D1::Ellipse(
+                    D2D1::Point2F(
+                        (rect.left + rect.right) * 0.5f,
+                        (rect.top + rect.bottom) * 0.5f
+                    ),
+                    (rect.right - rect.left) * 0.5f,
+                    (rect.bottom - rect.top) * 0.5f
+                );
+                context->DrawEllipse(ellipse, brush, penWidth);
+            }
+        };
+        auto fillLitDecorShape = [&](
+            const D2D1_RECT_F &rect, ID2D1Brush *brush
+        ) {
+            if (style.litStyle == "square") {
+                context->FillRectangle(rect, brush);
+            } else if (style.litStyle == "rounded") {
+                const float radius = std::max(
+                    (rect.right - rect.left) * 0.22f, 1.0f
+                );
+                context->FillRoundedRectangle(
+                    D2D1::RoundedRect(rect, radius, radius), brush
+                );
+            } else if (ID2D1PathGeometry *lampPath = litLampShapeGeometry()) {
+                D2D1_MATRIX_3X2_F previous;
+                context->GetTransform(&previous);
+                context->SetTransform(
+                    D2D1::Matrix3x2F::Translation(rect.left, rect.top)
+                    * previous
+                );
+                context->FillGeometry(lampPath, brush);
+                context->SetTransform(previous);
+            } else {
+                const D2D1_ELLIPSE ellipse = D2D1::Ellipse(
+                    D2D1::Point2F(
+                        (rect.left + rect.right) * 0.5f,
+                        (rect.top + rect.bottom) * 0.5f
+                    ),
+                    (rect.right - rect.left) * 0.5f,
+                    (rect.bottom - rect.top) * 0.5f
+                );
+                context->FillEllipse(ellipse, brush);
+            }
+        };
+        if (litAutoDecorated
+            && shapeState.visible
+            && shapeState.activeIndex >= 0
+            && barDecor.decorationKind == "glow"
+            && style.litOpacity > 0.0f) {
+            const float litGlowBase = litDecorStroke2Width > 0.0f
+                ? litDecorStrokeWidth + litDecorStroke2Width
+                : litDecorStrokeWidth;
+            const D2D1_RECT_F litGroupRectForBrushes = litLampGroupRect();
+            for (int index = 0; index <= shapeState.activeIndex; ++index) {
+                const int radius = static_cast<int>(std::lround(
+                    std::max(0.0f, barDecor.glowAfterRadius * litDecorScale)
+                ));
+                if (radius <= 0) {
+                    continue;
+                }
+                const D2D1_RECT_F lampRect = litLampRectAt(index);
+                const float glowPen = std::max(
+                    1.0f, litGlowBase + static_cast<float>(radius)
+                );
+                const float pad = std::ceil(
+                    glowPen / 2.0f + static_cast<float>(radius) * 3.0f
+                ) + 2.0f;
+                VolumeBarGlowLayer layer;
+                layer.layerRect = D2D1::RectF(
+                    lampRect.left - pad,
+                    lampRect.top - pad,
+                    lampRect.right + pad,
+                    lampRect.bottom + pad
+                );
+                const float layerW = std::max(
+                    layer.layerRect.right - layer.layerRect.left, 1.0f
+                );
+                const float layerH = std::max(
+                    layer.layerRect.bottom - layer.layerRect.top, 1.0f
+                );
+                layer.source = acquireGlowScratch(layerW, layerH);
+                layer.blur = acquireGlowEffect();
+                const int passes
+                    = std::clamp(barDecor.glowConcentrationLevel, 0, 2) + 1;
+                for (int pass = 0; pass < passes; ++pass) {
+                    layer.sigmas.push_back(radius - pass * radius / passes);
+                }
+                context->SetTarget(layer.source);
+                context->BeginDraw();
+                context->Clear(D2D1::ColorF(0.0f, 0.0f));
+                context->SetTransform(D2D1::Matrix3x2F::Translation(
+                    -layer.layerRect.left, -layer.layerRect.top
+                ));
+                // 组级/逐灯透明度由合成期的图层承载（镜像 Painter 的整组
+                // 离屏合成），源烘焙恒满强度。
+                Microsoft::WRL::ComPtr<ID2D1Brush> decorBrush = paintBrush(
+                    barDecor.afterDecorPaint,
+                    litGroupRectForBrushes,
+                    barDecor.afterDecor
+                );
+                strokeLitDecorShape(lampRect, decorBrush.Get(), glowPen);
+                checkHr(
+                    context->EndDraw(),
+                    "ID2D1DeviceContext::EndDraw(lit glow source)",
+                    device_
+                );
+                layer.blur->SetInput(0, layer.source);
+                layer.barIndex = index;
+                litGlowLayers.push_back(std::move(layer));
+            }
+        }
+
         // ------------------------------------------------------------------
         // 2026-09 装饰粒子（back=涟漪光环垫底 / front=星光·音符·闪烁）与
         // 唱字描边闪光。轨迹/时序与 Python particles.py / painter.py 镜像。
@@ -6806,7 +7093,8 @@ ProbeResult Direct2DGpuBackend::renderFrameInternal(
         volumeFlashLayer.pop();
         if (shapeState.visible
             && shapeState.activeIndex >= 0
-            && style.litOpacity > 0.0f) {
+            && style.litOpacity > 0.0f
+            && !litAutoDecorated) {
             context->SetTransform(withViewport(D2D1::Matrix3x2F::Translation(shapeDx, dy)));
             auto shapeBrush = [&](const RgbaColor &color, float opacity) {
                 PaintStyle paint;
@@ -6825,6 +7113,16 @@ ProbeResult Direct2DGpuBackend::renderFrameInternal(
                                     float opacity) {
                 auto fill = shapeBrush(fillColor, opacity);
                 auto stroke = shapeBrush(strokeColor, opacity);
+                if (style.litStyle == "star" || style.litStyle == "note8"
+                    || style.litStyle == "note16"
+                    || style.litStyle == "notepair") {
+                    // 星型/音符：单位坐标路径几何（并集轮廓）平移到灯位。
+                    fillLitDecorShape(rect, fill.Get());
+                    if (strokeWidth > 0.0f && strokeColor.alpha > 0) {
+                        strokeLitDecorShape(rect, stroke.Get(), strokeWidth);
+                    }
+                    return;
+                }
                 if (style.litStyle == "square") {
                     context->FillRectangle(rect, fill.Get());
                     if (strokeWidth > 0.0f && strokeColor.alpha > 0) {
@@ -6876,11 +7174,24 @@ ProbeResult Direct2DGpuBackend::renderFrameInternal(
             }
             for (int index = 0; index <= shapeState.activeIndex; ++index) {
                 const bool active = index == shapeState.activeIndex;
+                // 正在熄灭的灯整灯（阴影+柔化+灯体+高光）先进不透明图层、
+                // 出层一次乘 alpha：高光/阴影是半透明层，逐笔刷各自乘会让
+                // 灯体在渐入渐出中段提前透出背景（镜像 Painter 的整灯离屏
+                // 合成；图层创建失败回退逐笔刷乘法）。
+                const float lampAlpha = active
+                    ? shapeState.activeOpacity
+                    : 1.0f;
+                OpacityLayerScope lampFadeLayer;
+                const bool lampFadeLayerActive = lampAlpha < 1.0f
+                    && lampFadeLayer.prepare(context, lampAlpha);
                 // lineAnimationOpacity 在逐笔刷兜底路径里承载行入退场动画
                 // 透明度（图层可用时为 1），与音量柱 signalBrush 同口径。
                 const float itemOpacity = style.litOpacity
-                    * (active ? shapeState.activeOpacity : 1.0f)
+                    * (lampFadeLayerActive ? 1.0f : lampAlpha)
                     * lineAnimationOpacity;
+                if (lampFadeLayerActive) {
+                    lampFadeLayer.push();
+                }
                 const float itemX = style.litOffsetX
                     + static_cast<float>(index)
                         * (shapeGeometry.size * 1.5f + shapeGeometry.tracking)
@@ -6892,33 +7203,68 @@ ProbeResult Direct2DGpuBackend::renderFrameInternal(
                     itemX + shapeGeometry.size,
                     itemY + shapeGeometry.size
                 );
-                if (litImageMode) {
+                if (litImageMode && litImageBitmap != nullptr
+                    && litImageBitmap->GetSize().width > 0.0f
+                    && litImageBitmap->GetSize().height > 0.0f) {
                     // 图片 contain 进 size 方形槽位（Painter _draw_lit_image
-                    // 同口径）；描边/柔化/阴影/边缘亮度为矢量形状专属。
+                    // 同口径）；描边/柔化/阴影/高光为矢量形状专属。
+                    const D2D1_SIZE_F dim = litImageBitmap->GetSize();
+                    const float fit = std::min(
+                        (rect.right - rect.left) / dim.width,
+                        (rect.bottom - rect.top) / dim.height
+                    );
+                    const float drawW = dim.width * fit;
+                    const float drawH = dim.height * fit;
+                    const float centerX = (rect.left + rect.right) * 0.5f;
+                    const float centerY = (rect.top + rect.bottom) * 0.5f;
+                    context->DrawBitmap(
+                        litImageBitmap,
+                        D2D1::RectF(
+                            centerX - drawW * 0.5f,
+                            centerY - drawH * 0.5f,
+                            centerX + drawW * 0.5f,
+                            centerY + drawH * 0.5f
+                        ),
+                        std::clamp(itemOpacity, 0.0f, 1.0f)
+                    );
+                } else if (litImageMode) {
                     // 缺图/解码失败回退圆形（drawRawShape 的 ellipse 分支）。
-                    if (litImageBitmap != nullptr) {
-                        const D2D1_SIZE_F dim = litImageBitmap->GetSize();
-                        if (dim.width > 0.0f && dim.height > 0.0f) {
-                            const float fit = std::min(
-                                (rect.right - rect.left) / dim.width,
-                                (rect.bottom - rect.top) / dim.height
-                            );
-                            const float drawW = dim.width * fit;
-                            const float drawH = dim.height * fit;
-                            const float centerX = (rect.left + rect.right) * 0.5f;
-                            const float centerY = (rect.top + rect.bottom) * 0.5f;
-                            context->DrawBitmap(
-                                litImageBitmap,
-                                D2D1::RectF(
-                                    centerX - drawW * 0.5f,
-                                    centerY - drawH * 0.5f,
-                                    centerX + drawW * 0.5f,
-                                    centerY + drawH * 0.5f
-                                ),
-                                std::clamp(itemOpacity, 0.0f, 1.0f)
-                            );
-                            continue;
-                        }
+                    drawRawShape(
+                        rect,
+                        style.litFill,
+                        style.litStroke,
+                        style.litStrokeWidth,
+                        itemOpacity
+                    );
+                } else {
+                    if (style.litShadow) {
+                        const float shadowOffset = std::max(
+                            shapeGeometry.size * 0.08f, 1.0f
+                        );
+                        drawRawShape(
+                            D2D1::RectF(
+                                rect.left + shadowOffset,
+                                rect.top + shadowOffset,
+                                rect.right + shadowOffset,
+                                rect.bottom + shadowOffset
+                            ),
+                            RgbaColor{0, 0, 0, 89},
+                            RgbaColor{0, 0, 0, 0},
+                            0.0f,
+                            itemOpacity
+                        );
+                    }
+                    if (style.litStrokeSoften > 0.0f
+                        && style.litStrokeWidth > 0.0f) {
+                        RgbaColor softStroke = style.litStroke;
+                        softStroke.alpha = 71;
+                        drawRawShape(
+                            rect,
+                            style.litFill,
+                            softStroke,
+                            style.litStrokeWidth + style.litStrokeSoften,
+                            itemOpacity
+                        );
                     }
                     drawRawShape(
                         rect,
@@ -6927,67 +7273,272 @@ ProbeResult Direct2DGpuBackend::renderFrameInternal(
                         style.litStrokeWidth,
                         itemOpacity
                     );
-                    continue;
+                    // 高光（原「边缘亮度」）常驻所有未熄灯并随灯淡出：仅画
+                    // 在激活灯上会在其开始熄灭的瞬间无淡入地弹出一颗灰色
+                    // 圆形（2026-10 修复，Painter 同口径）。
+                    if (style.litEdgeBrightness > 0.0f) {
+                        auto brush = shapeBrush(
+                            RgbaColor{255, 255, 255, 255},
+                            itemOpacity * std::min(
+                                style.litEdgeBrightness * 0.55f, 1.0f
+                            )
+                        );
+                        context->FillEllipse(
+                            litHighlightEllipse(rect), brush.Get()
+                        );
+                    }
                 }
-                if (style.litShadow) {
-                    const float shadowOffset = std::max(
-                        shapeGeometry.size * 0.08f, 1.0f
-                    );
-                    drawRawShape(
-                        D2D1::RectF(
-                            rect.left + shadowOffset,
-                            rect.top + shadowOffset,
-                            rect.right + shadowOffset,
-                            rect.bottom + shadowOffset
-                        ),
-                        RgbaColor{0, 0, 0, 89},
-                        RgbaColor{0, 0, 0, 0},
-                        0.0f,
-                        itemOpacity
-                    );
-                }
-                if (style.litStrokeSoften > 0.0f
-                    && style.litStrokeWidth > 0.0f) {
-                    RgbaColor softStroke = style.litStroke;
-                    softStroke.alpha = 71;
-                    drawRawShape(
-                        rect,
-                        style.litFill,
-                        softStroke,
-                        style.litStrokeWidth + style.litStrokeSoften,
-                        itemOpacity
-                    );
-                }
-                drawRawShape(
-                    rect,
-                    style.litFill,
-                    style.litStroke,
-                    style.litStrokeWidth,
-                    itemOpacity
-                );
-                if (active && style.litEdgeBrightness > 0.0f) {
-                    const float inset = shapeGeometry.size * 0.18f;
-                    const D2D1_ELLIPSE highlight = D2D1::Ellipse(
-                        D2D1::Point2F(
-                            rect.left + inset + shapeGeometry.size * 0.16f,
-                            rect.top + inset + shapeGeometry.size * 0.16f
-                        ),
-                        shapeGeometry.size * 0.16f,
-                        shapeGeometry.size * 0.16f
-                    );
-                    auto brush = shapeBrush(
-                        RgbaColor{255, 255, 255, 255},
-                        itemOpacity * std::min(
-                            style.litEdgeBrightness * 0.55f, 1.0f
-                        )
-                    );
-                    context->FillEllipse(highlight, brush.Get());
-                }
+                lampFadeLayer.pop();
             }
         }
         // The layer must close before EndDraw; a Direct2D layer cannot outlive
         // the draw it was pushed in.
         lineOpacityLayer.pop();
+        // auto 档装饰形状灯：画在行级不透明图层之外、变换只保留入场动画
+        // 分量（入场与正文同步、退场不跟随——独立悬浮模块靠自身倒计时
+        // 转场淡出；镜像 Painter 的 entry-only 取值与 _draw_lit_decorated_group
+        // 的逐灯「发光+本体」单元/整组合成语义）。
+        if (litAutoDecorated
+            && shapeState.visible
+            && shapeState.activeIndex >= 0
+            && style.litOpacity > 0.0f) {
+            const LineAnimationState litEntry = lineEntryAnimationAt(*line);
+            const float litAutoDx = shapeDx - animation.dx + litEntry.dx;
+            const float litAutoDy = dy - animation.dy + litEntry.dy;
+            const D2D1_MATRIX_3X2_F litBase =
+                D2D1::Matrix3x2F::Translation(litAutoDx, litAutoDy);
+            const D2D1_RECT_F litGroupRect = litLampGroupRect();
+            // 组级透明度（litOpacity × 行入场透明度）整组一次乘回：发光多
+            // pass 与灯体必须作为整体明灭（镜像 Painter 整组离屏合成；图层
+            // 失败回退逐笔刷）。
+            const float litGroupAlpha = std::clamp(
+                style.litOpacity * litEntry.opacity, 0.0f, 1.0f
+            );
+            OpacityLayerScope litGroupLayer;
+            const bool litGroupLayerActive = litGroupAlpha < 1.0f
+                && litGroupLayer.prepare(context, litGroupAlpha);
+            const float litBrushAlpha = litGroupLayerActive
+                ? 1.0f
+                : litGroupAlpha;
+            if (litGroupLayerActive) {
+                litGroupLayer.push();
+            }
+            context->SetTransform(withViewport(litBase));
+            // 图片模式位图（与 custom 路径同缓存口径）；缺图回退装饰圆形。
+            ID2D1Bitmap1 *litAutoImageBitmap = nullptr;
+            if (style.litStyle == "image") {
+                const auto imageFound = std::find_if(
+                    impl_->images.begin(), impl_->images.end(),
+                    [&](const Impl::CachedImage &image) {
+                        return image.path == style.litImagePath
+                            && image.modifiedMs == style.litImageModifiedMs
+                            && image.size == style.litImageSize;
+                    }
+                );
+                if (imageFound != impl_->images.end()) {
+                    litAutoImageBitmap = imageFound->bitmap.Get();
+                }
+            }
+            const int lampElapsed = std::max(
+                tMs - (signalEndMs - signalActiveDuration), 0
+            );
+            auto litGlowLayerAt = [&](int index) -> VolumeBarGlowLayer * {
+                for (VolumeBarGlowLayer &layer : litGlowLayers) {
+                    if (layer.barIndex == index) {
+                        return &layer;
+                    }
+                }
+                return nullptr;
+            };
+            for (int index = 0; index <= shapeState.activeIndex; ++index) {
+                const bool active = index == shapeState.activeIndex;
+                const D2D1_RECT_F rect = litLampRectAt(index);
+                const float centerX = (rect.left + rect.right) * 0.5f;
+                const float centerY = (rect.top + rect.bottom) * 0.5f;
+                // 正在熄灭的灯整灯（发光+描边+填充+高光）先进不透明图层、
+                // 出层一次乘转场 alpha（镜像 Painter 的逐灯缓冲）。
+                const float lampAlpha = active
+                    ? shapeState.activeOpacity
+                    : 1.0f;
+                OpacityLayerScope lampFadeLayer;
+                const bool lampFadeLayerActive = lampAlpha < 1.0f
+                    && lampFadeLayer.prepare(context, lampAlpha);
+                const float itemOpacity = litBrushAlpha
+                    * (lampFadeLayerActive ? 1.0f : lampAlpha);
+                if (lampFadeLayerActive) {
+                    lampFadeLayer.push();
+                }
+                float pulse = 1.0f;
+                if (litZoomPulse && signalActiveDuration > 0) {
+                    const int lampStart = signalActiveDuration
+                        * (shapeGeometry.count - index - 1)
+                        / shapeGeometry.count;
+                    const int lampEnd = signalActiveDuration
+                        * (shapeGeometry.count - index)
+                        / shapeGeometry.count;
+                    pulse = zoomPulseScale(
+                        lampElapsed,
+                        lampStart,
+                        lampEnd,
+                        style.zoomPulseCurveLevel
+                    );
+                }
+                const D2D1_MATRIX_3X2_F lampMatrix =
+                    pulse != 1.0f
+                        ? barCenteredMatrix(
+                              0.0f,
+                              0.0f,
+                              0.0f,
+                              pulse,
+                              pulse,
+                              0.0f,
+                              centerX,
+                              centerY
+                          )
+                        : D2D1::Matrix3x2F::Identity();
+                context->SetTransform(withViewport(lampMatrix * litBase));
+                // 发光（blur-then-transform；源恒满强度，透明度由图层承载）。
+                if (VolumeBarGlowLayer *glowLayer = litGlowLayerAt(index)) {
+                    for (int sigma : glowLayer->sigmas) {
+                        checkHr(
+                            glowLayer->blur->SetValue(
+                                D2D1_GAUSSIANBLUR_PROP_STANDARD_DEVIATION,
+                                static_cast<float>(sigma)
+                            ),
+                            "ID2D1Effect::SetValue(lit glow sigma)",
+                            device_
+                        );
+                        context->DrawImage(
+                            glowLayer->blur,
+                            D2D1::Point2F(
+                                glowLayer->layerRect.left,
+                                glowLayer->layerRect.top
+                            ),
+                            D2D1::RectF(
+                                0.0f,
+                                0.0f,
+                                glowLayer->layerRect.right
+                                    - glowLayer->layerRect.left,
+                                glowLayer->layerRect.bottom
+                                    - glowLayer->layerRect.top
+                            )
+                        );
+                    }
+                }
+                if (litAutoImageBitmap != nullptr
+                    && litAutoImageBitmap->GetSize().width > 0.0f
+                    && litAutoImageBitmap->GetSize().height > 0.0f) {
+                    const D2D1_SIZE_F dim = litAutoImageBitmap->GetSize();
+                    const float fit = std::min(
+                        (rect.right - rect.left) / dim.width,
+                        (rect.bottom - rect.top) / dim.height
+                    );
+                    const float drawW = dim.width * fit;
+                    const float drawH = dim.height * fit;
+                    context->DrawBitmap(
+                        litAutoImageBitmap,
+                        D2D1::RectF(
+                            centerX - drawW * 0.5f,
+                            centerY - drawH * 0.5f,
+                            centerX + drawW * 0.5f,
+                            centerY + drawH * 0.5f
+                        ),
+                        std::clamp(itemOpacity, 0.0f, 1.0f)
+                    );
+                } else {
+                    // 阴影装饰：偏移整影（外圈描边宽 + 填充），镜像柱体
+                    // drawColumn 的 shadow 分支与 drawShadowSilhouette。
+                    if (barDecor.decorationKind == "shadow"
+                        && (barDecor.shadowOffsetX != 0.0f
+                            || barDecor.shadowOffsetY != 0.0f)) {
+                        const float shadowDx
+                            = barDecor.shadowOffsetX * litDecorScale;
+                        const float shadowDy
+                            = barDecor.shadowOffsetY * litDecorScale;
+                        if (shadowDx != 0.0f || shadowDy != 0.0f) {
+                            const float shadowOuter
+                                = litDecorStroke2Width > 0.0f
+                                    ? litDecorStrokeWidth
+                                        + litDecorStroke2Width
+                                    : litDecorStrokeWidth;
+                            Microsoft::WRL::ComPtr<ID2D1Brush> decorBrush
+                                = paintBrush(
+                                    barDecor.afterDecorPaint,
+                                    litGroupRect,
+                                    barDecor.afterDecor
+                                );
+                            decorBrush->SetOpacity(itemOpacity);
+                            const D2D1_RECT_F shadowRect = D2D1::RectF(
+                                rect.left + shadowDx,
+                                rect.top + shadowDy,
+                                rect.right + shadowDx,
+                                rect.bottom + shadowDy
+                            );
+                            if (shadowOuter > 0.0f) {
+                                strokeLitDecorShape(
+                                    shadowRect, decorBrush.Get(), shadowOuter
+                                );
+                            }
+                            fillLitDecorShape(shadowRect, decorBrush.Get());
+                        }
+                    }
+                    if (litDecorStroke2Width > 0.0f
+                        && barDecor.afterStroke2.alpha > 0) {
+                        Microsoft::WRL::ComPtr<ID2D1Brush> stroke2Brush
+                            = paintBrush(
+                                barDecor.afterStroke2Paint,
+                                litGroupRect,
+                                barDecor.afterStroke2
+                            );
+                        stroke2Brush->SetOpacity(itemOpacity);
+                        strokeLitDecorShape(
+                            rect,
+                            stroke2Brush.Get(),
+                            litDecorStrokeWidth + litDecorStroke2Width
+                        );
+                    }
+                    if (litDecorStrokeWidth > 0.0f
+                        && barDecor.afterStroke.alpha > 0) {
+                        Microsoft::WRL::ComPtr<ID2D1Brush> strokeBrush
+                            = paintBrush(
+                                barDecor.afterStrokePaint,
+                                litGroupRect,
+                                barDecor.afterStroke
+                            );
+                        strokeBrush->SetOpacity(itemOpacity);
+                        strokeLitDecorShape(
+                            rect, strokeBrush.Get(), litDecorStrokeWidth
+                        );
+                    }
+                    Microsoft::WRL::ComPtr<ID2D1Brush> fillBrush = paintBrush(
+                        barDecor.afterFillPaint, litGroupRect, barDecor.afterFill
+                    );
+                    fillBrush->SetOpacity(itemOpacity);
+                    fillLitDecorShape(rect, fillBrush.Get());
+                    // 高光常驻所有未熄灯，画在装饰栈之上（Painter 同口径）。
+                    if (style.litEdgeBrightness > 0.0f) {
+                        const D2D1_ELLIPSE highlight = litHighlightEllipse(rect);
+                        PaintStyle highlightPaint;
+                        highlightPaint.mode = "solid";
+                        highlightPaint.color = RgbaColor{255, 255, 255, 255};
+                        Microsoft::WRL::ComPtr<ID2D1Brush> highlightBrush
+                            = paintBrush(
+                                highlightPaint,
+                                litGroupRect,
+                                RgbaColor{255, 255, 255, 255}
+                            );
+                        highlightBrush->SetOpacity(
+                            itemOpacity * std::min(
+                                style.litEdgeBrightness * 0.55f, 1.0f
+                            )
+                        );
+                        context->FillEllipse(highlight, highlightBrush.Get());
+                    }
+                }
+                lampFadeLayer.pop();
+            }
+            litGroupLayer.pop();
+        }
         endDrawMeasured(
             "ID2D1DeviceContext::EndDraw(frame layers)",
             frameDiagnostics.endDrawFrameLayersMs,

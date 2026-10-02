@@ -231,9 +231,12 @@ def build_render_ir(
                 "fps": max(int(fps), 1),
                 "dpr": max(float(dpr or 1.0), 0.01),
             },
-            # auto 外观模式的音量柱大小/颜色在序列化前物化成具体数值，
-            # native 端只消费数值（与 Painter 的 volume_style 投影同源）。
-            "style": style_to_dict(resolve_volume_appearance(style)),
+            # auto 外观模式的音量柱/指示灯大小/颜色在序列化前物化成具体
+            # 数值，native 端只消费数值（与 Painter 的 volume_style /
+            # resolve_lit_appearance 投影同源）。
+            "style": style_to_dict(
+                resolve_lit_appearance(resolve_volume_appearance(style))
+            ),
             # 装饰粒子 sprite 轮廓常量表（Python 单一事实源，native 不内置副本）。
             "fx_sprites": dict(FX_SPRITES),
             "track": track_to_ir(

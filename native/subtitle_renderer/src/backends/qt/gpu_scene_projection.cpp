@@ -353,6 +353,7 @@ void applyGpuResolvedStyle(
     );
     target.litEnabled = source.litEnabled;
     target.litStyle = source.litStyle.toStdString();
+    target.litAppearanceMode = source.litAppearanceMode.toStdString();
     target.litImagePath = source.litImagePath.toStdWString();
     if (!source.litImagePath.isEmpty()) {
         // 与 PaintStyle.image* 同口径：QFileInfo 探测 (mtime, size) 作失效

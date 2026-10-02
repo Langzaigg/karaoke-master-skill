@@ -1208,6 +1208,17 @@ class Style:
     # volume_enabled 控制会插入字幕行首、参与行宽布局的音量柱。
     lit_enabled: bool = False
     volume_enabled: bool = False
+    lit_appearance_mode: LitAppearanceMode = "auto"
+    """指示灯外观联动：``auto`` 时灯大小按主文字字号推导（比例见
+    ``lit_auto_size_ratio_pct``），矢量灯改走主文字的完整装饰管线——
+    填充/渐变/描边/二重描边/发光/阴影取**段首行第一个角色**的有效配色
+    （无角色时为该行样式）的走字后状态，整字放大唱字动画与文字同款并按
+    灯尺寸/字号 同比缩放（见 ``signal._draw_lit_decorated_group``）；auto
+    档不跟随行入退场动画（独立悬浮模块，靠自身倒计时转场淡出）。
+    ``custom`` 时全部使用下面的独立字段。推导在渲染期实时进行，改字号/
+    配色/输出高度后指示灯自动跟随，工程里不落具体值。"""
+    lit_auto_size_ratio_pct: int = 50
+    """auto 档灯边长相对主文字字号的百分比（默认 50%）；仅 auto 模式生效。"""
     volume_appearance_mode: VolumeAppearanceMode = "auto"
     """音量柱外观联动：``auto`` 时整体高度/柱宽/描边宽按主文字字号推导，
     且柱体改用主文字的完整装饰管线——填充/渐变/描边/发光/阴影取**段首行
@@ -1706,6 +1717,48 @@ def resolve_volume_appearance(style: "Style") -> "Style":
     return replace(style, **volume_auto_values(style))
 
 
+def lit_auto_values(style: "Style") -> dict[str, object]:
+    """Derive auto-mode lamp metrics/colors from the main lyric font.
+
+    灯边长 = 字号 × ``lit_auto_size_ratio_pct``（默认 50%），描边宽 =
+    文字描边宽 × 灯尺寸/字号（上限半个灯宽）。auto 档的矢量灯绘制走文字
+    装饰管线（全程取走字后配色），这里的物化值只服务布局度量、native IR
+    与面板回显。取整统一半向上（与 ``volume_auto_values`` 口径相同）。
+    """
+    font_size = max(int(style.font_size_px), 1)
+    size_ratio = max(
+        int(getattr(style, "lit_auto_size_ratio_pct", 50) or 0), 1
+    )
+    size = max(4, int(font_size * size_ratio / 100.0 + 0.5))
+    stroke_width = min(
+        max(int(int(style.stroke_width_px or 0) * size / font_size + 0.5), 0),
+        size // 2,
+    )
+    return {
+        "lit_size": size,
+        "lit_stroke_width": stroke_width,
+        "lit_fill_color": style.fill_color,
+        "lit_stroke_color": style.stroke_color,
+    }
+
+
+def resolve_lit_appearance(style: "Style") -> "Style":
+    """Return the style with auto-mode lamp values materialized.
+
+    仅在形状指示灯模块开启、模式为 ``auto`` 且不是 legacy volume 口径时替换
+    字段；其余情况原样返回。Python 布局（``painter`` 的信号度量）、绘制
+    （``signal``）与 native IR 序列化（``render_ir``）都必须经过本函数，
+    两条后端才会拿到同一组数值。
+    """
+    if (
+        not style.lit_enabled
+        or style.lit_style == "volume"
+        or style.lit_appearance_mode != "auto"
+    ):
+        return style
+    return replace(style, **lit_auto_values(style))
+
+
 def style_to_dict(style: Style) -> dict:
     """Serialize ``Style`` into JSON-friendly primitives."""
     data: dict = {}
@@ -1962,6 +2015,7 @@ def style_from_dict(payload: object) -> Style:
             "lit_transition_angle_deg",
             "lit_transition_distance",
             "signals_duration_ms",
+            "lit_auto_size_ratio_pct",
             "volume_duration_ms",
             "volume_waiting_time_ms",
             "volume_time_offset_ms",
@@ -2021,6 +2075,12 @@ def style_from_dict(payload: object) -> Style:
                 value
                 if value in {"custom", "auto"}
                 else defaults.volume_appearance_mode
+            )
+        elif key == "lit_appearance_mode":
+            changes[key] = (
+                value
+                if value in {"custom", "auto"}
+                else defaults.lit_appearance_mode
             )
         elif key == "lit_transition_mode":
             changes[key] = value if value in {"none", "fade", "slide"} else defaults.lit_transition_mode

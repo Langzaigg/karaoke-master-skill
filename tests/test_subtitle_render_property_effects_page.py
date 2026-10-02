@@ -256,6 +256,10 @@ def test_effects_lit_builder_routes_transformed_values(qapp) -> None:
     host._volume_flash_duration_spin.setValue(25)
     host._lit_transition_mode_combo.setCurrentIndex(2)
     host._lit_shadow_check.setChecked(True)
+    host._lit_appearance_mode_combo.setCurrentIndex(
+        host._lit_appearance_mode_combo.findData("custom")
+    )
+    host._lit_auto_size_ratio_spin.setValue(80)
 
     assert host.updates == [
         {"volume_enabled": True},
@@ -263,5 +267,9 @@ def test_effects_lit_builder_routes_transformed_values(qapp) -> None:
         {"volume_ratio": 3.0},
         {"volume_flash_duration_ratio": 0.25},
         {"lit_transition_mode": "slide"},
+        # 切到滑动且距离为 0 时自动补默认位移（否则视觉上等于淡入淡出）。
+        {"lit_transition_distance": 24},
         {"lit_shadow": True},
+        {"lit_appearance_mode": "custom"},
+        {"lit_auto_size_ratio_pct": 80},
     ]

@@ -536,7 +536,8 @@ _PAINT_ONLY_STYLE_FIELDS: frozenset[str] = frozenset({
     # （lit_signal_active 决定段首行是否有信号窗口）与 duration /
     # waiting_time / time_offset（signal_lead_in_ms 决定窗口提前量）——
     # 它们刻意留在集合外，改这些仍走全量重排。
-    "lit_style", "lit_number", "lit_size", "lit_offset_x", "lit_offset_y",
+    "lit_style", "lit_number", "lit_size", "lit_appearance_mode",
+    "lit_auto_size_ratio_pct", "lit_offset_x", "lit_offset_y",
     "lit_tracking", "lit_stroke_width", "lit_stroke_soften", "lit_opacity_pct",
     "lit_edge_brightness_pct", "lit_shadow", "lit_transition_mode",
     "lit_transition_ratio_pct", "lit_transition_angle_deg", "lit_transition_distance",

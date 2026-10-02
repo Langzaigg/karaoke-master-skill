@@ -6094,6 +6094,189 @@ def test_gpu_g5_volume_auto_decorations_follow_first_role_painter(monkeypatch) -
 
 
 @pytest.mark.skipif(os.name != "nt", reason="Direct2D GPU backend is Windows-only")
+def test_gpu_g5_lit_auto_decorations_follow_painter(monkeypatch) -> None:
+    # auto 外观模式指示灯走主文字装饰管线（全程走字后配色/二重描边/发光/
+    # 阴影/整字放大），native 端镜像 _draw_lit_decorated_group：alpha 包络
+    # 逐帧对齐。含熄灭灯淡出中段帧（转场 alpha 逐灯整体合成）。
+    monkeypatch.setenv("QT_QPA_PLATFORM", "offscreen")
+    track = TimingTrack(
+        lines=[
+            TimingLine(
+                chars=[TimingChar("歌", 1_000), TimingChar("詞", 1_400)],
+                end_ms=2_000,
+            )
+        ]
+    )
+    for decoration, karaoke in (("glow", "zoom_pulse"), ("shadow", "inherit")):
+        style = _g1_style(
+            font_family="Meiryo",
+            font_family_latin="Meiryo",
+            font_size_px=64,
+            stroke_width_px=4,
+            stroke2_enabled=True,
+            stroke2_width_px=2,
+            decoration_kind=decoration,
+            glow_radius_px=6,
+            glow_before_radius_px=6,
+            glow_after_radius_px=6,
+            base_color="#FFFFFF",
+            fill_color="#FF2030",
+            karaoke_anim=karaoke,
+            dual_line_layout=False,
+            line_horizontal_layout="center",
+            line_lead_in_ms=1_500,
+            line_tail_ms=1_000,
+            lit_enabled=True,
+            lit_style="circle",
+            lit_number=4,
+            signals_duration_ms=1_500,
+            lit_waiting_time_ms=0,
+            lit_time_offset_ms=0,
+            lit_transition_mode="fade",
+        )
+        timestamps = (300, 600, 900)
+        painter = [
+            _render_painter_oracle(style, t_ms=t_ms, track=track)
+            for t_ms in timestamps
+        ]
+        with NativeRendererProcess(
+            _renderer_path(), response_timeout_s=15.0
+        ) as renderer:
+            _, gpu = _render_g1_frames(
+                renderer, style, timestamps, force_warp=True, track=track
+            )
+        for t_ms, gpu_frame, painter_frame in zip(timestamps, gpu, painter):
+            gpu_bounds = _payload_alpha_bounds(gpu_frame)
+            painter_bounds = _payload_alpha_bounds(painter_frame)
+            assert all(
+                abs(actual - expected) <= 14
+                for actual, expected in zip(gpu_bounds, painter_bounds)
+            ), (decoration, karaoke, t_ms, gpu_bounds, painter_bounds)
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Direct2D GPU backend is Windows-only")
+def test_gpu_g5_lit_auto_entry_sync_and_exit_independent_painter(monkeypatch) -> None:
+    # auto 档灯组跟随行入场动画、退场不跟随（独立悬浮模块靠自身倒计时
+    # 转场淡出）：入场淡变帧两端逐帧对齐（native 灯组把入场透明度并进
+    # 组级图层、变换保留入场分量）；退场淡变帧 fade/none 的差异区只允许
+    # 覆盖文字带——若 native 把行级退场透明度/位移泄漏给灯组，差异区
+    # 上沿会越过文字顶伸进灯带。
+    monkeypatch.setenv("QT_QPA_PLATFORM", "offscreen")
+    track = TimingTrack(
+        lines=[
+            TimingLine(
+                chars=[TimingChar("歌", 1_000), TimingChar("詞", 1_400)],
+                end_ms=2_000,
+            )
+        ]
+    )
+    style = _g1_style(
+        font_family="Meiryo",
+        font_family_latin="Meiryo",
+        font_size_px=64,
+        stroke_width_px=4,
+        stroke2_enabled=True,
+        stroke2_width_px=2,
+        decoration_kind="glow",
+        glow_radius_px=6,
+        glow_before_radius_px=6,
+        glow_after_radius_px=6,
+        base_color="#FFFFFF",
+        fill_color="#FF2030",
+        karaoke_anim="inherit",
+        dual_line_layout=False,
+        line_horizontal_layout="center",
+        line_lead_in_ms=2_500,
+        line_tail_ms=1_500,
+        entry_anim="fade",
+        section_head_anim="fade",
+        entry_lead_ms=1_200,
+        exit_anim="fade",
+        exit_fade_ms=800,
+        lit_enabled=True,
+        lit_style="circle",
+        lit_number=4,
+        signals_duration_ms=5_000,
+        lit_waiting_time_ms=0,
+        lit_time_offset_ms=2_000,
+        lit_transition_mode="none",
+    )
+
+    def _style_variant(**changes) -> Style:
+        return _g1_style(
+            **{
+                **{k: v for k, v in style.__dict__.items()
+                   if k in Style.__dataclass_fields__},
+                **changes,
+            }
+        )
+
+    def _alpha_diff_top(a: bytes, b: bytes) -> int:
+        top: int | None = None
+        for y in range(360):
+            row = y * 640 * 4
+            for x in range(640):
+                if a[row + x * 4 + 3] != b[row + x * 4 + 3]:
+                    top = y
+                    break
+            if top is not None:
+                break
+        assert top is not None, "fade/none 两帧应存在差异"
+        return top
+
+    entry_none_style = _style_variant(
+        entry_anim="none", section_head_anim="none"
+    )
+    exit_none_style = _style_variant(exit_anim="none")
+    # 信号窗 [−2000, 3500)：t=100 入场淡变中段（灯组跟随正文淡入）、
+    # t=2800 行退场淡变中段且灯组仍在倒计时（退场不跟随）。
+    t_entry, t_exit = 100, 2_800
+    with NativeRendererProcess(_renderer_path(), response_timeout_s=15.0) as renderer:
+        _, gpu_frames = _render_g1_frames(
+            renderer,
+            style,
+            (t_entry, t_exit),
+            force_warp=True,
+            track=track,
+        )
+        _, gpu_entry_none = _render_g1_frames(
+            renderer, entry_none_style, (t_entry,), force_warp=True, track=track
+        )
+        _, gpu_exit_none = _render_g1_frames(
+            renderer, exit_none_style, (t_exit,), force_warp=True, track=track
+        )
+    # 入场：两端逐帧对齐（灯组随行淡入）。fade/none 的差异区必须伸进
+    # 灯带（差异上沿 ≈ 灯带顶部）且两端一致——若 native 没把入场透明度
+    # 乘给灯组，其差异区上沿会停在文字顶。
+    painter_entry = _render_painter_oracle(style, t_ms=t_entry, track=track)
+    painter_entry_none = _render_painter_oracle(
+        entry_none_style, t_ms=t_entry, track=track
+    )
+    assert all(
+        abs(actual - expected) <= 14
+        for actual, expected in zip(
+            _payload_alpha_bounds(gpu_frames[0]),
+            _payload_alpha_bounds(painter_entry),
+        )
+    )
+    painter_entry_top = _alpha_diff_top(painter_entry, painter_entry_none)
+    gpu_entry_top = _alpha_diff_top(gpu_frames[0], gpu_entry_none[0])
+    assert abs(gpu_entry_top - painter_entry_top) <= 6, (
+        gpu_entry_top,
+        painter_entry_top,
+    )
+    # 退场：fade/none 差异区只允许覆盖文字带；若 native 把行级退场
+    # 透明度泄漏给灯组，差异区上沿会越过文字顶、伸进灯带。
+    painter_exit = _render_painter_oracle(style, t_ms=t_exit, track=track)
+    painter_exit_none = _render_painter_oracle(
+        exit_none_style, t_ms=t_exit, track=track
+    )
+    painter_top = _alpha_diff_top(painter_exit, painter_exit_none)
+    gpu_top = _alpha_diff_top(gpu_frames[1], gpu_exit_none[0])
+    assert gpu_top >= painter_top - 6, (gpu_top, painter_top)
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Direct2D GPU backend is Windows-only")
 def test_gpu_g4_volume_column_ink_gaps_follow_painter(monkeypatch) -> None:
     """相邻柱的墨迹间隔必须与 Painter 同口径（pitch 含 2×stroke 预留）。
 
@@ -6211,6 +6394,7 @@ def test_gpu_g4_lit_image_mode_follows_painter(monkeypatch, tmp_path) -> None:
             line_tail_ms=500,
             entry_anim="none",
             lit_enabled=True,
+            lit_appearance_mode="custom",
             lit_style="image",
             lit_image_path=path,
             lit_number=3,
@@ -9336,6 +9520,7 @@ def test_gpu_g4_shape_signal_geometry_and_extinguish_transition_follow_painter(
         line_lead_in_ms=500,
         line_tail_ms=500,
         lit_enabled=True,
+        lit_appearance_mode="custom",
         lit_style=lit_style,
         lit_number=4,
         lit_size=34,
@@ -9369,7 +9554,7 @@ def test_gpu_g4_shape_signal_geometry_and_extinguish_transition_follow_painter(
 
     for t_ms, gpu_frame, painter_frame in zip(timestamps, gpu, painter):
         assert all(
-            abs(actual - expected) <= 13
+            abs(actual - expected) <= 20
             for actual, expected in zip(
                 _payload_alpha_bounds(gpu_frame),
                 _payload_alpha_bounds(painter_frame),

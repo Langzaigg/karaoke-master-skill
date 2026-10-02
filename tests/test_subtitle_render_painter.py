@@ -930,6 +930,7 @@ def test_signal_lits_render_during_signal_window(qapp):
         dual_line_layout=False,
         line_lead_in_ms=0,
         lit_enabled=True,
+        lit_appearance_mode="custom",
         lit_style="circle",
         lit_size=10,
         lit_offset_x=-20,
@@ -1004,6 +1005,7 @@ def test_signal_lits_extend_the_lyric_text_window(qapp):
         dual_line_layout=False,
         line_lead_in_ms=0,
         lit_enabled=True,
+        lit_appearance_mode="custom",
         lit_style="circle",
         lit_size=10,
         lit_offset_x=-20,
@@ -1036,6 +1038,7 @@ def test_signal_lits_are_line_countdown_not_singer_lamps(qapp):
         dual_line_layout=False,
         line_lead_in_ms=0,
         lit_enabled=True,
+        lit_appearance_mode="custom",
         lit_style="circle",
         lit_size=10,
         lit_offset_x=-20,
@@ -1674,6 +1677,8 @@ def _volume_style(**overrides) -> Style:
         "lit_shadow": False,
         "signals_duration_ms": 4_000,
     }
+    # 出厂默认 auto 会切到装饰管线；这些测试钉的是既有 custom 行为。
+    values.setdefault("lit_appearance_mode", "custom")
     values.update(overrides)
     return Style(**values)
 
@@ -2087,6 +2092,7 @@ def test_signal_shape_tracks_top_of_subtitle_line_box(qapp):
         dual_line_layout=False,
         line_lead_in_ms=0,
         lit_enabled=True,
+        lit_appearance_mode="custom",
         lit_style="circle",
         lit_size=16,
         lit_offset_y=-24,
@@ -2191,6 +2197,7 @@ def test_signal_shape_fade_makes_the_whole_shape_transparent(qapp):
         dual_line_layout=False,
         line_lead_in_ms=0,
         lit_enabled=True,
+        lit_appearance_mode="custom",
         lit_style="circle",
         lit_number=2,
         lit_size=20,
@@ -2326,6 +2333,7 @@ def test_lit_image_mode_draws_sprite_contained_in_slot(qapp, tmp_path):
         dual_line_layout=False,
         line_lead_in_ms=0,
         lit_enabled=True,
+        lit_appearance_mode="custom",
         lit_style="image",
         lit_image_path=sprite_path,
         lit_number=3,
@@ -2361,6 +2369,7 @@ def test_lit_image_mode_falls_back_to_circle_without_sprite(qapp):
         dual_line_layout=False,
         line_lead_in_ms=0,
         lit_enabled=True,
+        lit_appearance_mode="custom",
         lit_style="image",
         lit_image_path="",
         lit_size=16,
@@ -2391,6 +2400,7 @@ def test_shape_lamps_render_when_time_offset_covers_the_duration(qapp):
         dual_line_layout=False,
         line_lead_in_ms=0,
         lit_enabled=True,
+        lit_appearance_mode="custom",
         lit_style="circle",
         lit_size=16,
         lit_offset_x=-20,

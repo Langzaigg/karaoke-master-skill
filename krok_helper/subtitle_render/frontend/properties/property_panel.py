@@ -191,6 +191,7 @@ from krok_helper.subtitle_render.domain.models import (
     layout_display_name,
     materialize_ruby_decoration_changes,
     rescale_scheme_font_sizes,
+    resolve_lit_appearance,
     resolve_volume_appearance,
 )
 from krok_helper.subtitle_render.settings.property_controllers import (
@@ -363,6 +364,8 @@ _LIT_FIELDS = {
     "lit_image_path",
     "lit_number",
     "lit_size",
+    "lit_appearance_mode",
+    "lit_auto_size_ratio_pct",
     "lit_offset_x",
     "lit_offset_y",
     "lit_tracking",
@@ -1984,6 +1987,14 @@ class PropertyPanel(QWidget):
                 minimum, maximum = -extent, extent
             elif range_kind == "y":
                 extent = max(height // 10, 1)
+                minimum, maximum = -extent, extent
+            elif range_kind == "offset_x":
+                # 指示灯/音量柱偏移：画布宽 ±20% 拖拽范围（比通用偏移类的
+                # ±10% 更宽），输入硬范围刻意放宽，更远位置由数值输入完成。
+                extent = max(width // 5, 1)
+                minimum, maximum = -extent, extent
+            elif range_kind == "offset_y":
+                extent = max(height // 5, 1)
                 minimum, maximum = -extent, extent
             elif range_kind == "short_quarter":
                 minimum, maximum = hard_minimum, max(hard_minimum, short_side // 4)
@@ -4418,7 +4429,7 @@ class PropertyPanel(QWidget):
         if lit_style_index < 0:
             lit_style_index = self._lit_style_combo.findData("circle")
         self._lit_style_combo.setCurrentIndex(max(0, lit_style_index))
-        # 图片模式：图片行可用，矢量专属装饰（描边/柔化/边缘亮度/阴影）停用；
+        # 图片模式：图片行可用，矢量专属装饰（描边/柔化/高光/阴影）停用；
         # 填充色保留（缺图回退圆形时仍用它）。
         image_mode = self._style.lit_style == "image"
         if self._lit_image_path_edit.text() != self._style.lit_image_path:

@@ -264,11 +264,50 @@ class EffectsPropertyPageBuilder:
         lit_image_layout.addWidget(host._lit_image_clear_btn)
         host._lit_image_row = lit_image_row
         add("图片", lit_image_row)
+        host._lit_appearance_mode_combo = self._combo(
+            section,
+            (("自动配合字体", "auto"), ("自定义", "custom")),
+            "lit_appearance_mode",
+        )
+        host._lit_appearance_mode_combo.setToolTip(
+            "自动配合字体：灯大小按主文字字号推导（比例由「相对字号」调整）；"
+            "矢量灯改用段首行第一个角色的完整装饰管线——填充/渐变、描边与"
+            "二重描边、发光/阴影与高光取该角色走字后配色并同比缩放，且不跟随"
+            "行入退场动画（独立悬浮，靠自身倒计时转场淡出）。对应控件停用并"
+            "回显推导值，改字号或输出高度后自动跟随；自定义：全部参数独立设置"
+        )
+        add("外观模式", host._lit_appearance_mode_combo)
+        self._add_canvas_spin(
+            add,
+            "_lit_auto_size_ratio_spin",
+            "相对字号",
+            5,
+            300,
+            "lit_auto_size_ratio_pct",
+            "hard",
+            suffix=" %",
+        )
+        host._lit_auto_size_ratio_spin.setToolTip(
+            "auto 模式下灯边长相对主文字字号的百分比（默认 50%）；"
+            "自定义模式下停用"
+        )
         self._add_canvas_spin(add, "_lit_number_spin", "数量", 1, 8, "lit_number", "hard")
         self._add_canvas_spin(add, "_lit_size_spin", "大小", 4, 160, "lit_size", "short_quarter", suffix=" px")
         self._add_canvas_spin(add, "_lit_tracking_spin", "间距", 0, 200, "lit_tracking", "short_twelfth", suffix=" px")
-        self._add_canvas_spin(add, "_lit_x_spin", "水平偏移", -4000, 4000, "lit_offset_x", "x", suffix=" px")
-        self._add_canvas_spin(add, "_lit_y_spin", "垂直偏移", -4000, 4000, "lit_offset_y", "y", suffix=" px")
+        # 偏移类：输入硬范围刻意放宽（手动输入无实际上下限），滑条给画布
+        # 宽/高 ±20% 拖拽范围（见 _refresh_canvas_slider_ranges 的
+        # offset_x / offset_y 档，比通用偏移类的 ±10% 更宽），更远的位置
+        # 由数值输入完成。存储恒为 1080 基准（同扫字线）：编辑/显示按当前
+        # 输出高度换算，提交写回基准值（_Host 桩无换算方法时按原值提交）。
+        offset_base = getattr(host, "_offset_base_px", None)
+        self._add_canvas_spin(
+            add, "_lit_x_spin", "水平偏移", -100_000, 100_000, "lit_offset_x", "offset_x",
+            suffix=" px", transform=offset_base,
+        )
+        self._add_canvas_spin(
+            add, "_lit_y_spin", "垂直偏移", -100_000, 100_000, "lit_offset_y", "offset_y",
+            suffix=" px", transform=offset_base,
+        )
 
         add = group("时序", max_columns=3)
         self._add_spin(add, "_lit_duration_spin", "持续时间", 0, 60_000, "signals_duration_ms", suffix=" ms")
@@ -279,7 +318,7 @@ class EffectsPropertyPageBuilder:
         self._add_color(add, "_lit_stroke_btn", "描边颜色", "lit_stroke_color")
         self._add_spin(add, "_lit_stroke_width_spin", "描边宽度", 0, 40, "lit_stroke_width", suffix=" px")
         self._add_spin(add, "_lit_opacity_spin", "透明度", 0, 100, "lit_opacity_pct", suffix=" %")
-        self._add_spin(add, "_lit_edge_brightness_spin", "边缘亮度", 0, 100, "lit_edge_brightness_pct", suffix=" %")
+        self._add_spin(add, "_lit_edge_brightness_spin", "高光亮度", 0, 100, "lit_edge_brightness_pct", suffix=" %")
         self._add_spin(add, "_lit_stroke_soften_spin", "描边柔化", 0, 40, "lit_stroke_soften", suffix=" px")
         host._lit_shadow_check = CheckBox("启用", section)
         host._lit_shadow_check.toggled.connect(
@@ -292,6 +331,18 @@ class EffectsPropertyPageBuilder:
             section,
             (("无", "none"), ("淡入淡出", "fade"), ("滑动", "slide")),
             "lit_transition_mode",
+        )
+
+        def _lit_transition_mode_changed(_index: int) -> None:
+            if host._lit_transition_mode_combo.currentData() != "slide":
+                return
+            # 滑动距离为 0 时只剩透明度变化（视觉上与淡入淡出无异），
+            # 切到滑动时自动补一个可见的默认位移。
+            if int(host._lit_transition_distance_spin.value()) == 0:
+                host._update_style(lit_transition_distance=24)
+
+        host._lit_transition_mode_combo.currentIndexChanged.connect(
+            _lit_transition_mode_changed
         )
         add("类型", host._lit_transition_mode_combo)
         self._add_spin(add, "_lit_transition_ratio_spin", "时长比例", 0, 100, "lit_transition_ratio_pct", suffix=" %")

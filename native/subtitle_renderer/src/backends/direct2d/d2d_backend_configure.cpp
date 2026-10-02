@@ -300,6 +300,7 @@ void Direct2DGpuBackend::configure(const RenderScene &scene) {
     impl_->lines.reserve(scene.lines.size());
     // 装饰粒子 sprite 轮廓几何：em 空间一次构建，绘制期按 sizePx/1000 缩放。
     impl_->fxSpriteGeometries.clear();
+    impl_->lampShapeGeometries.clear();
     for (const auto &entry : scene.fxSprites) {
         impl_->fxSpriteGeometries[entry.first] = vectorGlyphGeometry(
             device_.d2dFactory(), entry.second, 1000.0f, device_

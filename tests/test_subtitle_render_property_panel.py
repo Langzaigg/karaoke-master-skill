@@ -148,6 +148,7 @@ def qapp():
 def test_lit_image_mode_round_trips_and_syncs_controls():
     style = Style(
         lit_enabled=True,
+        lit_appearance_mode="custom",
         lit_style="image",
         lit_image_path="C:/sprites/lamp.png",
         lit_size=48,
@@ -2300,6 +2301,7 @@ def test_property_panel_set_style_populates_controls(qapp):
         exit_fade_ms=650,
         karaoke_anim="utopia",
         lit_enabled=True,
+        lit_appearance_mode="custom",
         lit_style="rounded",
         lit_number=2,
         lit_size=36,
@@ -2434,9 +2436,13 @@ def test_effect_spatial_sliders_follow_canvas_without_clamping_input(qapp):
     panel = PropertyPanel()
     panel.set_screen_size(640, 360, 60)
 
-    # 偏移类滑块只覆盖画布宽高的 ±10%；输入框仍保留完整硬范围。
-    assert panel._lit_x_spin.slider_range() == (-64, 64)
-    assert panel._lit_y_spin.slider_range() == (-36, 36)
+    # 指示灯/音量柱偏移：滑条覆盖画布宽/高 ±20%（比通用偏移类的 ±10%
+    # 更宽，随画布缩放）；输入硬范围刻意放宽（±100000，手动输入无实际
+    # 上下限）。
+    assert panel._lit_x_spin.slider_range() == (-128, 128)
+    assert panel._lit_y_spin.slider_range() == (-72, 72)
+    assert panel._volume_x_spin.slider_range() == (-128, 128)
+    assert panel._volume_y_spin.slider_range() == (-72, 72)
     assert panel._lit_size_spin.slider_range() == (4, 90)
     assert panel._volume_column_width_spin.slider_range() == (1, 30)
     # 无量纲参数：滑块覆盖整个硬范围，且不随画布尺寸变化。
@@ -2456,18 +2462,24 @@ def test_effect_spatial_sliders_follow_canvas_without_clamping_input(qapp):
     panel._lit_x_spin._commit_slider_value()
     assert committed == [30]
 
-    panel._lit_x_spin.setValue(900)
+    # 滑条范围内取值：滑块跟随到同值；size 滑块仍钳制到画布范围。
+    panel._lit_x_spin.setValue(100)
     panel._lit_size_spin.setValue(150)
-    assert panel._lit_x_spin.value() == 900
-    assert panel._lit_x_spin._slider.value() == 64
+    assert panel._lit_x_spin.value() == 100
+    assert panel._lit_x_spin._slider.value() == 100
     assert panel._lit_size_spin.value() == 150
     assert panel._lit_size_spin._slider.value() == 90
 
+    # 超出滑条范围的值保留在输入框（不被钳制），滑块停在端点。
+    panel._lit_x_spin.setValue(5_000)
+    assert panel._lit_x_spin.value() == 5_000
+    assert panel._lit_x_spin._slider.value() == 128
+
     panel.set_screen_size(1920, 1080, 60)
-    assert panel._lit_x_spin.slider_range() == (-192, 192)
-    assert panel._lit_y_spin.slider_range() == (-108, 108)
-    assert panel._lit_x_spin.value() == 900
-    assert panel._lit_x_spin._slider.value() == 192
+    assert panel._lit_x_spin.slider_range() == (-384, 384)
+    assert panel._lit_y_spin.slider_range() == (-216, 216)
+    assert panel._lit_x_spin.value() == 5_000
+    assert panel._lit_x_spin._slider.value() == 384
     assert panel._lit_size_spin.value() == 150
     assert panel._lit_size_spin._slider.value() == 150
     assert panel._lit_number_spin.slider_range() == (1, 8)
@@ -2485,11 +2497,11 @@ def test_canvas_slider_handle_follows_input_and_ignores_wheel(qapp):
 
     control.setValue(0)
     handle_x_before = handle.x()
-    control.setValue(1500)
+    control.setValue(900)
     # 输入后滑块取值与把手位置都要跟随（把手由 _adjustHandlePos 驱动，
     # 阻塞信号更新时不会自动刷新）；超出滑块范围时钳制到端点。
-    assert control.value() == 1500
-    assert slider.value() == 192
+    assert control.value() == 900
+    assert slider.value() == 384
     assert handle.x() != handle_x_before
 
     control.setValue(100)
