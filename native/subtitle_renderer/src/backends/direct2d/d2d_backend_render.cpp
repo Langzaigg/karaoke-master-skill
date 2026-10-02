@@ -5121,7 +5121,8 @@ ProbeResult Direct2DGpuBackend::renderFrameInternal(
         };
         auto litHighlightEllipse = [&](const D2D1_RECT_F &rect) {
             // 高光锚点按形状适配（镜像 Painter 的 _lit_highlight_geometry）：
-            // 星型取星核上部、音符取符头；圆/方/圆角维持原左上口径。
+            // 星型取星核上部、音符取符头（组合取左符头）；圆/方/圆角维持
+            // 原左上口径。音符半径 = 符头短半轴的一半。
             const float size = shapeGeometry.size;
             if (style.litStyle == "star") {
                 return D2D1::Ellipse(
@@ -5133,14 +5134,24 @@ ProbeResult Direct2DGpuBackend::renderFrameInternal(
                     size * 0.10f
                 );
             }
-            if (style.litStyle == "note") {
+            if (style.litStyle == "note8" || style.litStyle == "note16") {
                 return D2D1::Ellipse(
                     D2D1::Point2F(
                         rect.left + (rect.right - rect.left) * 0.29f,
                         rect.top + (rect.bottom - rect.top) * 0.745f
                     ),
-                    size * 0.075f,
-                    size * 0.075f
+                    size * 0.06f,
+                    size * 0.06f
+                );
+            }
+            if (style.litStyle == "notepair") {
+                return D2D1::Ellipse(
+                    D2D1::Point2F(
+                        rect.left + (rect.right - rect.left) * 0.20f,
+                        rect.top + (rect.bottom - rect.top) * 0.705f
+                    ),
+                    size * 0.055f,
+                    size * 0.055f
                 );
             }
             return D2D1::Ellipse(

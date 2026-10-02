@@ -228,7 +228,8 @@ Microsoft::WRL::ComPtr<ID2D1PathGeometry> lampShapeGeometry(
     };
     const auto flagPart = [&](float y0) {
         // 符旗：附着在符干顶部、向右下弯的三角旗面（十六分音符的第二面
-        // 旗 = 同形下移 0.16×边长，镜像 Painter 的 _flag(y0)）。
+        // 旗 = 同形下移 0.16×边长，镜像 Painter 的 _flag(y0)）。旗面左缘
+        // 与符干右缘（0.532×边长）重合。
         Microsoft::WRL::ComPtr<ID2D1PathGeometry> part = openPath(
             factory, "ID2D1Factory::CreatePathGeometry(lamp note flag)", device
         );
@@ -240,19 +241,19 @@ Microsoft::WRL::ComPtr<ID2D1PathGeometry> lampShapeGeometry(
         );
         sink->SetFillMode(D2D1_FILL_MODE_WINDING);
         sink->BeginFigure(
-            D2D1::Point2F(side * 0.565f, side * y0),
+            D2D1::Point2F(side * 0.532f, side * y0),
             D2D1_FIGURE_BEGIN_FILLED
         );
         sink->AddBezier(D2D1::BezierSegment(
-            D2D1::Point2F(side * 0.78f, side * (y0 + 0.06f)),
-            D2D1::Point2F(side * 0.86f, side * (y0 + 0.20f)),
-            D2D1::Point2F(side * 0.74f, side * (y0 + 0.36f))
+            D2D1::Point2F(side * 0.747f, side * (y0 + 0.06f)),
+            D2D1::Point2F(side * 0.827f, side * (y0 + 0.20f)),
+            D2D1::Point2F(side * 0.707f, side * (y0 + 0.36f))
         ));
-        sink->AddLine(D2D1::Point2F(side * 0.665f, side * (y0 + 0.285f)));
+        sink->AddLine(D2D1::Point2F(side * 0.632f, side * (y0 + 0.285f)));
         sink->AddBezier(D2D1::BezierSegment(
-            D2D1::Point2F(side * 0.755f, side * (y0 + 0.18f)),
-            D2D1::Point2F(side * 0.68f, side * (y0 + 0.09f)),
-            D2D1::Point2F(side * 0.565f, side * (y0 + 0.055f))
+            D2D1::Point2F(side * 0.722f, side * (y0 + 0.18f)),
+            D2D1::Point2F(side * 0.647f, side * (y0 + 0.09f)),
+            D2D1::Point2F(side * 0.532f, side * (y0 + 0.055f))
         ));
         sink->EndFigure(D2D1_FIGURE_END_CLOSED);
         checkHr(
@@ -263,9 +264,12 @@ Microsoft::WRL::ComPtr<ID2D1PathGeometry> lampShapeGeometry(
 
     if (litStyle == "note8" || litStyle == "note16") {
         // 单音符：符头 + 符干 + 符旗（十六分两面），布尔并集单一轮廓。
+        // 符干右缘收在符头右极点（0.54×边长）之内、下端沉过符头中心线
+        // （镜像 Painter：竖直符干与水平椭圆只在极点相切，右下角矩形直角
+        // 会刺出符头轮廓）。
         Microsoft::WRL::ComPtr<ID2D1PathGeometry> note =
             unify(ellipsePart(0.34f, 0.78f, 0.20f, 0.12f),
-                  rectPart(0.50f, 0.10f, 0.065f, 0.68f),
+                  rectPart(0.468f, 0.10f, 0.064f, 0.70f),
                   "ID2D1Geometry::CombineWithGeometry(lamp note head+stem)");
         note = unify(note, flagPart(0.10f),
                      "ID2D1Geometry::CombineWithGeometry(lamp note +flag)");
@@ -276,14 +280,15 @@ Microsoft::WRL::ComPtr<ID2D1PathGeometry> lampShapeGeometry(
         return note;
     }
 
-    // 组合（notepair）：左符头低、右符头高，双符干接顶部斜横梁。
+    // 组合（notepair）：左符头低、右符头高，双符干接顶部斜横梁。符干
+    // 同样右缘收进各自符头右极点内、下端沉过符头中心线（镜像 Painter）。
     Microsoft::WRL::ComPtr<ID2D1PathGeometry> pair =
         unify(ellipsePart(0.24f, 0.74f, 0.17f, 0.11f),
-              rectPart(0.375f, 0.16f, 0.06f, 0.58f),
+              rectPart(0.342f, 0.16f, 0.06f, 0.60f),
               "ID2D1Geometry::CombineWithGeometry(lamp pair head+stem)");
     pair = unify(pair, ellipsePart(0.62f, 0.60f, 0.17f, 0.11f),
                  "ID2D1Geometry::CombineWithGeometry(lamp pair +head2)");
-    pair = unify(pair, rectPart(0.755f, 0.04f, 0.06f, 0.56f),
+    pair = unify(pair, rectPart(0.722f, 0.04f, 0.06f, 0.58f),
                  "ID2D1Geometry::CombineWithGeometry(lamp pair +stem2)");
     {
         Microsoft::WRL::ComPtr<ID2D1PathGeometry> beam = openPath(
@@ -297,12 +302,12 @@ Microsoft::WRL::ComPtr<ID2D1PathGeometry> lampShapeGeometry(
         );
         sink->SetFillMode(D2D1_FILL_MODE_WINDING);
         sink->BeginFigure(
-            D2D1::Point2F(side * 0.375f, side * 0.08f),
+            D2D1::Point2F(side * 0.342f, side * 0.08f),
             D2D1_FIGURE_BEGIN_FILLED
         );
-        sink->AddLine(D2D1::Point2F(side * 0.815f, side * 0.02f));
-        sink->AddLine(D2D1::Point2F(side * 0.815f, side * 0.12f));
-        sink->AddLine(D2D1::Point2F(side * 0.375f, side * 0.18f));
+        sink->AddLine(D2D1::Point2F(side * 0.782f, side * 0.02f));
+        sink->AddLine(D2D1::Point2F(side * 0.782f, side * 0.12f));
+        sink->AddLine(D2D1::Point2F(side * 0.342f, side * 0.18f));
         sink->EndFigure(D2D1_FIGURE_END_CLOSED);
         checkHr(
             sink->Close(), "ID2D1GeometrySink::Close(lamp pair beam)", device

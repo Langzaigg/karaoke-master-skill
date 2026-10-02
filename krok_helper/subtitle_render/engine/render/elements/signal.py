@@ -889,42 +889,46 @@ def _lit_star_note_path(rect: QRectF, lit_style: str) -> QPainterPath:
 
     def _flag(y0: float) -> QPainterPath:
         # 符旗：附着在符干顶部、向右下弯的三角旗面（十六分音符的第二面
-        # 旗 = 同形下移 0.16h）。
+        # 旗 = 同形下移 0.16h）。旗面左缘与符干右缘（0.532w）重合。
         flag = QPainterPath()
-        flag.moveTo(left + w * 0.565, top + h * y0)
+        flag.moveTo(left + w * 0.532, top + h * y0)
         flag.cubicTo(
-            left + w * 0.78, top + h * (y0 + 0.06),
-            left + w * 0.86, top + h * (y0 + 0.20),
-            left + w * 0.74, top + h * (y0 + 0.36),
+            left + w * 0.747, top + h * (y0 + 0.06),
+            left + w * 0.827, top + h * (y0 + 0.20),
+            left + w * 0.707, top + h * (y0 + 0.36),
         )
-        flag.lineTo(left + w * 0.665, top + h * (y0 + 0.285))
+        flag.lineTo(left + w * 0.632, top + h * (y0 + 0.285))
         flag.cubicTo(
-            left + w * 0.755, top + h * (y0 + 0.18),
-            left + w * 0.68, top + h * (y0 + 0.09),
-            left + w * 0.565, top + h * (y0 + 0.055),
+            left + w * 0.722, top + h * (y0 + 0.18),
+            left + w * 0.647, top + h * (y0 + 0.09),
+            left + w * 0.532, top + h * (y0 + 0.055),
         )
         flag.closeSubpath()
         return flag
 
     if lit_style in ("note8", "note16"):
         # 单音符：符头（左下椭圆）+ 符干（右侧竖线）+ 符旗（十六分两面）。
+        # 符干右缘收在符头右极点（0.54w）之内、下端沉过符头中心线——
+        # 竖直符干与水平放置的椭圆只在极点相切，右下角露出矩形直角
+        # 会刺出符头轮廓（native 侧同口径）。
         path = _ellipse(0.34, 0.78, 0.20, 0.12).united(
-            _rect(0.50, 0.10, 0.065, 0.68)
+            _rect(0.468, 0.10, 0.064, 0.70)
         )
         path = path.united(_flag(0.10))
         if lit_style == "note16":
             path = path.united(_flag(0.26))
         return path
 
-    # 组合（♪♪ 横梁）：左符头低、右符头高，双符干接顶部斜横梁。
-    path = _ellipse(0.24, 0.74, 0.17, 0.11).united(_rect(0.375, 0.16, 0.06, 0.58))
+    # 组合（♪♪ 横梁）：左符头低、右符头高，双符干接顶部斜横梁。符干
+    # 同样右缘收进各自符头右极点内、下端沉过符头中心线。
+    path = _ellipse(0.24, 0.74, 0.17, 0.11).united(_rect(0.342, 0.16, 0.06, 0.60))
     path = path.united(_ellipse(0.62, 0.60, 0.17, 0.11))
-    path = path.united(_rect(0.755, 0.04, 0.06, 0.56))
+    path = path.united(_rect(0.722, 0.04, 0.06, 0.58))
     beam = QPainterPath()
-    beam.moveTo(left + w * 0.375, top + h * 0.08)
-    beam.lineTo(left + w * 0.815, top + h * 0.02)
-    beam.lineTo(left + w * 0.815, top + h * 0.12)
-    beam.lineTo(left + w * 0.375, top + h * 0.18)
+    beam.moveTo(left + w * 0.342, top + h * 0.08)
+    beam.lineTo(left + w * 0.782, top + h * 0.02)
+    beam.lineTo(left + w * 0.782, top + h * 0.12)
+    beam.lineTo(left + w * 0.342, top + h * 0.18)
     beam.closeSubpath()
     return path.united(beam)
 
@@ -961,18 +965,18 @@ def _lit_highlight_geometry(
             size * 0.10,
         )
     if lit_style in ("note8", "note16"):
-        # 单音符：高光落在符头（左下）。
+        # 单音符：高光落在符头（左下）上部，半径取符头短半轴的一半。
         return (
             rect.left() + rect.width() * 0.29,
             rect.top() + rect.height() * 0.745,
-            size * 0.075,
+            size * 0.06,
         )
     if lit_style == "notepair":
-        # 组合：高光落在左符头。
+        # 组合：高光落在左符头（组合符头比单音符小一圈）。
         return (
             rect.left() + rect.width() * 0.20,
             rect.top() + rect.height() * 0.705,
-            size * 0.075,
+            size * 0.055,
         )
     return (
         rect.left() + rect.width() * 0.34,
