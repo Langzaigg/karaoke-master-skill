@@ -328,6 +328,7 @@ REQUIRED_FILES=(
   "strange_uta_game/config/dictionary.json"
   "strange_uta_game/config/cmudict-0.7b"
   "strange_uta_game/config/kanji_readings.json"
+  "strange_uta_game/config/hanja_korean.json"
   "strange_uta_game/backend/application/ai_timing/worker/client.py"
   "strange_uta_game/resource/icon.ico"
   "strange_uta_game/resource/sounds/press.wav"
