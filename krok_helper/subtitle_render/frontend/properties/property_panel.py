@@ -1160,6 +1160,17 @@ class PropertyPanel(QWidget):
                     ),
                 )
             )
+            self._fx_particle_mode_combo.setCurrentIndex(
+                max(
+                    0,
+                    self._fx_particle_mode_combo.findData(
+                        self._style.fx_particle_color_mode
+                        if self._style.fx_particle_color_mode
+                        in {"color", "follow_before", "follow_after", "role"}
+                        else "color"
+                    ),
+                )
+            )
             self._fx_size_spin.setValue(
                 min(
                     max(
@@ -1182,6 +1193,9 @@ class PropertyPanel(QWidget):
             self._fx_color_btn.set_color(
                 getattr(self._style, "fx_particle_color", "#FFFFFF")
             )
+            self._fx_apply_check.setChecked(
+                bool(getattr(self._style, "fx_apply_to_entry_exit", False))
+            )
             self._zoom_pulse_curve_combo.setCurrentIndex(
                 max(
                     0,
@@ -1201,6 +1215,7 @@ class PropertyPanel(QWidget):
                 )
             )
             self._sync_scanline_controls()
+            self._sync_fx_particle_controls()
             self._reverse_karaoke_anim_combo.setCurrentIndex(
                 max(
                     0,
@@ -1471,21 +1486,52 @@ class PropertyPanel(QWidget):
         if role:
             self._refresh_scanline_role_combo()
 
-    def _refresh_scanline_role_combo(self) -> None:
-        """按当前方案表重建扫字线/指示灯/音量柱的「配色来源」下拉。
+    def _sync_fx_particle_controls(self) -> None:
+        """粒子参数按颜色模式互换第三列：单独颜色显示颜色，复用配色方案
+        显示来源下拉，跟随字体两档两者都隐藏（颜色来自字体，粒子无
+        亮度参数可复用，与扫字线第三列「按模式互换」同款约定）。"""
 
-        三个下拉同一套来源表与回显规则：见 :meth:`_refresh_role_source_combo`。
+        mode = self._style.fx_particle_color_mode
+        follow = mode in {"follow_before", "follow_after"}
+        role = mode == "role"
+        for control in (
+            self._fx_particle_mode_combo,
+            self._fx_size_spin,
+            self._fx_count_spin,
+            self._fx_color_btn,
+            self._fx_particle_role_combo,
+            self._fx_apply_check,
+        ):
+            control.setEnabled(True)
+        self._fx_color_btn.setVisible(not follow and not role)
+        self._fx_particle_role_combo.setVisible(role)
+        if role:
+            self._refresh_fx_particle_role_combo()
+
+    def _refresh_scanline_role_combo(self) -> None:
+        """按当前方案表重建扫字线/指示灯/音量柱/粒子颜色的「配色来源」下拉。
+
+        四个下拉同一套来源表与回显规则：见 :meth:`_refresh_role_source_combo`。
         """
         for attribute, field in (
             ("_scanline_role_combo", "scanline_role_name"),
             ("_lit_role_combo", "lit_role_name"),
             ("_volume_role_combo", "volume_role_name"),
+            ("_fx_particle_role_combo", "fx_particle_role_name"),
         ):
             if hasattr(self, attribute):
                 self._refresh_role_source_combo(
                     getattr(self, attribute),
                     str(getattr(self._style, field, None) or ""),
                 )
+
+    def _refresh_fx_particle_role_combo(self) -> None:
+        """粒子颜色「复用配色方案」的来源下拉（同扫字线口径）。"""
+        if hasattr(self, "_fx_particle_role_combo"):
+            self._refresh_role_source_combo(
+                self._fx_particle_role_combo,
+                str(getattr(self._style, "fx_particle_role_name", None) or ""),
+            )
 
     def _refresh_role_source_combo(
         self, combo: _WheelFocusedComboBox, selected: str
@@ -4624,6 +4670,21 @@ class PropertyPanel(QWidget):
             changes["scanline_role_name"] = (
                 role_names[0] if role_names else SCANLINE_GLOBAL_ROLE_KEY
             )
+        # 粒子颜色「复用配色方案」同理补默认来源（悬空时渲染端回退单独
+        # 颜色，但 UI 不留空选择更直观）。
+        if (
+            changes.get("fx_particle_color_mode") == "role"
+            and "fx_particle_role_name" not in changes
+            and not getattr(self._style, "fx_particle_role_name", None)
+        ):
+            role_names = [
+                name
+                for name in self._role_controller.names
+                if name not in {TITLE_SCHEME_NAME, SCANLINE_GLOBAL_ROLE_KEY}
+            ]
+            changes["fx_particle_role_name"] = (
+                role_names[0] if role_names else SCANLINE_GLOBAL_ROLE_KEY
+            )
         # 指示灯/音量柱切到「复用配色方案」同理补默认来源（悬空时渲染端
         # 回退 auto 口径，但 UI 不留空选择更直观）。
         for mode_field, name_field in (
@@ -4675,6 +4736,12 @@ class PropertyPanel(QWidget):
                 "scanline_role_name",
             }.intersection(changes):
                 self._sync_scanline_controls()
+            if {
+                "fx_particle_color_mode",
+                "fx_particle_role_name",
+                "fx_apply_to_entry_exit",
+            }.intersection(changes):
+                self._sync_fx_particle_controls()
             if "scanline_color" in changes:
                 # 扫字线颜色不在方案/指示灯的再同步集合里：选色后按钮必须
                 # 立即回显新值（宿主回流 set_style 会走等值快路径跳过）。

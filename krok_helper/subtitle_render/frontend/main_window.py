@@ -324,6 +324,7 @@ from krok_helper.subtitle_render.domain.models import (
     migrate_title_guide_symbols,
     normalize_title_char_role_labels,
     remap_appearance_role_references,
+    remap_particle_role_reference,
     remap_scanline_role_reference,
     remap_title_char_role_labels,
     rescale_font_sizes,
@@ -608,6 +609,9 @@ _RENDER_ONLY_ANIM_STYLE_FIELDS: frozenset[str] = frozenset({
     "scanline_role_name",
     "scanline_brightness_pct",
     "scanline_glow_px",
+    "fx_particle_color_mode",
+    "fx_particle_role_name",
+    "fx_apply_to_entry_exit",
 })
 # 出入场动画「类型」字段：类型本身只在跨 ``none`` 边界时改变显示窗口（动画
 # 时间守卫按类型 != none 扩窗），其余组合（fade→slide 等）窗口不动——用逐行
@@ -4394,6 +4398,13 @@ class SubtitleRenderWindow(QWidget):
                 # 指示灯/音量柱「复用配色方案」同一条维护链：改名连带改写；
                 # 删除保留悬空引用（下拉展示幽灵条目，渲染回退 auto 口径）。
                 style = appearance_style
+                self._style = style
+                role_remap_applied = True
+            particle_style = remap_particle_role_reference(style, role_remap)
+            if particle_style is not None:
+                # 粒子颜色「复用配色方案」与扫字线同一条维护链：改名连带改写，
+                # 删除连模式一起回退「单独颜色」。
+                style = particle_style
                 self._style = style
                 role_remap_applied = True
             if not role_remap_applied:

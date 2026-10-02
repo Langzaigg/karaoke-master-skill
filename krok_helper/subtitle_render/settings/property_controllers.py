@@ -340,6 +340,14 @@ def normalize_style_changes(changes: dict[str, object]) -> dict[str, object]:
         normalized["scanline_mode"] = normalize_scanline_mode(
             normalized["scanline_mode"]
         )
+    if "fx_particle_color_mode" in normalized:
+        normalized["fx_particle_color_mode"] = normalize_particle_color_mode(
+            normalized["fx_particle_color_mode"]
+        )
+    if "fx_apply_to_entry_exit" in normalized:
+        normalized["fx_apply_to_entry_exit"] = bool(
+            normalized["fx_apply_to_entry_exit"]
+        )
     if "section_edge_anim_enabled" in normalized:
         normalized["section_edge_anim_enabled"] = bool(
             normalized["section_edge_anim_enabled"]
@@ -481,6 +489,12 @@ def normalize_karaoke_animation(value: object) -> KaraokeAnimation:
 
 def normalize_scanline_mode(value: object) -> str:
     if value in {"color", "brighten", "follow_before", "follow_after", "role"}:
+        return str(value)
+    return "color"
+
+
+def normalize_particle_color_mode(value: object) -> str:
+    if value in {"color", "follow_before", "follow_after", "role"}:
         return str(value)
     return "color"
 

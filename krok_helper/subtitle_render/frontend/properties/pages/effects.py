@@ -72,6 +72,13 @@ FX_SING_OPTIONS = (
     ("涟漪光环", "ripple"),
 )
 
+FX_PARTICLE_COLOR_MODE_OPTIONS = (
+    ("单独颜色", "color"),
+    ("跟随字体·走字前", "follow_before"),
+    ("跟随字体·走字后", "follow_after"),
+    ("复用配色方案", "role"),
+)
+
 
 class EffectsPropertyPageBuilder:
     """Build effect controls while leaving style transitions with the host."""
@@ -616,11 +623,42 @@ class EffectsPropertyPageBuilder:
             "位置冒星、音符飘出=自字框升起、涟漪光环=每字两圈细环扩散"
             "（随机位置/大小/时机）"
         )
-        host._fx_particle_row = self._fx_param_row(section, host._fx_sing_combo)
+        host._fx_particle_mode_combo = WheelFocusedComboBox(section)
+        compact_property_control(host._fx_particle_mode_combo)
+        for label, value in FX_PARTICLE_COLOR_MODE_OPTIONS:
+            host._fx_particle_mode_combo.addItem(label, value)
+        host._fx_particle_mode_combo.setToolTip(
+            "粒子颜色模式：单独颜色=用下方颜色按钮；"
+            "跟随字体·走字前/后=取所在行实际配色的走字前/走字后主文字颜色"
+            "（渐变/拼色取平均色）；"
+            "复用配色方案=用所选来源（全局默认/「标题」/角色方案）"
+            "「走字后-主文字」的填充折算成实色，与扫字线同口径"
+        )
+        host._fx_particle_mode_combo.currentIndexChanged.connect(
+            lambda _index: host._update_style(
+                fx_particle_color_mode=host._fx_particle_mode_combo.currentData()
+            )
+        )
+        host._fx_particle_role_combo = WheelFocusedComboBox(section)
+        compact_property_control(host._fx_particle_role_combo)
+        host._fx_particle_role_combo.setToolTip(
+            "「复用配色方案」模式下粒子引用的来源（全局默认/「标题」方案或"
+            "角色方案）；在「角色」卡片编辑该来源「走字后-主文字」的填充方式，"
+            "渐变/拼色折算为平均色"
+        )
+        host._fx_particle_role_combo.currentIndexChanged.connect(
+            lambda _index: host._update_style(
+                fx_particle_role_name=host._fx_particle_role_combo.currentData()
+            )
+        )
+        host._fx_particle_row = self._fx_param_row(
+            section, host._fx_sing_combo, host._fx_particle_mode_combo
+        )
         host._fx_size_spin = self._spin_factory(5, 200, suffix=" %")
         host._fx_size_spin.setToolTip(
             "唱字装饰粒子的尺寸（相对主字号的百分比）：星光/音符按此边长，"
-            "涟漪按 3.6 倍扩散；入退场动画粒子用固定默认档，不受此旋钮影响"
+            "涟漪按 3.6 倍扩散；开启「入退场同用」后也作用于入退场动画粒子，"
+            "否则入退场动画粒子用固定默认档"
         )
         host._fx_size_spin.valueChanged.connect(
             lambda value: host._update_style(fx_particle_size_em=value / 100.0)
@@ -628,7 +666,7 @@ class EffectsPropertyPageBuilder:
         host._fx_count_spin = self._spin_factory(2, 64, suffix=" 个")
         host._fx_count_spin.setToolTip(
             "唱字装饰粒子数量：闪烁/音符按比例折算为每字数量；"
-            "入退场动画粒子用固定默认档，不受此旋钮影响"
+            "入退场动画粒子恒用固定默认档，不受此旋钮影响"
         )
         host._fx_count_spin.valueChanged.connect(
             lambda value: host._update_style(fx_particle_count=value)
@@ -636,16 +674,28 @@ class EffectsPropertyPageBuilder:
         host._fx_color_btn = host._color_button(
             "fx_particle_color", getattr(host._style, "fx_particle_color", "#FFFFFF")
         )
+        host._fx_apply_check = CheckBox("入退场同用", section)
+        host._fx_apply_check.setToolTip(
+            "开启后，粒子的颜色与尺寸也应用于入场/退场动画携带的粒子"
+            "（星光/涟漪/音符/拼接/消散）；默认关闭——入退场动画粒子用固定"
+            "默认档（白色、40% 字号），数量恒为固定档"
+        )
+        host._fx_apply_check.toggled.connect(
+            lambda checked: host._update_style(fx_apply_to_entry_exit=checked)
+        )
         host._fx_param_controls_row = self._fx_size_row(
             section,
             host._fx_size_spin,
             host._fx_count_spin,
             host._fx_color_btn,
+            host._fx_particle_role_combo,
+            host._fx_apply_check,
         )
         # 网格行序：第 1 行 = 入场/退场，第 2 行 = 唱字对 + 段首尾区块，
         # 第 3 行 = 扫字线整行（参数永久可编辑，颜色/亮度按模式互换启用态），
-        # 第 4 行 = 整字放大速度等级，第 5 行 = 描边闪光 + 装饰粒子，
-        # 第 6 行 = 粒子参数（尺寸为字号百分比）。
+        # 第 4 行 = 整字放大速度等级，第 5 行 = 描边闪光 + 装饰粒子
+        # （唱字档位 + 颜色模式），第 6 行 = 粒子参数（尺寸为字号百分比，
+        # 颜色/来源按模式互换，尾部「入退场同用」联动开关）。
 
         host._section_edge_check = CheckBox("段首尾独立动画", section)
         host._section_edge_check.toggled.connect(host._on_section_edge_toggled)
@@ -691,9 +741,9 @@ class EffectsPropertyPageBuilder:
         stroke_flash_layout.setSpacing(6)
         stroke_flash_layout.addWidget(host._stroke_flash_check)
         # 用户口径：粒子参数行与唱字闪光行互换位置（粒子参数在前）。
-        host._animation_grid.add_field("唱字装饰粒子", host._fx_particle_row)
+        host._animation_grid.add_field("唱字装饰粒子 / 颜色模式", host._fx_particle_row)
         host._animation_grid.add_field(
-            "粒子尺寸 · 数量 · 颜色（仅唱字装饰粒子）",
+            "粒子尺寸 · 数量 · 颜色 / 入退场同用",
             host._fx_param_controls_row,
         )
         host._animation_grid.add_field("唱字闪光", host._stroke_flash_row)
@@ -704,13 +754,15 @@ class EffectsPropertyPageBuilder:
     def _fx_param_row(
         parent: QWidget,
         sing_combo: Any,
+        mode_combo: Any,
     ) -> QWidget:
-        """唱字装饰粒子单行。"""
+        """唱字装饰粒子单行：档位 + 颜色模式。"""
         row = QWidget(parent)
         row_layout = QHBoxLayout(row)
         row_layout.setContentsMargins(0, 0, 0, 0)
         row_layout.setSpacing(6)
         row_layout.addWidget(sing_combo, 3)
+        row_layout.addWidget(mode_combo, 2)
         return row
 
     @staticmethod
@@ -719,7 +771,14 @@ class EffectsPropertyPageBuilder:
         size_spin: Any,
         count_spin: Any,
         color_button: QWidget,
+        role_combo: Any,
+        apply_check: Any,
     ) -> QWidget:
+        """粒子参数单行：尺寸 · 数量 · 颜色/来源 · 入退场联动开关。
+
+        颜色按钮与来源下拉共用同一列位（按颜色模式互换显示，扫字线第
+        三列同款约定）；「入退场同用」开关常驻行尾。
+        """
         row = QWidget(parent)
         row_layout = QHBoxLayout(row)
         row_layout.setContentsMargins(0, 0, 0, 0)
@@ -727,6 +786,9 @@ class EffectsPropertyPageBuilder:
         row_layout.addWidget(size_spin, 2)
         row_layout.addWidget(count_spin, 2)
         row_layout.addWidget(color_button, 2)
+        row_layout.addWidget(role_combo, 2)
+        row_layout.addWidget(apply_check, 2)
+        role_combo.hide()
         return row
 
     def _animation_combo(

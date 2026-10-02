@@ -1198,7 +1198,29 @@ class Style:
     """粒子数量：星光闪烁一次发射的 sprite 数；闪烁/音符按比例折算为每字数量。"""
 
     fx_particle_color: str = "#FFFFFF"
-    """粒子颜色（#RRGGBB）。"""
+    """粒子颜色（#RRGGBB）；仅 ``fx_particle_color_mode == "color"`` 时生效。"""
+
+    fx_particle_color_mode: str = "color"
+    """粒子颜色模式（仿扫字线）：``color`` 单独颜色（``fx_particle_color``）；
+    ``follow_before`` / ``follow_after`` 跟随字体——用**所在行**实际配色的
+    走字前 / 走字后「主文字」填充折算成实色（行级口径：行内逐字混合配色
+    不逐字取色，与唱字粒子的行级规划一致）；``role`` 复用配色方案——用
+    ``fx_particle_role_name`` 指定来源（``__global__`` 全局默认 / 角色或
+    「标题」方案）的「走字后-主文字」填充折算成实色。填充为渐变/拼色时
+    取各停止色平均，图片填充回退单独颜色。在 ``plan_line_bursts`` 内解析
+    成每 burst 实色下发，两条后端同色。"""
+
+    fx_particle_role_name: Optional[str] = None
+    """粒子 ``role`` 颜色模式引用的来源名：语义同 ``scanline_role_name``
+    （改名连写、删除连模式一起回退 ``color``，见
+    ``remap_particle_role_reference``）；仅 ``fx_particle_color_mode ==
+    "role"`` 时生效。渲染时名字查不到则回退 ``color`` 模式的
+    ``fx_particle_color``。"""
+
+    fx_apply_to_entry_exit: bool = False
+    """粒子参数联动入退场动画：开启后粒子的**颜色与尺寸**也应用于入场/
+    退场动画携带的粒子（星光/涟漪/音符/拼接/消散）；默认关闭，入退场
+    动画粒子用固定默认档（白色、40% 字号），数量恒为固定档不受联动。"""
 
     section_edge_anim_enabled: bool = False
     """段首尾独立动画：开启后段首页/段尾页各行按下面两个动画替换入退场。"""
@@ -2201,6 +2223,17 @@ def style_from_dict(payload: object) -> Style:
             changes[key] = max(0.05, min(2.0, em_value))
         elif key == "fx_particle_count":
             changes[key] = max(2, min(64, _int_value(value, 14)))
+        elif key == "fx_particle_color_mode":
+            changes[key] = (
+                value
+                if value in {"color", "follow_before", "follow_after", "role"}
+                else defaults.fx_particle_color_mode
+            )
+        elif key == "fx_particle_role_name":
+            parsed_role_name = str(value).strip() if value else ""
+            changes[key] = parsed_role_name or None
+        elif key == "fx_apply_to_entry_exit":
+            changes[key] = bool(value)
         elif key == "karaoke_stroke_flash":
             changes[key] = bool(value)
         elif key in {"karaoke_anim", "reverse_karaoke_anim"}:
@@ -3301,6 +3334,27 @@ def remap_appearance_role_references(
     if not changes:
         return None
     return replace(style, **changes)
+
+
+def remap_particle_role_reference(
+    style: "Style", mapping: dict[str, Optional[str]]
+) -> Optional["Style"]:
+    """Rename or clear the particle color-mode role reference.
+
+    粒子颜色 ``role`` 模式的来源名（``fx_particle_role_name``）与扫字线
+    ``remap_scanline_role_reference`` 同一条改名/删除维护链：改名连带改写
+    引用；删除被引用角色时连模式一起回退 ``color``（不留引用悬空的 role
+    模式，UI 下拉不会假装选中第一项）。Returns ``None`` when the reference
+    is absent or untouched, so callers can skip the style write.
+    """
+
+    name = style.fx_particle_role_name
+    if name is None or name not in mapping:
+        return None
+    target = mapping.get(name)
+    if target is None:
+        return replace(style, fx_particle_color_mode="color", fx_particle_role_name=None)
+    return replace(style, fx_particle_role_name=target)
 
 
 def remap_title_char_role_labels(

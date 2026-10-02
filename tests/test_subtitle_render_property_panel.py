@@ -6316,6 +6316,77 @@ def test_property_panel_animation_controls_emit_style(qapp):
     assert effective_karaoke_animation(emitted[-1]) == "utopia"
 
 
+def test_property_panel_particle_color_mode_controls(qapp):
+    """粒子颜色模式（仿扫字线）+「入退场同用」开关的联动与回显。"""
+    panel = PropertyPanel()
+    emitted: list[Style] = []
+    panel.styleChanged.connect(emitted.append)
+
+    assert [
+        panel._fx_particle_mode_combo.itemText(index)
+        for index in range(panel._fx_particle_mode_combo.count())
+    ] == ["单独颜色", "跟随字体·走字前", "跟随字体·走字后", "复用配色方案"]
+    # 默认单独颜色：显示颜色按钮、隐藏来源下拉；开关默认关。
+    assert not panel._fx_color_btn.isHidden()
+    assert panel._fx_particle_role_combo.isHidden()
+    assert not panel._fx_apply_check.isChecked()
+    # 跟随字体两档：颜色与来源都隐藏（粒子无亮度参数）。
+    panel._fx_particle_mode_combo.setCurrentIndex(
+        panel._fx_particle_mode_combo.findData("follow_before")
+    )
+    assert emitted[-1].fx_particle_color_mode == "follow_before"
+    assert panel._fx_color_btn.isHidden()
+    assert panel._fx_particle_role_combo.isHidden()
+    # 复用配色方案：第三列换来源下拉；无引用时切入自动补第一个角色。
+    panel.set_roles(["主唱", "和声"])
+    panel._fx_particle_mode_combo.setCurrentIndex(
+        panel._fx_particle_mode_combo.findData("role")
+    )
+    assert emitted[-1].fx_particle_color_mode == "role"
+    assert emitted[-1].fx_particle_role_name == "主唱"
+    assert panel._fx_color_btn.isHidden()
+    assert not panel._fx_particle_role_combo.isHidden()
+    assert [
+        panel._fx_particle_role_combo.itemData(index)
+        for index in range(panel._fx_particle_role_combo.count())
+    ] == ["__global__", "标题", "主唱", "和声"]
+    # 换来源：模型跟随；角色注册表变化后下拉重建并保留所选。
+    panel._fx_particle_role_combo.setCurrentIndex(
+        panel._fx_particle_role_combo.findData("和声")
+    )
+    assert emitted[-1].fx_particle_role_name == "和声"
+    panel.set_roles(["主唱", "和声", "独唱"])
+    assert panel._fx_particle_role_combo.currentData() == "和声"
+    # 引用悬空的历史样式：保留幽灵条目展示原名，不静默改数据。
+    panel.set_style(
+        Style(
+            fx_particle_color_mode="role",
+            fx_particle_role_name="幽灵",
+        )
+    )
+    assert panel._fx_particle_role_combo.currentData() == "幽灵"
+    # 「入退场同用」开关：发出样式变更并回显。
+    panel._fx_apply_check.setChecked(True)
+    assert emitted[-1].fx_apply_to_entry_exit is True
+    panel._fx_apply_check.setChecked(False)
+    assert emitted[-1].fx_apply_to_entry_exit is False
+    # 回显：外部灌入样式后模式下拉/开关跟随、可见性按模式同步。
+    panel.set_style(
+        Style(
+            fx_particle_color_mode="follow_after",
+            fx_apply_to_entry_exit=True,
+        )
+    )
+    assert panel._fx_particle_mode_combo.currentData() == "follow_after"
+    assert panel._fx_apply_check.isChecked()
+    assert panel._fx_color_btn.isHidden()
+    assert panel._fx_particle_role_combo.isHidden()
+    # 未知模式回落单独颜色。
+    panel.set_style(Style(fx_particle_color_mode="bogus"))
+    assert panel._fx_particle_mode_combo.currentData() == "color"
+    assert not panel._fx_color_btn.isHidden()
+
+
 def test_property_panel_scanline_spins_show_canvas_values_over_fixed_base(qapp):
     """扫字线像素 spin 显示当前画布换算值,存储恒为 1080 基准。"""
     panel = PropertyPanel()
