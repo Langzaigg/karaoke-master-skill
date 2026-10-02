@@ -35,6 +35,9 @@ struct Direct2DGpuBackend::Impl {
     // 装饰粒子 sprite 轮廓几何（em 空间、中心原点；随场景重建，绘制期经
     // matrix 缩放平移）。key = sprite 名（star4 / ring / note）。
     std::map<std::string, Microsoft::WRL::ComPtr<ID2D1PathGeometry>> fxSpriteGeometries;
+    // 指示灯「星型/音符」路径几何：按 (litStyle, size) 缓存，随场景失效重建。
+    std::map<std::pair<std::string, float>, Microsoft::WRL::ComPtr<ID2D1PathGeometry>>
+        lampShapeGeometries;
     struct CachedChar {
         int startMs = 0;
         int endMs = 0;

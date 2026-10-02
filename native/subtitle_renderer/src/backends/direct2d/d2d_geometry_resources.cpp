@@ -90,6 +90,229 @@ Microsoft::WRL::ComPtr<ID2D1PathGeometry> vectorGlyphGeometry(
     return path;
 }
 
+namespace {
+
+Microsoft::WRL::ComPtr<ID2D1PathGeometry> openPath(
+    ID2D1Factory1 *factory,
+    const char *operation,
+    const D2DDevice &device
+) {
+    Microsoft::WRL::ComPtr<ID2D1PathGeometry> path;
+    checkHr(
+        factory->CreatePathGeometry(path.ReleaseAndGetAddressOf()),
+        operation,
+        device
+    );
+    return path;
+}
+
+}  // namespace
+
+Microsoft::WRL::ComPtr<ID2D1PathGeometry> lampShapeGeometry(
+    ID2D1Factory1 *factory,
+    const std::string &litStyle,
+    float size,
+    const D2DDevice &device
+) {
+    // 边长比例口径镜像 Painter 的 _lit_star_note_path：五角星（外接半径
+    // 0.5×边长、内切 0.45×外接、顶点朝上）/ 八分音符（符头椭圆 + 符干 +
+    // 符旗曲线）。音符三个部件先各自成几何，再布尔并集成单一轮廓——
+    // 描边只画外形，不在符干与符头的接缝处画内线（与 QPainter
+    // united() 同口径）。
+    const float side = std::max(size, 1.0f);
+    constexpr float pi = 3.14159265358979323846f;
+
+    if (litStyle == "star") {
+        Microsoft::WRL::ComPtr<ID2D1PathGeometry> star = openPath(
+            factory, "ID2D1Factory::CreatePathGeometry(lamp star)", device
+        );
+        Microsoft::WRL::ComPtr<ID2D1GeometrySink> sink;
+        checkHr(
+            star->Open(sink.ReleaseAndGetAddressOf()),
+            "ID2D1PathGeometry::Open(lamp star)",
+            device
+        );
+        sink->SetFillMode(D2D1_FILL_MODE_WINDING);
+        const float outer = side * 0.5f;
+        const float inner = outer * 0.45f;
+        bool first = true;
+        for (int step = 0; step < 10; ++step) {
+            const float radius = (step % 2 == 0) ? outer : inner;
+            const float angle =
+                -pi / 2.0f + static_cast<float>(step) * pi / 5.0f;
+            const D2D1_POINT_2F point = D2D1::Point2F(
+                side * 0.5f + radius * std::cos(angle),
+                side * 0.5f + radius * std::sin(angle)
+            );
+            if (first) {
+                sink->BeginFigure(point, D2D1_FIGURE_BEGIN_FILLED);
+                first = false;
+            } else {
+                sink->AddLine(point);
+            }
+        }
+        sink->EndFigure(D2D1_FIGURE_END_CLOSED);
+        checkHr(
+            sink->Close(), "ID2D1GeometrySink::Close(lamp star)", device
+        );
+        return star;
+    }
+
+    const auto unify =
+        [&](Microsoft::WRL::ComPtr<ID2D1Geometry> a,
+            Microsoft::WRL::ComPtr<ID2D1Geometry> b,
+            const char *operation) -> Microsoft::WRL::ComPtr<ID2D1PathGeometry> {
+            Microsoft::WRL::ComPtr<ID2D1PathGeometry> merged = openPath(
+                factory, "ID2D1Factory::CreatePathGeometry(lamp note union)", device
+            );
+            Microsoft::WRL::ComPtr<ID2D1GeometrySink> sink;
+            checkHr(
+                merged->Open(sink.ReleaseAndGetAddressOf()),
+                "ID2D1PathGeometry::Open(lamp note union)",
+                device
+            );
+            checkHr(
+                a->CombineWithGeometry(
+                    b.Get(),
+                    D2D1_COMBINE_MODE_UNION,
+                    nullptr,
+                    D2D1_DEFAULT_FLATTENING_TOLERANCE,
+                    sink.Get()
+                ),
+                operation,
+                device
+            );
+            checkHr(
+                sink->Close(), "ID2D1GeometrySink::Close(lamp note union)", device
+            );
+            return merged;
+        };
+    const auto ellipsePart = [&](float cx, float cy, float rx, float ry) {
+        Microsoft::WRL::ComPtr<ID2D1EllipseGeometry> ellipse;
+        checkHr(
+            factory->CreateEllipseGeometry(
+                D2D1::Ellipse(
+                    D2D1::Point2F(side * cx, side * cy),
+                    side * rx,
+                    side * ry
+                ),
+                ellipse.ReleaseAndGetAddressOf()
+            ),
+            "ID2D1Factory::CreateEllipseGeometry(lamp note head)",
+            device
+        );
+        return Microsoft::WRL::ComPtr<ID2D1Geometry>(ellipse);
+    };
+    const auto rectPart = [&](float x, float y, float w, float h) {
+        Microsoft::WRL::ComPtr<ID2D1PathGeometry> part = openPath(
+            factory, "ID2D1Factory::CreatePathGeometry(lamp note stem)", device
+        );
+        Microsoft::WRL::ComPtr<ID2D1GeometrySink> sink;
+        checkHr(
+            part->Open(sink.ReleaseAndGetAddressOf()),
+            "ID2D1PathGeometry::Open(lamp note stem)",
+            device
+        );
+        sink->SetFillMode(D2D1_FILL_MODE_WINDING);
+        sink->BeginFigure(
+            D2D1::Point2F(side * x, side * y), D2D1_FIGURE_BEGIN_FILLED
+        );
+        sink->AddLine(D2D1::Point2F(side * (x + w), side * y));
+        sink->AddLine(D2D1::Point2F(side * (x + w), side * (y + h)));
+        sink->AddLine(D2D1::Point2F(side * x, side * (y + h)));
+        sink->EndFigure(D2D1_FIGURE_END_CLOSED);
+        checkHr(
+            sink->Close(), "ID2D1GeometrySink::Close(lamp note stem)", device
+        );
+        return Microsoft::WRL::ComPtr<ID2D1Geometry>(part);
+    };
+    const auto flagPart = [&](float y0) {
+        // 符旗：附着在符干顶部、向右下弯的三角旗面（十六分音符的第二面
+        // 旗 = 同形下移 0.16×边长，镜像 Painter 的 _flag(y0)）。
+        Microsoft::WRL::ComPtr<ID2D1PathGeometry> part = openPath(
+            factory, "ID2D1Factory::CreatePathGeometry(lamp note flag)", device
+        );
+        Microsoft::WRL::ComPtr<ID2D1GeometrySink> sink;
+        checkHr(
+            part->Open(sink.ReleaseAndGetAddressOf()),
+            "ID2D1PathGeometry::Open(lamp note flag)",
+            device
+        );
+        sink->SetFillMode(D2D1_FILL_MODE_WINDING);
+        sink->BeginFigure(
+            D2D1::Point2F(side * 0.565f, side * y0),
+            D2D1_FIGURE_BEGIN_FILLED
+        );
+        sink->AddBezier(D2D1::BezierSegment(
+            D2D1::Point2F(side * 0.78f, side * (y0 + 0.06f)),
+            D2D1::Point2F(side * 0.86f, side * (y0 + 0.20f)),
+            D2D1::Point2F(side * 0.74f, side * (y0 + 0.36f))
+        ));
+        sink->AddLine(D2D1::Point2F(side * 0.665f, side * (y0 + 0.285f)));
+        sink->AddBezier(D2D1::BezierSegment(
+            D2D1::Point2F(side * 0.755f, side * (y0 + 0.18f)),
+            D2D1::Point2F(side * 0.68f, side * (y0 + 0.09f)),
+            D2D1::Point2F(side * 0.565f, side * (y0 + 0.055f))
+        ));
+        sink->EndFigure(D2D1_FIGURE_END_CLOSED);
+        checkHr(
+            sink->Close(), "ID2D1GeometrySink::Close(lamp note flag)", device
+        );
+        return Microsoft::WRL::ComPtr<ID2D1Geometry>(part);
+    };
+
+    if (litStyle == "note8" || litStyle == "note16") {
+        // 单音符：符头 + 符干 + 符旗（十六分两面），布尔并集单一轮廓。
+        Microsoft::WRL::ComPtr<ID2D1PathGeometry> note =
+            unify(ellipsePart(0.34f, 0.78f, 0.20f, 0.12f),
+                  rectPart(0.50f, 0.10f, 0.065f, 0.68f),
+                  "ID2D1Geometry::CombineWithGeometry(lamp note head+stem)");
+        note = unify(note, flagPart(0.10f),
+                     "ID2D1Geometry::CombineWithGeometry(lamp note +flag)");
+        if (litStyle == "note16") {
+            note = unify(note, flagPart(0.26f),
+                         "ID2D1Geometry::CombineWithGeometry(lamp note +flag2)");
+        }
+        return note;
+    }
+
+    // 组合（notepair）：左符头低、右符头高，双符干接顶部斜横梁。
+    Microsoft::WRL::ComPtr<ID2D1PathGeometry> pair =
+        unify(ellipsePart(0.24f, 0.74f, 0.17f, 0.11f),
+              rectPart(0.375f, 0.16f, 0.06f, 0.58f),
+              "ID2D1Geometry::CombineWithGeometry(lamp pair head+stem)");
+    pair = unify(pair, ellipsePart(0.62f, 0.60f, 0.17f, 0.11f),
+                 "ID2D1Geometry::CombineWithGeometry(lamp pair +head2)");
+    pair = unify(pair, rectPart(0.755f, 0.04f, 0.06f, 0.56f),
+                 "ID2D1Geometry::CombineWithGeometry(lamp pair +stem2)");
+    {
+        Microsoft::WRL::ComPtr<ID2D1PathGeometry> beam = openPath(
+            factory, "ID2D1Factory::CreatePathGeometry(lamp pair beam)", device
+        );
+        Microsoft::WRL::ComPtr<ID2D1GeometrySink> sink;
+        checkHr(
+            beam->Open(sink.ReleaseAndGetAddressOf()),
+            "ID2D1PathGeometry::Open(lamp pair beam)",
+            device
+        );
+        sink->SetFillMode(D2D1_FILL_MODE_WINDING);
+        sink->BeginFigure(
+            D2D1::Point2F(side * 0.375f, side * 0.08f),
+            D2D1_FIGURE_BEGIN_FILLED
+        );
+        sink->AddLine(D2D1::Point2F(side * 0.815f, side * 0.02f));
+        sink->AddLine(D2D1::Point2F(side * 0.815f, side * 0.12f));
+        sink->AddLine(D2D1::Point2F(side * 0.375f, side * 0.18f));
+        sink->EndFigure(D2D1_FIGURE_END_CLOSED);
+        checkHr(
+            sink->Close(), "ID2D1GeometrySink::Close(lamp pair beam)", device
+        );
+        pair = unify(pair, beam,
+                     "ID2D1Geometry::CombineWithGeometry(lamp pair +beam)");
+    }
+    return pair;
+}
+
 bool paintNeedsBodyProtection(const PaintStyle &paint) {
     if (paint.mode == "image") {
         return true;

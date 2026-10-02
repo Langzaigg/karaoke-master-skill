@@ -486,7 +486,10 @@ def normalize_scanline_mode(value: object) -> str:
 
 
 def normalize_lit_style(value: object):
-    if value in {"volume", "circle", "square", "rounded", "image"}:
+    if value in {
+        "volume", "circle", "square", "rounded", "image", "star",
+        "note8", "note16", "notepair",
+    }:
         return value
     return "volume"
 

@@ -9499,7 +9499,9 @@ def test_gpu_g4_legacy_ir_without_signal_head_keeps_per_line_lamps(
 
 
 @pytest.mark.skipif(os.name != "nt", reason="Direct2D GPU backend is Windows-only")
-@pytest.mark.parametrize("lit_style", ["circle", "square", "rounded"])
+@pytest.mark.parametrize(
+    "lit_style", ["circle", "square", "rounded", "star", "note8", "note16", "notepair"]
+)
 @pytest.mark.parametrize("transition_mode", ["fade", "slide"])
 def test_gpu_g4_shape_signal_geometry_and_extinguish_transition_follow_painter(
     monkeypatch, lit_style: str, transition_mode: str

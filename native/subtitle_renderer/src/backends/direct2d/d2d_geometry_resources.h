@@ -17,6 +17,17 @@ Microsoft::WRL::ComPtr<ID2D1PathGeometry> vectorGlyphGeometry(
     const D2DDevice &device
 );
 
+// 指示灯「星型 / 音符」路径（0..size 单位坐标，布尔并集轮廓与
+// QPainterPath::united() 同口径）；边长比例镜像 Painter 的
+// _lit_star_note_path。
+Microsoft::WRL::ComPtr<ID2D1PathGeometry> lampShapeGeometry(
+    ID2D1Factory1 *factory,
+    const std::string &litStyle,
+    float size,
+    const D2DDevice &device
+);
+
+
 bool paintNeedsBodyProtection(const PaintStyle &paint);
 
 Microsoft::WRL::ComPtr<ID2D1Geometry> outsideStrokeGeometry(

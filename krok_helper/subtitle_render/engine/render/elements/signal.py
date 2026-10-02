@@ -1640,18 +1640,14 @@ def _draw_lit_shape(
         stroke_width,
     )
     if edge_brightness > 0:
+        # 高光锚点按形状适配：星型取星核上部、音符取符头（圆/方/圆角
+        # 维持原左上口径）。
+        hx, hy, radius = _lit_highlight_geometry(style.lit_style, rect)
         highlight = QColor("#FFFFFF")
         highlight.setAlphaF(min(edge_brightness * 0.55, 1.0))
-        inset = rect.width() * 0.18
-        highlight_rect = QRectF(
-            rect.left() + inset,
-            rect.top() + inset,
-            rect.width() * 0.32,
-            rect.height() * 0.32,
-        )
         painter.setPen(Qt.PenStyle.NoPen)
         painter.setBrush(QBrush(highlight))
-        painter.drawEllipse(highlight_rect)
+        painter.drawEllipse(QPointF(hx, hy), radius, radius)
 
 
 def _draw_lit_shape_raw(
@@ -1672,6 +1668,8 @@ def _draw_lit_shape_raw(
     elif lit_style == "rounded":
         radius = max(rect.width() * 0.22, 1.0)
         painter.drawRoundedRect(rect, radius, radius)
+    elif lit_style == "star" or lit_style in _LIT_NOTE_STYLES:
+        painter.drawPath(_lit_star_note_path(rect, lit_style))
     else:
         painter.drawEllipse(rect)
 

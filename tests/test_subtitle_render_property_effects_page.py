@@ -226,11 +226,19 @@ def test_effects_lit_builder_preserves_groups_ranges_and_initial_state(qapp) -> 
     assert section.header_switch is host._lit_enabled_switch
     assert not section.is_expanded()
     assert list(host._lit_group_grids) == ["布局", "时序", "外观", "转场"]
-    # 圆形/方形/圆角 + 图片（素材模式）。
-    assert host._lit_style_combo.count() == 4
+    # 圆形/方形/圆角/星型/三种音符 + 图片（素材模式）。
+    assert host._lit_style_combo.count() == 8
     assert host._lit_transition_angle_spin.minimum() == -360
     assert host._lit_transition_distance_spin.maximum() == 800
     assert host._lit_stroke_btn.objectName() == "lit_stroke_color"
+    # 外观模式（自动配合字体/自定义）与 auto 专属「相对字号」比例。
+    appearance_data = [
+        host._lit_appearance_mode_combo.itemData(index)
+        for index in range(host._lit_appearance_mode_combo.count())
+    ]
+    assert appearance_data == ["auto", "custom"]
+    assert host._lit_auto_size_ratio_spin.minimum() == 5
+    assert host._lit_auto_size_ratio_spin.maximum() == 300
 
 
 def test_effects_volume_builder_is_independent_and_compact(qapp) -> None:

@@ -155,10 +155,16 @@ OverlapFallbackMode = Literal["lift", "displace"]
 演唱的下一句直接顶掉还在走字的上一句（截短其显示窗，允许吃掉走字时长，
 默认值）。
 """
-LitStyle = Literal["volume", "circle", "square", "rounded", "image"]
+LitStyle = Literal[
+    "volume", "circle", "square", "rounded", "image", "star",
+    "note8", "note16", "notepair",
+]
 VolumeAppearanceMode = Literal["custom", "auto"]
 """音量柱外观模式：``custom`` 手动逐项设置；``auto`` 大小与颜色自动跟随
 主文字的字号与配色（见 :func:`resolve_volume_appearance`）。"""
+LitAppearanceMode = Literal["custom", "auto"]
+"""指示灯外观模式：``custom`` 手动逐项设置；``auto`` 大小自动跟随主文字
+字号，矢量灯走主文字装饰管线（见 :func:`resolve_lit_appearance`）。"""
 # 标题字幕（B7）：静态叠加文字的锚点 / 对齐 / 显示时段模式。
 TitleAnchor = Literal[
     "top_left",
@@ -2067,7 +2073,10 @@ def style_from_dict(payload: object) -> Style:
         elif key == "lit_style":
             changes[key] = (
                 value
-                if value in {"volume", "circle", "square", "rounded", "image"}
+                if value in {
+                    "volume", "circle", "square", "rounded", "image",
+                    "star", "note8", "note16", "notepair",
+                }
                 else defaults.lit_style
             )
         elif key == "volume_appearance_mode":
