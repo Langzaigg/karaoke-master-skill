@@ -46,6 +46,42 @@ float fxUnitHash(std::uint32_t index, std::uint32_t salt) {
     return static_cast<float>(h & 0xFFFFFFu) / 16777216.0f;
 }
 
+// 星光族（sparkle/twinkle）纵向锚点偏置 + 连续象限去重——镜像
+// particles.star_y_fraction / star_y_resample（2026-10 用户口径：尽量多
+// 出现在主文字上侧，锚点只稍微溢出字形顶 ≈12% 行高，连续两颗不落同
+// 象限）。
+constexpr float kStarYTop = -0.62f;
+constexpr float kStarYSpan = 0.92f;
+constexpr float kStarYSplitU = 0.62f / 0.92f;
+
+inline float starYFraction(float u) {
+    return kStarYTop + kStarYSpan * u;
+}
+
+inline int starQuadrant(bool left, bool top) {
+    return (left ? 2 : 0) + (top ? 1 : 0);
+}
+
+inline float starYResample(
+    float u2, float alt6, float alt7, int prevQ, bool left
+) {
+    if (starQuadrant(left, starYFraction(u2) < 0.0f) != prevQ) {
+        return u2;
+    }
+    if (starQuadrant(left, starYFraction(alt6) < 0.0f) != prevQ) {
+        return alt6;
+    }
+    if (starQuadrant(left, starYFraction(alt7) < 0.0f) != prevQ) {
+        return alt7;
+    }
+    if (prevQ & 1) {
+        // 上一颗在上 → 取下半段（frac ∈ [0, +0.30]，必为下侧）。
+        return kStarYSplitU + (1.0f - kStarYSplitU) * alt6;
+    }
+    // 上一颗在下 → 取上半段（frac ∈ [-0.62, 0)，必为上侧）。
+    return kStarYSplitU * alt7;
+}
+
 GeoCharState geoCharState(
     const std::string &effect,
     float fontPx,
@@ -249,13 +285,24 @@ std::vector<FxParticle> burstParticlesAt(
     }
 
     const std::uint32_t seed = burst.seed;
+    int starPrevQ = -1;  // 星光族象限链：-1 = 尚无上一颗
     out.reserve(static_cast<std::size_t>(std::max(burst.count, 0)));
     for (int i = 0; i < burst.count; ++i) {
         const std::uint32_t index = seed + static_cast<std::uint32_t>(i);
-        if (burst.kind == "sparkle") {
-            // 整句扫过（镜像 particles.burst_particles_at sparkle 分支）。
+        if (burst.kind == "sparkle" || burst.kind == "twinkle") {
+            // 整句扫过（镜像 particles.burst_particles_at sparkle 分支）；
+            // 唱字星光（twinkle）2026-10 起并入同一运动学（字框内小扫过）。
             const float u1 = fxUnitHash(index, 1u);
-            const float u2 = fxUnitHash(index, 2u);
+            const bool left = (u1 - 0.5f) < 0.0f;
+            const float u2 = starYResample(
+                fxUnitHash(index, 2u),
+                fxUnitHash(index, 6u),
+                fxUnitHash(index, 7u),
+                starPrevQ,
+                left
+            );
+            const float yOff = starYFraction(u2) * boxH;
+            starPrevQ = starQuadrant(left, yOff < 0.0f);
             const float u3 = fxUnitHash(index, 3u);
             const float u4 = fxUnitHash(index, 4u);
             const float u5 = fxUnitHash(index, 5u);
@@ -281,34 +328,10 @@ std::vector<FxParticle> burstParticlesAt(
             const float driftY = -(0.30f + 0.70f * u2) * travel * 0.45f * p;
             out.push_back(FxParticle{
                 originX + (u1 - 0.5f) * boxW + driftX,
-                originY + (u2 - 0.5f) * boxH * 0.55f + driftY,
+                originY + yOff + driftY,
                 u3 * 90.0f + 60.0f * p,
                 scale,
                 1.0f - p,
-            });
-        } else if (burst.kind == "twinkle") {
-            const float u1 = fxUnitHash(index, 1u);
-            const float u2 = fxUnitHash(index, 2u);
-            const float u3 = fxUnitHash(index, 3u);
-            const float u4 = fxUnitHash(index, 4u);
-            const float lifeI = 300.0f + 150.0f * u4;
-            const float spread = std::max(
-                static_cast<float>(life) - lifeI, 0.0f
-            );
-            const float delay = u3 * spread * 0.8f;
-            const float p = std::clamp((tau - delay) / lifeI, 0.0f, 1.0f);
-            if (p <= 0.0f || p >= 1.0f) {
-                continue;
-            }
-            constexpr float pi = 3.14159265358979323846f;
-            const float envelope = std::sin(pi * p);
-            const float peak = size * (0.65f + 0.70f * u4);
-            out.push_back(FxParticle{
-                originX + (u1 - 0.5f) * boxW * 0.95f,
-                originY + (u2 - 0.5f) * boxH * 0.85f,
-                u3 * 120.0f - 30.0f,
-                peak * (0.30f + 0.70f * envelope),
-                envelope,
             });
         } else if (burst.kind == "assemble" || burst.kind == "dissolve") {
             // 粒子拼接/消散（镜像 particles.burst_particles_at）：

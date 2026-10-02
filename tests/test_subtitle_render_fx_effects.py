@@ -233,10 +233,11 @@ def test_plan_line_bursts_kinds_and_windows():
     assert {b["start_ms"] for b in exit_ripples} == {3880}
     assert [b["char_index"] for b in exit_ripples] == [0, 1, 2]
     assert all(b["anchor"] == "char" and b["count"] == 3 for b in exit_ripples)
-    # 唱字（旋钮档）：零时长字符不发射；每字数量 = max(3, count//4)。
+    # 唱字（旋钮档）：零时长字符不发射；星光并入出入场运动学后每字数量
+    # = max(5, count//2)（默认 7，2026-10 密度对齐出入场观感）。
     assert kinds.count("twinkle") == 2
     twinkle = next(b for b in bursts if b["kind"] == "twinkle")
-    assert twinkle["count"] == 3
+    assert twinkle["count"] == 5
     assert twinkle["anchor"] == "char"
     assert twinkle["end_ms"] == twinkle["start_ms"] + 700
     assert twinkle["size_px"] == pytest.approx(50.0)  # 100px * 0.5em 旋钮
@@ -1576,7 +1577,77 @@ def test_entry_exit_sparkle_follows_first_char_role():
     assert (
         next(b for b in off if b["kind"] == "sparkle")["color"] == "#FFFFFF"
     )
-    # 星光画在主文字背后（front=False），音符仍在前。
-    assert sparkle["front"] is False
+    # 星光画在主文字前（2026-10 用户复调：背后看不清），音符在前。
+    assert sparkle["front"] is True
     assert note["front"] is True
     clear_particle_paint_cache()
+
+
+def test_star_particles_bias_up_and_avoid_repeat_quadrant():
+    """星光族纵向分布（2026-10 用户口径）：
+
+    - 锚点纵向带 [−0.62, +0.30]×行高：约 2/3 在字上侧，上缘只稍微溢出
+      字形顶（字形顶 = −0.5），下侧紧贴行中心；
+    - 连续两颗星不落同象限（左/右 × 上/下，按出生位置链式判定）。
+    """
+    from krok_helper.subtitle_render.engine.render.elements.horizontal.transitions import (
+        fx_unit_hash,
+    )
+    from krok_helper.subtitle_render.engine.render.effects.particles import (
+        STAR_Y_SPLIT_U,
+        _star_quadrant,
+        star_y_fraction,
+        star_y_resample,
+    )
+
+    # 纵向带边界与上侧概率。
+    assert star_y_fraction(0.0) == pytest.approx(-0.62)
+    assert star_y_fraction(1.0) == pytest.approx(0.30)
+    assert star_y_fraction(0.5) < 0.0  # 中位即在上侧
+    # 上侧占比 ≈ 0.62/0.92 ≈ 67%。
+    samples = [star_y_fraction((i + 0.5) / 200) for i in range(200)]
+    above = sum(1 for v in samples if v < 0.0)
+    assert 130 <= above <= 136, above
+
+    # 连续象限链：任意种子序列不出现同象限相邻。
+    for kind_seed_base in (7919, 104729):
+        for seed in range(120):
+            prev = -1
+            for i in range(24):
+                base = kind_seed_base * seed + i
+                u1 = fx_unit_hash(base, 1)
+                u2 = star_y_resample(
+                    fx_unit_hash(base, 2),
+                    fx_unit_hash(base, 6),
+                    fx_unit_hash(base, 7),
+                    prev,
+                    (u1 - 0.5) < 0.0,
+                )
+                frac = star_y_fraction(u2)
+                assert -0.62 - 1e-9 <= frac <= 0.30 + 1e-9
+                quadrant = _star_quadrant((u1 - 0.5) < 0.0, frac < 0.0)
+                assert quadrant != prev
+                prev = quadrant
+
+    # 求值器整体（多种子聚合，规避单种子抽样噪声）：出生帧 ≥60% 在上侧
+    # （含象限互斥把边际从 67% 拉低的影响）、最高点不超过 −0.63×行高
+    # （稍微溢出字形顶 + 少量上漂）；延迟帧含漂移后仍 ≥55% 在上。
+    ups = total = 0
+    lowest = 0.0
+    for seed in range(30):
+        burst = {
+            "kind": "sparkle", "start_ms": 0, "end_ms": 1200, "count": 24,
+            "seed": seed * 7919 + 13, "size_px": 50.0, "travel_px": 90.0,
+            "front": True, "sweep": 0,
+        }
+        # sweep=0 时出生延迟 ≤130ms：t=140 全员刚出生（漂移极小≈锚点）。
+        birth = burst_particles_at(burst, 140, 0.0, 0.0, 400.0, 100.0)
+        assert birth
+        ups += sum(1 for s in birth if s.y < 0.0)
+        total += len(birth)
+        lowest = min(lowest, min(s.y for s in birth))
+    assert ups / total >= 0.6, ups / total
+    assert lowest >= -63.0  # -0.63×行高（稍微溢出字形顶）
+    mid = burst_particles_at(burst, 700, 0.0, 0.0, 400.0, 100.0)
+    ups_mid = [s for s in mid if s.y < 0.0]
+    assert len(ups_mid) / len(mid) >= 0.5

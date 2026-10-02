@@ -54,6 +54,40 @@ ANIM_PARTICLE_COUNT = 14
 ANIM_PARTICLE_COLOR = "#FFFFFF"
 # sparkle 整句扫过的额外错峰时长（按粒子横向位置从一端排到另一端）。
 SPARKLE_SWEEP_MS = 350
+# 星光族（sparkle/twinkle）纵向锚点分布：以锚点中心为原点的行高比例。
+# 上缘 -0.62（字形顶 = -0.5，只稍微溢出字上方 ≈12% 行高）、下缘 +0.30
+#（都在字框内）；线性映射 → 约 2/3 概率在字上侧（2026-10 用户口径：
+# 尽量多出现在主文字上侧）。u < STAR_Y_SPLIT_U 落上侧。
+STAR_Y_TOP = -0.62
+STAR_Y_SPAN = 0.92
+STAR_Y_SPLIT_U = 0.62 / 0.92
+# 连续星星禁止同象限：哈希通道 6/7 重采样仍撞象限时按上一颗的竖侧
+# 强制换侧（上半段/下半段各留 ~1/3 余量，仍落在偏置分布内）。
+
+
+def star_y_fraction(u: float) -> float:
+    """u∈[0,1] → 纵向锚点比例 ∈ [STAR_Y_TOP, STAR_Y_TOP+SPAN]。"""
+
+    return STAR_Y_TOP + STAR_Y_SPAN * u
+
+
+def _star_quadrant(left: bool, top: bool) -> int:
+    return (2 if left else 0) + (1 if top else 0)
+
+
+def star_y_resample(u2: float, alt6: float, alt7: float, prev_q: int, left: bool) -> float:
+    """象限去重：与上一颗同象限时重采样 y（镜像 C++ fxStarYResample）。"""
+
+    if _star_quadrant(left, star_y_fraction(u2) < 0.0) != prev_q:
+        return u2
+    if _star_quadrant(left, star_y_fraction(alt6) < 0.0) != prev_q:
+        return alt6
+    if _star_quadrant(left, star_y_fraction(alt7) < 0.0) != prev_q:
+        return alt7
+    if prev_q & 1:  # 上一颗在上 → 取下半段
+        return STAR_Y_SPLIT_U + (1.0 - STAR_Y_SPLIT_U) * alt6
+    # 上一颗在下 → 取上半段
+    return STAR_Y_SPLIT_U * alt7
 
 
 # ---------------------------------------------------------------------------
@@ -571,8 +605,9 @@ def plan_line_bursts(
             "end_ms": int(display_start_ms)
             + int(SPARKLE_ENTRY_LIFE_MS * entry_scale),
             "count": anim_count, "seed": (seed_base + 1) & 0xFFFFFFFF,
-            # 星光画在主文字背后（2026-10 用户口径：不再遮挡文字画面）。
-            "size_px": anim_size, "travel_px": anim_size * 3.2, "front": False,
+            # 星光画在主文字前（背后看不清——2026-10 用户复调；纵向锚点
+            # 已偏置到字上侧为主，遮挡有限）。
+            "size_px": anim_size, "travel_px": anim_size * 3.2, "front": True,
             "sweep": 1,
             **_burst_paint(None, anim_size, anim=True, line_anchor=True),
         })
@@ -606,7 +641,7 @@ def plan_line_bursts(
             "kind": "sparkle", "anchor": "line", "char_index": -1,
             "start_ms": exit_start, "end_ms": int(display_end_ms),
             "count": anim_count, "seed": (seed_base + 3) & 0xFFFFFFFF,
-            "size_px": anim_size, "travel_px": anim_size * 3.2, "front": False,
+            "size_px": anim_size, "travel_px": anim_size * 3.2, "front": True,
             "sweep": -1,
             **_burst_paint(None, anim_size, anim=True, line_anchor=True),
         })
@@ -721,7 +756,8 @@ def plan_line_bursts(
                 **_burst_paint(char_index, ring_px, anim=False, ring=True),
             })
     elif style.sing_fx in ("twinkle", "note"):
-        per_char = max(3, count // 4) if style.sing_fx == "twinkle" else 3
+        # 唱字星光并入出入场星光运动学后，密度对齐出入场观感（默认 7/字）。
+        per_char = max(5, count // 2) if style.sing_fx == "twinkle" else 3
         total = SING_TWINKLE_TOTAL_MS if style.sing_fx == "twinkle" else SING_NOTE_TOTAL_MS
         for char_index, (start_ms, end_ms) in enumerate(char_windows):
             duration = int(end_ms) - int(start_ms)
@@ -740,10 +776,10 @@ def plan_line_bursts(
                 "end_ms": int(start_ms) + total,
                 "count": per_char,
                 "seed": seed,
-                # 唱字星光同样垫在主文字背后（音符飘出保持在前）。
-                "size_px": size, "travel_px": size * 1.8,
-                "front": style.sing_fx != "twinkle",
-                "sweep": 0,
+                # 星光族画主文字前（背后看不清——2026-10 用户复调）；
+                # 唱字星光自字左向右小扫过（出入场同款波向运动学）。
+                "size_px": size, "travel_px": size * 1.8, "front": True,
+                "sweep": 1 if style.sing_fx == "twinkle" else 0,
                 **_burst_paint(char_index, size, anim=False),
             })
     return bursts
@@ -807,16 +843,31 @@ def burst_particles_at(
             ))
         return out
 
+    star_prev_q = -1  # 星光族象限链：-1 = 尚无上一颗
     for i in range(int(burst["count"])):
-        if kind == "sparkle":
+        if kind in ("sparkle", "twinkle"):
             # 整句扫过：粒子伪随机铺满整行宽度（box_w），入场从左到右、退场
             # 反向，按横向位置错峰出生 → 连续顺滑地跟随扫过整句；每颗随机
-            # 初始/末了大小、随机向上漂移方向。
+            # 初始/末了大小、随机向上漂移方向。唱字星光（twinkle）2026-10
+            # 起并入同一运动学（原地 sin 缩放的旧模式僵硬——用户口径），
+            # 在字框内做同款小扫过 + 漂移。纵向锚点按 star_y_fraction
+            # 偏置到主文字上侧（只稍微溢出字形顶），且连续两颗不落同象限
+            #（链式比较出生位置，与存活过滤无关、重放可复现）。
             u1 = fx_unit_hash(seed + i, 1)
             u2 = fx_unit_hash(seed + i, 2)
             u3 = fx_unit_hash(seed + i, 3)
             u4 = fx_unit_hash(seed + i, 4)
             u5 = fx_unit_hash(seed + i, 5)
+            left = (u1 - 0.5) < 0.0
+            u2 = star_y_resample(
+                u2,
+                fx_unit_hash(seed + i, 6),
+                fx_unit_hash(seed + i, 7),
+                star_prev_q,
+                left,
+            )
+            y_off = star_y_fraction(u2) * box_h
+            star_prev_q = _star_quadrant(left, y_off < 0.0)
             x_norm = u1
             if sweep > 0:
                 delay = x_norm * SPARKLE_SWEEP_MS + u5 * 90.0
@@ -835,31 +886,10 @@ def burst_particles_at(
             drift_y = -(0.30 + 0.70 * u2) * travel * 0.45 * p
             out.append(ParticleDraw(
                 origin_x + (x_norm - 0.5) * box_w + drift_x,
-                origin_y + (u2 - 0.5) * box_h * 0.55 + drift_y,
+                origin_y + y_off + drift_y,
                 u3 * 90.0 + 60.0 * p,
                 scale,
                 1.0 - p,
-            ))
-        elif kind == "twinkle":
-            # 唱字星光：位置铺满整个字框、随机旋转、随机生命周期与峰值大小。
-            u1 = fx_unit_hash(seed + i, 1)
-            u2 = fx_unit_hash(seed + i, 2)
-            u3 = fx_unit_hash(seed + i, 3)
-            u4 = fx_unit_hash(seed + i, 4)
-            life_i = 300.0 + 150.0 * u4
-            spread = max(life - life_i, 0.0)
-            delay = u3 * spread * 0.8
-            p = min(max((tau - delay) / life_i, 0.0), 1.0)
-            if p <= 0.0 or p >= 1.0:
-                continue
-            envelope = math.sin(math.pi * p)
-            peak = size * (0.65 + 0.70 * u4)
-            out.append(ParticleDraw(
-                origin_x + (u1 - 0.5) * box_w * 0.95,
-                origin_y + (u2 - 0.5) * box_h * 0.85,
-                u3 * 120.0 - 30.0,
-                peak * (0.30 + 0.70 * envelope),
-                envelope,
             ))
         elif kind == "assemble":
             # 粒子拼接：每颗粒子自随机方向的远端飞向字形内随机落点，
