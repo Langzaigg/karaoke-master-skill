@@ -35,6 +35,7 @@ from krok_helper.subtitle_render.domain.models import (
     title_overlay_to_dict,
 )
 from krok_helper.subtitle_render.serialization.timing import guide_symbol_to_dict
+from krok_helper.subtitle_render.engine.style.style_semantics import style_for_role
 
 RENDER_IR_SCHEMA = 2
 
@@ -600,6 +601,15 @@ def track_to_ir(
                         resolved_intervals[index],
                         char_visible=[
                             not str(getattr(ch, "text", "") or "").isspace()
+                            for ch in render_lines[index].chars
+                        ],
+                        # 「跟随字体」逐字取角色配色：与 CPU painter 同一解析
+                        # 式（行样式已并入歌手方案，字符 role_label 再叠加）。
+                        char_styles=[
+                            style_for_role(
+                                animation_styles[index],
+                                getattr(ch, "role_label", None),
+                            )
                             for ch in render_lines[index].chars
                         ],
                     )

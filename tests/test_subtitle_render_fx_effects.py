@@ -687,3 +687,737 @@ def test_sing_particles_skip_whitespace_chars():
     # 入场涟漪仍按整行逐字（3 枚，含空格位）。
     ripples = [b for b in bursts if b["kind"] == "ripple"]
     assert [b["char_index"] for b in ripples] == [0, 1, 2]
+
+
+# ---------------------------------------------------------------------------
+# 2026-10 粒子颜色模式（单独颜色 / 跟随字体·走字前后 / 复用配色方案）
+# 与「入退场同用」联动开关
+# ---------------------------------------------------------------------------
+
+
+def _karaoke_matrix(before: str, after: str):
+    from krok_helper.subtitle_render.domain.paint import (
+        KaraokeColorState,
+        KaraokeColors,
+    )
+    from krok_helper.subtitle_render.engine.style.style_semantics import solid_fill
+
+    return KaraokeColors(
+        before=KaraokeColorState(text=solid_fill(before)),
+        after=KaraokeColorState(text=solid_fill(after)),
+    )
+
+
+def test_particle_color_modes_follow_font_states():
+    """跟随字体·走字前/后：取所在行有效配色的主文字填充折算实色。"""
+    from krok_helper.subtitle_render.engine.render.effects.particles import (
+        particle_solid_color,
+    )
+
+    style = Style(
+        fx_particle_color="#00FF00",
+        karaoke_colors=_karaoke_matrix("#123456", "#ABCDEF"),
+    )
+    assert particle_solid_color(style) == "#00FF00"  # 默认单独颜色
+    assert particle_solid_color(
+        Style(
+            fx_particle_color="#00FF00",
+            karaoke_colors=_karaoke_matrix("#123456", "#ABCDEF"),
+            fx_particle_color_mode="follow_before",
+        )
+    ) == "#123456"
+    assert particle_solid_color(
+        Style(
+            fx_particle_color="#00FF00",
+            karaoke_colors=_karaoke_matrix("#123456", "#ABCDEF"),
+            fx_particle_color_mode="follow_after",
+        )
+    ) == "#ABCDEF"
+    # 旧工程无配色矩阵：走 legacy 推导（before=base_color，after=fill_color）。
+    legacy_before = particle_solid_color(
+        Style(
+            base_color="#2468AC",
+            fill_color="#FF00FF",
+            fx_particle_color_mode="follow_before",
+        )
+    )
+    legacy_after = particle_solid_color(
+        Style(
+            base_color="#2468AC",
+            fill_color="#FF00FF",
+            fx_particle_color_mode="follow_after",
+        )
+    )
+    assert legacy_before == "#2468AC" and legacy_after == "#FF00FF"
+
+
+def test_particle_color_mode_gradient_averages_stops():
+    """渐变/拼色填充折算为停止色平均；图片填充回退单独颜色。"""
+    from krok_helper.subtitle_render.domain.paint import (
+        KaraokeColorState,
+        KaraokeColors,
+        PaintFill,
+    )
+    from krok_helper.subtitle_render.engine.render.effects.particles import (
+        fill_to_solid_color,
+        particle_solid_color,
+    )
+
+    gradient = PaintFill(
+        mode="gradient_horizontal",
+        start_color="#FF0000",
+        end_color="#0000FF",
+        gradient_stops=[(0, "#FF0000"), (50, "#00FF00"), (100, "#0000FF")],
+    )
+    # (FF0000 + 00FF00 + 0000FF) / 3 = (85, 85, 85)。
+    assert fill_to_solid_color(gradient, "#123456") == "#555555"
+    split = PaintFill(
+        mode="split_vertical",
+        split_top_color="#FF0000",
+        split_bottom_color="#0000FF",
+        split_stops=[(0, "#FF0000"), (100, "#0000FF")],
+    )
+    assert fill_to_solid_color(split, "#123456") == "#7F007F"
+    image = PaintFill(mode="image", image_path="x.png")
+    assert fill_to_solid_color(image, "#00FF00") == "#00FF00"
+    style = Style(
+        fx_particle_color="#00FF00",
+        fx_particle_color_mode="follow_after",
+        karaoke_colors=KaraokeColors(
+            after=KaraokeColorState(text=gradient),
+        ),
+    )
+    assert particle_solid_color(style) == "#555555"
+
+
+def test_particle_color_mode_role_source_and_dangling_fallback():
+    """复用配色方案：取来源「走字后-主文字」；悬空引用回退单独颜色。"""
+    from krok_helper.subtitle_render.domain.models import (
+        SCANLINE_GLOBAL_ROLE_KEY,
+        SubtitleStyleScheme,
+    )
+    from krok_helper.subtitle_render.engine.render.effects.particles import (
+        particle_solid_color,
+    )
+
+    scheme = SubtitleStyleScheme(
+        karaoke_colors=_karaoke_matrix("#000000", "#EE7700")
+    )
+    style = Style(
+        fx_particle_color="#00FF00",
+        fx_particle_color_mode="role",
+        fx_particle_role_name="主唱",
+        custom_style_schemes={"主唱": scheme},
+        karaoke_colors=_karaoke_matrix("#111111", "#222222"),
+    )
+    assert particle_solid_color(style) == "#EE7700"
+    # 全局默认 = 主样式自身的走字后。
+    assert particle_solid_color(
+        Style(
+            fx_particle_color="#00FF00",
+            fx_particle_color_mode="role",
+            fx_particle_role_name=SCANLINE_GLOBAL_ROLE_KEY,
+            karaoke_colors=_karaoke_matrix("#111111", "#222222"),
+        )
+    ) == "#222222"
+    # 名字悬空（历史工程/手工 JSON）：回退 color 档。
+    assert particle_solid_color(
+        Style(
+            fx_particle_color="#00FF00",
+            fx_particle_color_mode="role",
+            fx_particle_role_name="已删除",
+        )
+    ) == "#00FF00"
+
+
+def test_fx_apply_to_entry_exit_switch_plans():
+    """「入退场同用」：开启后入退场动画粒子的颜色/尺寸吃旋钮；数量恒固定。"""
+
+    def _style(**extra):
+        base = dict(
+            entry_anim="assemble_in",
+            entry_lead_ms=600,
+            exit_anim="dissolve_out",
+            exit_fade_ms=600,
+            sing_fx="twinkle",
+            fx_particle_size_em=0.5,
+            fx_particle_count=10,
+            fx_particle_color="#FF8800",
+            font_size_px=100,
+            karaoke_anim="none",
+        )
+        base.update(extra)
+        return Style(**base)
+
+    windows = [(1200, 1600), (1600, 3000)]
+    off = plan_line_bursts(_style(), 0, 1000, 4000, 3900, windows)
+    assemble = next(b for b in off if b["kind"] == "assemble")
+    twinkle = next(b for b in off if b["kind"] == "twinkle")
+    # 默认关：入退场动画粒子固定白档 + 固定尺寸（40% × 0.75），唱字吃旋钮。
+    assert assemble["color"] == "#FFFFFF"
+    assert assemble["size_px"] == pytest.approx(100 * 0.40 * 0.75)
+    assert assemble["count"] == 7  # 数量固定档不吃旋钮
+    assert twinkle["color"] == "#FF8800"
+    assert twinkle["size_px"] == pytest.approx(50.0)
+
+    on = plan_line_bursts(
+        _style(fx_apply_to_entry_exit=True), 0, 1000, 4000, 3900, windows
+    )
+    assemble_on = next(b for b in on if b["kind"] == "assemble")
+    twinkle_on = next(b for b in on if b["kind"] == "twinkle")
+    # 开启后：颜色与尺寸跟随旋钮；数量仍固定。
+    assert assemble_on["color"] == "#FF8800"
+    assert assemble_on["size_px"] == pytest.approx(50.0 * 0.75)
+    assert assemble_on["count"] == 7
+    assert twinkle_on["color"] == "#FF8800"
+    assert twinkle_on["size_px"] == pytest.approx(50.0)
+
+    # 颜色模式对入退场动画粒子同样生效（开启联动时）。
+    follow = plan_line_bursts(
+        _style(
+            fx_apply_to_entry_exit=True,
+            fx_particle_color_mode="follow_after",
+            karaoke_colors=_karaoke_matrix("#000000", "#EE7700"),
+        ),
+        0,
+        1000,
+        4000,
+        3900,
+        windows,
+    )
+    assert next(b for b in follow if b["kind"] == "assemble")["color"] == "#EE7700"
+    # 关闭联动时模式只影响唱字粒子，入退场动画粒子仍是固定白档。
+    follow_off = plan_line_bursts(
+        _style(
+            fx_particle_color_mode="follow_after",
+            karaoke_colors=_karaoke_matrix("#000000", "#EE7700"),
+        ),
+        0,
+        1000,
+        4000,
+        3900,
+        windows,
+    )
+    assert (
+        next(b for b in follow_off if b["kind"] == "assemble")["color"] == "#FFFFFF"
+    )
+    assert next(b for b in follow_off if b["kind"] == "twinkle")["color"] == "#EE7700"
+
+
+def test_particle_color_mode_serialization_roundtrip():
+    """颜色模式/来源/联动开关三字段的工程序列化往返与非法值回退。"""
+    from krok_helper.subtitle_render.domain.models import style_from_dict, style_to_dict
+
+    style = Style(
+        fx_particle_color_mode="follow_after",
+        fx_particle_role_name="主唱",
+        fx_apply_to_entry_exit=True,
+    )
+    restored = style_from_dict(style_to_dict(style))
+    assert restored.fx_particle_color_mode == "follow_after"
+    assert restored.fx_particle_role_name == "主唱"
+    assert restored.fx_apply_to_entry_exit is True
+    # 旧工程 payload（无新字段）：回落默认，不炸。
+    legacy = style_from_dict({})
+    assert legacy.fx_particle_color_mode == "color"
+    assert legacy.fx_particle_role_name is None
+    assert legacy.fx_apply_to_entry_exit is False
+    # 非法值回落默认；空串来源名归一 None。
+    payload = style_to_dict(Style())
+    payload["fx_particle_color_mode"] = "brighten"  # 粒子无此档
+    payload["fx_particle_role_name"] = "  "
+    payload["fx_apply_to_entry_exit"] = 0
+    degraded = style_from_dict(payload)
+    assert degraded.fx_particle_color_mode == "color"
+    assert degraded.fx_particle_role_name is None
+    assert degraded.fx_apply_to_entry_exit is False
+
+
+def test_particle_role_reference_remap_chain():
+    """来源改名连带改写；删除连模式一起回退单独颜色（扫字线同款）。"""
+    from krok_helper.subtitle_render.domain.models import (
+        remap_particle_role_reference,
+    )
+
+    style = Style(fx_particle_color_mode="role", fx_particle_role_name="主唱")
+    renamed = remap_particle_role_reference(style, {"主唱": "领唱"})
+    assert renamed is not None
+    assert renamed.fx_particle_role_name == "领唱"
+    assert renamed.fx_particle_color_mode == "role"
+    deleted = remap_particle_role_reference(style, {"主唱": None})
+    assert deleted is not None
+    assert deleted.fx_particle_color_mode == "color"
+    assert deleted.fx_particle_role_name is None
+    # 引用未触及返回 None（调用方跳过样式写回）。
+    assert remap_particle_role_reference(style, {"和声": "伴唱"}) is None
+    assert remap_particle_role_reference(Style(), {"主唱": None}) is None
+
+
+def test_painter_paints_per_burst_particle_color(qapp):
+    """CPU painter 按 burst 颜色绘制（与 D2D burst.color 同口径）。
+
+    2026-10 发现的历史分歧：painter 此前把所有 burst 一律画成
+    ``fx_particle_color``，而 GPU 侧入退场动画粒子按规划是固定白色——
+    旋钮色非白时两后端画面不一致。这里用「无粒子基线」逐像素差分验证
+    跟随字体两档的唱字粒子按行配色着色（字形本体两帧完全一致，差分
+    只剩粒子贡献）。
+    """
+    from PyQt6.QtGui import QImage
+
+    from krok_helper.subtitle_render.domain.timing import TimingChar, TimingTrack
+    from krok_helper.subtitle_render.engine.painter import paint_frame
+
+    track = TimingTrack(
+        lines=[
+            TimingLine(
+                chars=[
+                    TimingChar(text="あ", start_ms=1000),
+                    TimingChar(text="い", start_ms=1600),
+                ],
+                end_ms=2200,
+            )
+        ]
+    )
+
+    def _render(mode: str) -> QImage:
+        style = Style(
+            sing_fx="twinkle",
+            karaoke_anim="utopia",
+            fx_particle_size_em=0.8,
+            fx_particle_count=16,
+            fx_particle_color_mode=mode,
+            karaoke_colors=_karaoke_matrix("#FF0000", "#0000FF"),
+        )
+        img = QImage(800, 450, QImage.Format.Format_ARGB32_Premultiplied)
+        img.fill(0xFF101010)
+        paint_frame(img, track, 1300, style)
+        return img
+
+    def _dominance(mode: str) -> tuple[int, int]:
+        """与「无粒子基线」差分中红/蓝主导的像素数。
+
+        半透明粒子叠在异色字形上会向基线色偏移（弱信号不计入主导），
+        因此断言用两档之间的相对主导方向判颜色，而不是绝对为零。
+        """
+        with_fx = _render(mode)
+        none_img = QImage(800, 450, QImage.Format.Format_ARGB32_Premultiplied)
+        none_img.fill(0xFF101010)
+        paint_frame(
+            none_img,
+            track,
+            1300,
+            Style(
+                sing_fx="none",
+                karaoke_anim="utopia",
+                karaoke_colors=_karaoke_matrix("#FF0000", "#0000FF"),
+            ),
+        )
+        red_dominant = blue_dominant = 0
+        for y in range(0, with_fx.height(), 2):
+            for x in range(0, with_fx.width(), 2):
+                pixel = with_fx.pixel(x, y)
+                if pixel == none_img.pixel(x, y):
+                    continue  # 粒子未覆盖的纯字形/背景像素
+                red = (pixel >> 16) & 0xFF
+                green = (pixel >> 8) & 0xFF
+                blue = pixel & 0xFF
+                if red > 140 and red > green + 40 and red > blue + 40:
+                    red_dominant += 1
+                if blue > 140 and blue > red + 40 and blue > green + 40:
+                    blue_dominant += 1
+        return red_dominant, blue_dominant
+
+    # 跟随字体·走字前：粒子红主导（走字前主文字色）。
+    red_before, blue_before = _dominance("follow_before")
+    assert red_before > 8, f"走字前粒子应红主导，实测红 {red_before} 蓝 {blue_before}"
+    assert red_before > blue_before
+    # 跟随字体·走字后：粒子蓝主导（走字后主文字色）。
+    red_after, blue_after = _dominance("follow_after")
+    assert blue_after > 8, f"走字后粒子应蓝主导，实测蓝 {blue_after} 红 {red_after}"
+    assert blue_after > red_after
+
+
+# ---------------------------------------------------------------------------
+# 2026-10 二期：逐字角色解析 + 完整装饰规格（渐变/描边/二重描边 + 极坐标环）
+# ---------------------------------------------------------------------------
+
+
+def _gradient_fill(mode: str, start: str, end: str):
+    from krok_helper.subtitle_render.domain.paint import PaintFill
+
+    return PaintFill(
+        mode=mode,
+        start_color=start,
+        end_color=end,
+        gradient_stops=[(0, start), (100, end)],
+        split_top_color=start,
+        split_bottom_color=end,
+        split_stops=[(0, start), (100, end)],
+    )
+
+
+def test_particle_paint_spec_follows_each_chars_role():
+    """跟随字体逐字取色：同一行内不同角色方案的字符拿到各自的三层规格。"""
+    from krok_helper.subtitle_render.domain.models import SubtitleStyleScheme
+    from krok_helper.subtitle_render.domain.paint import (
+        KaraokeColorState,
+        KaraokeColors,
+    )
+    from krok_helper.subtitle_render.engine.style.style_semantics import style_for_role
+
+    scheme_a = SubtitleStyleScheme(
+        karaoke_colors=KaraokeColors(
+            after=KaraokeColorState(text=_gradient_fill(
+                "gradient_horizontal", "#FF8800", "#00FF88"
+            ))
+        )
+    )
+    scheme_b = SubtitleStyleScheme(
+        karaoke_colors=KaraokeColors(
+            after=KaraokeColorState(text=_gradient_fill(
+                "gradient_vertical", "#FF0000", "#0000FF"
+            ))
+        )
+    )
+    style = Style(
+        font_size_px=100,
+        sing_fx="twinkle",
+        fx_particle_color_mode="follow_after",
+        karaoke_anim="none",
+        custom_style_schemes={"主唱": scheme_a, "和声": scheme_b},
+        karaoke_colors=_karaoke_matrix("#111111", "#222222"),
+    )
+    char_styles = [
+        style_for_role(style, "主唱"),
+        style_for_role(style, "和声"),
+        None,  # 未挂角色的字符：回落行样式
+    ]
+    windows = [(1200, 1600), (1600, 2000), (2000, 2400)]
+    bursts = plan_line_bursts(
+        style, 0, 1000, 4000, 3900, windows, char_styles=char_styles
+    )
+    twinkle = sorted(
+        (b for b in bursts if b["kind"] == "twinkle"),
+        key=lambda b: b["char_index"],
+    )
+    assert len(twinkle) == 3
+    # 字 0：主唱方案的横向渐变；字 1：和声方案的竖向渐变；字 2：行样式纯色。
+    assert twinkle[0]["paint"]["fill"]["mode"] == "gradient_horizontal"
+    assert twinkle[1]["paint"]["fill"]["mode"] == "gradient_vertical"
+    assert twinkle[2]["paint"]["fill"]["mode"] == "solid"
+    assert twinkle[2]["paint"]["fill"]["color"] == "#222222"
+    # 实色回退同步按字符解析（burst.color 与规格同源）。
+    assert twinkle[0]["color"] == "#7FC344"  # (FF8800+00FF88)/2
+    assert twinkle[1]["color"] == "#7F007F"
+    assert twinkle[2]["color"] == "#222222"
+    # 未提供 char_styles 时（旧调用方）：整体回落行样式。
+    fallback = plan_line_bursts(style, 0, 1000, 4000, 3900, windows)
+    assert all(
+        b["paint"]["fill"]["color"] == "#222222"
+        for b in fallback
+        if b["kind"] == "twinkle"
+    )
+
+
+def test_particle_paint_spec_stroke_widths_scale_with_source_font():
+    """描边/二重描边宽按 粒子尺寸/来源字号 缩放，上限半个粒子边长。"""
+    style = Style(
+        font_size_px=100,
+        sing_fx="twinkle",
+        fx_particle_size_em=0.5,  # 粒子 50px
+        fx_particle_color_mode="follow_after",
+        karaoke_anim="none",
+        stroke_width_px=8,
+        stroke2_enabled=True,
+        stroke2_width_px=4,
+        karaoke_colors=_karaoke_matrix("#000000", "#FFFFFF"),
+    )
+    bursts = plan_line_bursts(style, 0, 1000, 4000, 3900, [(1200, 1600)])
+    spec = next(b for b in bursts if b["kind"] == "twinkle")["paint"]
+    assert spec["stroke_width_px"] == pytest.approx(8 * 0.5)
+    assert spec["stroke2_width_px"] == pytest.approx(4 * 0.5)
+    # 巨描边钳到半个粒子边长。
+    huge = Style(
+        font_size_px=20,
+        sing_fx="twinkle",
+        fx_particle_size_em=0.5,  # 粒子 10px，半边长 5px
+        fx_particle_color_mode="follow_after",
+        karaoke_anim="none",
+        stroke_width_px=40,
+        stroke2_enabled=False,
+        karaoke_colors=_karaoke_matrix("#000000", "#FFFFFF"),
+    )
+    capped = plan_line_bursts(huge, 0, 1000, 4000, 3900, [(1200, 1600)])
+    assert (
+        next(b for b in capped if b["kind"] == "twinkle")["paint"][
+            "stroke_width_px"
+        ]
+        <= 5.0 + 1e-6
+    )
+    # UseEdge2 关闭：二重描边宽恒 0（N3 语义不回归）。
+    off = Style(
+        font_size_px=100,
+        sing_fx="twinkle",
+        fx_particle_color_mode="follow_after",
+        karaoke_anim="none",
+        stroke_width_px=8,
+        stroke2_enabled=False,
+        stroke2_width_px=4,
+        karaoke_colors=_karaoke_matrix("#000000", "#FFFFFF"),
+    )
+    off_spec = next(
+        b for b in plan_line_bursts(off, 0, 1000, 4000, 3900, [(1200, 1600)])
+        if b["kind"] == "twinkle"
+    )["paint"]
+    assert off_spec["stroke2_width_px"] == 0.0
+
+
+def test_particle_paint_spec_image_fill_falls_back_to_solid():
+    """图片填充折为单独颜色实心（跨端一致回退）。"""
+    from krok_helper.subtitle_render.domain.paint import (
+        KaraokeColorState,
+        KaraokeColors,
+        PaintFill,
+    )
+
+    image_fill = PaintFill(mode="image", image_path="x.png")
+    style = Style(
+        font_size_px=100,
+        sing_fx="twinkle",
+        fx_particle_color="#ABCDEF",
+        fx_particle_color_mode="follow_after",
+        karaoke_anim="none",
+        karaoke_colors=KaraokeColors(
+            after=KaraokeColorState(text=image_fill)
+        ),
+    )
+    bursts = plan_line_bursts(style, 0, 1000, 4000, 3900, [(1200, 1600)])
+    spec = next(b for b in bursts if b["kind"] == "twinkle")["paint"]
+    assert spec["fill"]["mode"] == "solid"
+    assert spec["fill"]["color"] == "#ABCDEF"
+
+
+def test_painter_gradient_particle_and_radial_ring(qapp):
+    """CPU painter：规格档粒子按完整 PaintFill 绘制；涟漪竖向渐变做径向
+    映射（新出生的内圈环=起点色亮红，扩散中的外圈环沿渐变轴推进）。"""
+    from PyQt6.QtGui import QImage
+
+    from krok_helper.subtitle_render.domain.paint import (
+        KaraokeColorState,
+        KaraokeColors,
+    )
+    from krok_helper.subtitle_render.domain.timing import TimingChar, TimingTrack
+    from krok_helper.subtitle_render.engine.painter import paint_frame
+
+    track = TimingTrack(
+        lines=[
+            TimingLine(
+                chars=[TimingChar(text="あ", start_ms=1000)],
+                end_ms=1600,
+            )
+        ]
+    )
+    # 横向渐变填充：粒子内部左端橙、右端绿（主文字纯色不产生绿端）。
+    grad_h = _gradient_fill("gradient_horizontal", "#FF8800", "#00FF88")
+    style_h = Style(
+        sing_fx="twinkle",
+        karaoke_anim="utopia",
+        fx_particle_size_em=0.8,
+        fx_particle_count=16,
+        fx_particle_color_mode="follow_after",
+        karaoke_colors=KaraokeColors(
+            after=KaraokeColorState(text=grad_h)
+        ),
+    )
+    img = QImage(800, 450, QImage.Format.Format_ARGB32_Premultiplied)
+    img.fill(0xFF101010)
+    paint_frame(img, track, 1300, style_h)
+    orange = green = 0
+    for y in range(0, img.height(), 2):
+        for x in range(0, img.width(), 2):
+            px = img.pixel(x, y)
+            r, g, b = (px >> 16) & 0xFF, (px >> 8) & 0xFF, px & 0xFF
+            if r > 170 and 90 < g < 200 and b < 90:
+                orange += 1
+            if g > 130 and g > r + 30 and g > b + 10:
+                green += 1
+    assert orange > 5 and green > 5, f"渐变两端都应出现 o={orange} g={green}"
+
+    # 竖向渐变涟漪：径向映射——出生不久的环按进度取到偏红段（阈值
+    # 放宽到 60/20：环透明度随生命期 (1-p)² 衰减，老环必然偏暗）。
+    grad_v = _gradient_fill("gradient_vertical", "#FF0000", "#0000FF")
+    style_ring = Style(
+        sing_fx="ripple",
+        karaoke_anim="utopia",
+        fx_particle_size_em=0.8,
+        fx_particle_color_mode="follow_after",
+        karaoke_colors=KaraokeColors(after=KaraokeColorState(text=grad_v)),
+    )
+    img2 = QImage(800, 450, QImage.Format.Format_ARGB32_Premultiplied)
+    img2.fill(0xFF101010)
+    paint_frame(img2, track, 1100, style_ring)
+    red_around = 0
+    for y in range(0, img2.height(), 2):
+        for x in range(0, img2.width(), 2):
+            px = img2.pixel(x, y)
+            r, g, b = (px >> 16) & 0xFF, (px >> 8) & 0xFF, px & 0xFF
+            if r > 60 and r > g + 20 and r > b + 20:
+                red_around += 1
+    assert red_around > 20, (
+        f"径向环新环应取渐变起点的红段，实测红像素 {red_around}"
+    )
+
+
+def test_fx_radial_ring_samples_gradient_by_expansion():
+    """涟漪非横向渐变的径向映射：渐变轴 → 半径方向。
+
+    每颗环按自身扩散进度（eased，量化 1/32 档）在渐变轴上采样一个实心
+    色：新出生的小环（内圈）= 起点色，扩散开的旧环（外圈）= 终点色——
+    「从圆心内到外圆渐变」（2026-10 用户口径；conic 角向扫过已被否定）。
+    """
+    from krok_helper.subtitle_render.domain.timing import TimingChar, TimingTrack
+    from krok_helper.subtitle_render.engine.painter import _fx_fill_color_at
+
+    grad = _gradient_fill("gradient_vertical", "#FF0000", "#0000FF")
+    # 采样器口径：0=起点色（纯红），1=终点色（纯蓝），线性插值。
+    quarter = _fx_fill_color_at(grad, 0.25)
+    assert abs(quarter.red() - 191) <= 1 and abs(quarter.blue() - 64) <= 1
+    half = _fx_fill_color_at(grad, 0.5)
+    assert abs(half.red() - 128) <= 1 and abs(half.blue() - 128) <= 1
+    # 拼色：分段常数（每段标记该色起点）。
+    from krok_helper.subtitle_render.domain.paint import PaintFill
+
+    split = PaintFill(
+        mode="split_vertical",
+        split_top_color="#00FF00",
+        split_bottom_color="#FFFFFF",
+        split_stops=[(0, "#00FF00"), (50, "#FFFFFF"), (100, "#FFFFFF")],
+    )
+    assert _fx_fill_color_at(split, 0.3).name().upper() == "#00FF00"
+    assert _fx_fill_color_at(split, 0.9).name().upper() == "#FFFFFF"
+
+
+def test_ripple_bursts_carry_no_stroke_and_spec_cache_reuses():
+    """涟漪光环不带描边（环体发丝线，叠描边显著变粗——2026-10 用户口径）；
+    同一「样式 × 角色 × 尺寸」组合的装饰规格全帧复用同一对象（缓存命中）。"""
+    from krok_helper.subtitle_render.engine.render.effects.particles import (
+        clear_particle_paint_cache,
+    )
+
+    clear_particle_paint_cache()
+    style = Style(
+        font_size_px=64,
+        sing_fx="ripple",
+        karaoke_anim="none",
+        fx_particle_color_mode="follow_after",
+        stroke_width_px=8,
+        stroke2_enabled=True,
+        stroke2_width_px=4,
+        karaoke_colors=_karaoke_matrix("#40E0FF", "#FF5A6F"),
+    )
+    windows = [(1200, 1600), (1600, 2000)]
+    first = plan_line_bursts(style, 0, 1000, 4000, 3900, windows)
+    rings = [b for b in first if b["kind"] == "ripple"]
+    assert rings, "涟漪 burst 应存在"
+    for burst in rings:
+        assert burst["paint"]["stroke_width_px"] == 0.0
+        assert burst["paint"]["stroke2_width_px"] == 0.0
+    # 非涟漪档（twinkle）仍带描边——开关只作用于涟漪。
+    twinkle_style = Style(
+        font_size_px=64,
+        sing_fx="twinkle",
+        karaoke_anim="none",
+        fx_particle_color_mode="follow_after",
+        stroke_width_px=8,
+        stroke2_enabled=True,
+        stroke2_width_px=4,
+        karaoke_colors=_karaoke_matrix("#40E0FF", "#FF5A6F"),
+    )
+    twinkle = plan_line_bursts(twinkle_style, 0, 1000, 4000, 3900, windows)
+    spec = next(b for b in twinkle if b["kind"] == "twinkle")["paint"]
+    assert spec["stroke_width_px"] > 0.0
+    assert spec["stroke2_width_px"] > 0.0
+    # 缓存 identity：同参数二次规划，spec 与实色对象复用（只烘焙一次）。
+    again = plan_line_bursts(style, 0, 1000, 4000, 3900, windows)
+    ring_a = next(b for b in first if b["kind"] == "ripple")
+    ring_b = next(b for b in again if b["kind"] == "ripple")
+    assert ring_a["paint"] is ring_b["paint"]
+    assert ring_a["color"] is ring_b["color"] or ring_a["color"] == ring_b["color"]
+    # 样式对象更换（编辑后）后缓存不串：新解析、值正确。
+    edited = Style(
+        font_size_px=64,
+        sing_fx="ripple",
+        karaoke_anim="none",
+        fx_particle_color_mode="follow_after",
+        stroke_width_px=8,
+        karaoke_colors=_karaoke_matrix("#40E0FF", "#112233"),
+    )
+    edited_ring = next(
+        b
+        for b in plan_line_bursts(edited, 0, 1000, 4000, 3900, windows)
+        if b["kind"] == "ripple"
+    )
+    assert edited_ring["color"] == "#112233"
+    clear_particle_paint_cache()
+
+
+def test_painter_follow_mode_uses_each_chars_role(qapp):
+    """回归护栏（2026-10）：CPU painter 必须把逐字角色样式传入规划器。
+
+    曾出现 char_styles 已解析却未传给 plan_line_bursts 的漏洞——CPU 逐字
+    粒子全回落行样式而 GPU 逐字生效，两端口径分歧。
+    """
+    from PyQt6.QtGui import QImage
+
+    from krok_helper.subtitle_render.domain.models import SubtitleStyleScheme
+    from krok_helper.subtitle_render.domain.paint import (
+        KaraokeColorState,
+        KaraokeColors,
+    )
+    from krok_helper.subtitle_render.domain.timing import TimingChar, TimingTrack
+    from krok_helper.subtitle_render.engine.painter import paint_frame
+    from krok_helper.subtitle_render.engine.render.effects.particles import (
+        clear_particle_paint_cache,
+    )
+
+    clear_particle_paint_cache()
+    grad_h = _gradient_fill("gradient_horizontal", "#FF8800", "#00FF88")
+    scheme = SubtitleStyleScheme(
+        karaoke_colors=KaraokeColors(
+            after=KaraokeColorState(text=grad_h)
+        )
+    )
+    first = TimingChar("あ", 500)
+    first.role_label = "主唱"
+    track = TimingTrack(
+        lines=[TimingLine(chars=[first, TimingChar("い", 1200)], end_ms=1800)]
+    )
+    style = Style(
+        font_size_px=64,
+        sing_fx="twinkle",
+        karaoke_anim="utopia",
+        fx_particle_size_em=0.8,
+        fx_particle_count=16,
+        fx_particle_color_mode="follow_after",
+        custom_style_schemes={"主唱": scheme},
+        karaoke_colors=KaraokeColors(
+            # 行样式走字后 = 纯红：不产生绿端像素。
+            after=KaraokeColorState(
+                text=_gradient_fill("solid", "#FF0000", "#FF0000")
+            )
+        ),
+    )
+    img = QImage(800, 450, QImage.Format.Format_ARGB32_Premultiplied)
+    img.fill(0xFF101010)
+    paint_frame(img, track, 700, style)
+    greenish = 0
+    for y in range(0, img.height(), 2):
+        for x in range(0, img.width(), 2):
+            px = img.pixel(x, y)
+            r, g, b = (px >> 16) & 0xFF, (px >> 8) & 0xFF, px & 0xFF
+            if g > 130 and g > r + 30 and g > b + 10:
+                greenish += 1
+    # 「主唱」字符的粒子必须吃到横向渐变的绿端；行样式（纯红）不可能
+    # 产生绿——绿像素存在即证明逐字角色样式生效。
+    assert greenish > 10, f"逐字角色粒子未生效，绿端像素 {greenish}"
+    clear_particle_paint_cache()

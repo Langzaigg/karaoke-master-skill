@@ -32,7 +32,8 @@ from __future__ import annotations
 import math
 import os
 from dataclasses import dataclass
-from threading import local as thread_local
+from collections import OrderedDict
+from threading import Lock, local as thread_local
 from typing import Hashable, Optional
 
 import numpy as np
@@ -149,6 +150,9 @@ from krok_helper.subtitle_render.engine.render.frame_analysis import (
 )
 from krok_helper.subtitle_render.engine.value_signature import (
     value_signature as _value_signature,
+)
+from krok_helper.subtitle_render.serialization.paint import (
+    paint_fill_from_dict as _paint_fill_from_dict,
 )
 from krok_helper.subtitle_render.engine.layout.plan.semantic import (
     LayoutPlanResolvers,
@@ -3512,6 +3516,166 @@ def _fx_sprite_path(name: str) -> QPainterPath:
     return path
 
 
+def _fx_fill_color_at(fill, position: float) -> QColor:
+    """按位置采样一份 PaintFill（0..1）：渐变线性插值、拼色分段常数。
+
+    与 D2D 侧 ``colorAt(paint, p)`` 镜像（8bit 通道线性插值，两端同式）。
+    """
+
+    stops = (
+        fill.split_stops
+        if fill.mode == "split_vertical"
+        else fill.gradient_stops
+    ) or [(0, fill.start_color), (100, fill.end_color)]
+    points = sorted(
+        (float(pos) / 100.0, QColor(str(color))) for pos, color in stops
+    )
+    if not points:
+        return QColor("#FFFFFF")
+    if fill.mode == "split_vertical":
+        # 拼色带语义（与 createPaintBrush 的重复停止点硬边一致）：每个
+        # 停止点标记**该色起点**，取最后一个起点 ≤ position 的颜色。
+        active = points[0][1]
+        for pos, color in points:
+            if position >= pos:
+                active = color
+            else:
+                break
+        return active
+    if position <= points[0][0]:
+        return points[0][1]
+    for index in range(len(points) - 1):
+        p0, c0 = points[index]
+        p1, c1 = points[index + 1]
+        if position <= p1:
+            span = p1 - p0
+            t = (position - p0) / span if span > 0.0 else 0.0
+            r0, g0, b0, a0 = c0.red(), c0.green(), c0.blue(), c0.alpha()
+            r1, g1, b1, a1 = c1.red(), c1.green(), c1.blue(), c1.alpha()
+            return QColor(
+                int(round(r0 + (r1 - r0) * t)),
+                int(round(g0 + (g1 - g0) * t)),
+                int(round(b0 + (b1 - b0) * t)),
+                int(round(a0 + (a1 - a0) * t)),
+            )
+    return points[-1][1]
+
+
+# 粒子装饰笔刷缓存：em 框恒为 ±500，同一填充签名全帧
+# 全粒子复用一把笔刷——线性渐变是逐停止点构造，逐 burst 逐
+# 帧重建曾是 CPU 粒子路径的性能大头（2026-10 用户口径：用过的粒子+角色
+# 组合只烘焙一次）。拼色笔刷在 fills 侧已按 (高=1000, 停止点) 缓存，纯色
+# 构造极廉价，均不入本缓存；图片笔刷自管失效，同样直通。
+_FX_BRUSH_CACHE_MAX = 32
+_FX_BRUSH_CACHE: "OrderedDict[tuple, QBrush]" = OrderedDict()
+_FX_BRUSH_CACHE_LOCK = Lock()
+
+
+def _fx_particle_brush(fill) -> QBrush:
+    """精灵烘焙用的层笔刷：线性渐变按签名缓存；solid/split/image 直通
+    （split 在 fills 侧已缓存、image 自管失效、solid 构造极廉价）。"""
+
+    from krok_helper.subtitle_render.engine.render.effects.fills import (
+        linear_gradient_brush,
+    )
+
+    em_rect = QRectF(-500.0, -500.0, 1000.0, 1000.0)
+    if fill.mode not in {"gradient_horizontal", "gradient_vertical"}:
+        return _brush_for_fill(fill, em_rect)
+    key = ("linear", _fill_signature(fill))
+    with _FX_BRUSH_CACHE_LOCK:
+        cached = _FX_BRUSH_CACHE.get(key)
+        if cached is not None:
+            _FX_BRUSH_CACHE.move_to_end(key)
+            return cached
+    brush = linear_gradient_brush(
+        fill,
+        em_rect,
+        0 if fill.mode == "gradient_horizontal" else 90,
+    )
+    with _FX_BRUSH_CACHE_LOCK:
+        if len(_FX_BRUSH_CACHE) >= _FX_BRUSH_CACHE_MAX:
+            _FX_BRUSH_CACHE.popitem(last=False)
+        _FX_BRUSH_CACHE[key] = brush
+    return brush
+
+
+# 整粒子精灵烘焙缓存（2026-10 用户口径：一只粒子只烘焙一次，之后全部
+# 是针对该精灵的变换动画）：键 = sprite 形状 × 填充 × 描边/二重描边（含
+# 宽度），值 = (包络半宽 em, 512px ARGB 精灵图)。
+_FX_SPRITE_IMAGE_CACHE_MAX = 24
+_FX_SPRITE_IMAGE_CACHE: "OrderedDict[tuple, tuple[float, QImage]]" = OrderedDict()
+
+
+def _fx_baked_sprite_image(
+    kind: str,
+    fill,
+    stroke_fill,
+    stroke2_fill,
+    stroke_em: float,
+    stroke2_em: float,
+) -> tuple[float, QImage]:
+    """返回 (包络半宽 em, 精灵图)；键含全部绘制输入，全粒子复用。
+
+    涟漪的非横向渐变不走精灵（每环颜色随扩散进度变化，无法烘成单张）
+    ——由 ``_paint_line_fx_particles`` 按径向采样逐环实心绘制。
+    """
+
+    key = (
+        kind,
+        _fill_signature(fill),
+        _fill_signature(stroke_fill) if stroke_fill is not None else None,
+        _fill_signature(stroke2_fill) if stroke2_fill is not None else None,
+        round(stroke_em, 2),
+        round(stroke2_em, 2),
+    )
+    with _FX_BRUSH_CACHE_LOCK:
+        cached = _FX_SPRITE_IMAGE_CACHE.get(key)
+        if cached is not None:
+            _FX_SPRITE_IMAGE_CACHE.move_to_end(key)
+            return cached
+    from krok_helper.subtitle_render.engine.render.effects.particles import (
+        sprite_for_kind,
+    )
+
+    # 包络：sprite ±500 em + 描边笔宽的一半（±2em 余量）。
+    extent = min(500.0 + (stroke_em + stroke2_em) * 0.5 + 2.0, 1024.0)
+    size = 512
+    image = QImage(size, size, QImage.Format.Format_ARGB32_Premultiplied)
+    image.fill(Qt.GlobalColor.transparent)
+    bake = QPainter(image)
+    try:
+        bake.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        bake.scale(size / (extent * 2.0), size / (extent * 2.0))
+        bake.translate(extent, extent)
+        path = _fx_sprite_path(sprite_for_kind(kind))
+        if stroke2_em >= 1.0:
+            pen2 = QPen(
+                _fx_particle_brush(stroke2_fill), stroke_em + stroke2_em
+            )
+            pen2.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
+            pen2.setCapStyle(Qt.PenCapStyle.RoundCap)
+            bake.setPen(pen2)
+            bake.drawPath(path)
+        if stroke_em >= 1.0:
+            pen = QPen(_fx_particle_brush(stroke_fill), stroke_em)
+            pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
+            pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+            bake.setPen(pen)
+            bake.drawPath(path)
+        bake.setPen(Qt.PenStyle.NoPen)
+        bake.setBrush(_fx_particle_brush(fill))
+        bake.drawPath(path)
+    finally:
+        bake.end()
+    entry = (extent, image)
+    with _FX_BRUSH_CACHE_LOCK:
+        if len(_FX_SPRITE_IMAGE_CACHE) >= _FX_SPRITE_IMAGE_CACHE_MAX:
+            _FX_SPRITE_IMAGE_CACHE.popitem(last=False)
+        _FX_SPRITE_IMAGE_CACHE[key] = entry
+    return entry
+
+
 def _paint_line_fx_particles(
     painter: QPainter,
     layout: _LineLayout,
@@ -3528,6 +3692,9 @@ def _paint_line_fx_particles(
 
     burst 规划与渲染 IR 同源（plan_line_bursts），锚点用 painter 自身布局
     解析；轨迹见 particles.burst_particles_at（与 C++ 镜像）。竖排暂不支持。
+    颜色模式非单色时 burst 带 ``paint`` 装饰规格：sprite 按完整 PaintFill
+    绘制（渐变/拼色直接复用、描边/二重描边同比缩放），涟漪的非横向渐变
+    做径向映射（每环按扩散进度在渐变轴上采样实心色）——与 D2D 侧同口径。
     """
     if style.vertical:
         return
@@ -3551,18 +3718,55 @@ def _paint_line_fx_particles(
     display_end = (
         int(display_end_ms) if display_end_ms is not None else _line_end_ms(render_line)
     )
-    bursts = plan_line_bursts(
-        style,
-        line_index,
-        display_start,
-        display_end,
-        _line_end_ms(render_line),
-        layout.intervals,
-        char_visible=[
-            not str(getattr(ch, "text", "") or "").isspace()
+    # 布局级缓存：char_styles 解析（replace 整份 Style）与 burst 规划
+    #（含装饰规格构建）都与 t 无关、只随样式/显示窗变化——逐帧重算曾是
+    # CPU 粒子路径的大头。键对象被条目强引用，防 id() 复用串缓存。
+    plan_cache = getattr(layout, "_fx_plan_cache", None)
+    if (
+        plan_cache is None
+        or plan_cache[0] is not style
+        or plan_cache[1] is not render_line
+        or plan_cache[2] != display_start
+        or plan_cache[3] != display_end
+        or plan_cache[4] != line_index
+    ):
+        # 「跟随字体」逐字取角色配色：与 GPU protocol 同一解析式（歌手
+        # 方案已并入行样式，字符 role_label 再叠加）。行内英数描宽的
+        # 拉丁变体不参与（两条后端统一用角色轨口径，避免逐字拉丁差异
+        # 造成两端正宗分歧）。
+        char_styles = [
+            _style_for_role(style, getattr(ch, "role_label", None))
             for ch in render_line.chars
-        ],
-    )
+        ]
+        bursts = plan_line_bursts(
+            style,
+            line_index,
+            display_start,
+            display_end,
+            _line_end_ms(render_line),
+            layout.intervals,
+            char_visible=[
+                not str(getattr(ch, "text", "") or "").isspace()
+                for ch in render_line.chars
+            ],
+            char_styles=char_styles,
+        )
+        # LineLayout 是 frozen dataclass：绕过 __setattr__ 挂缓存。
+        object.__setattr__(
+            layout,
+            "_fx_plan_cache",
+            (
+                style,
+                render_line,
+                display_start,
+                display_end,
+                line_index,
+                char_styles,
+                bursts,
+            ),
+        )
+    else:
+        bursts = plan_cache[6]
     if not bursts:
         return
     char_x_ranges = layout.char_x_ranges
@@ -3575,10 +3779,61 @@ def _paint_line_fx_particles(
     )
     line_box_w = float(line_right - line_left)
     line_box_h = float(metrics.height())
-    color = QColor(style.fx_particle_color)
+    # 颜色按 burst 下发（plan_line_bursts 已按颜色模式解析；入退场动画
+    # 粒子默认固定白档）——与 D2D 侧 burst.color 同口径。非单色模式另带
+    # ``paint`` 完整装饰规格：填充/描边按 PaintFill 绘制（sprite 为 ±500
+    # em 空间，笔刷逻辑坐标同样用 em 框，随粒子的平移/旋转/缩放变换，
+    # 并按填充签名缓存复用）。
+    brushes: dict[str, QBrush] = {}
+    radial_brushes: dict[float, QBrush] = {}
     for burst in bursts:
         if bool(burst["front"]) != front:
             continue
+        spec = burst.get("paint")
+        burst_size = float(burst["size_px"])
+        kind = str(burst["kind"])
+        if spec is not None:
+            fill = _paint_fill_from_dict(spec["fill"])
+            stroke_fill = _paint_fill_from_dict(spec["stroke"])
+            stroke2_fill = _paint_fill_from_dict(spec["stroke2"])
+            stroke_em = (
+                float(spec["stroke_width_px"]) / max(burst_size, 1.0) * 1000.0
+            )
+            stroke2_em = (
+                float(spec["stroke2_width_px"]) / max(burst_size, 1.0) * 1000.0
+            )
+            # 涟漪 + 非横向渐变（纵向渐变/拼色）→ 径向映射：渐变轴映射到
+            # 半径方向，每颗环按自己的扩散进度在渐变轴上采样一个实心色
+            #（内圈新环=起点色，外圈老环=终点色；环是发丝线，跨环带的
+            # 渐变本就不可见）。每环颜色随生命期变化，不能烘成单张精灵。
+            radial_ring = kind == "ripple" and fill.mode in {
+                "gradient_vertical",
+                "split_vertical",
+            }
+            if radial_ring:
+                sprite_image = None
+                sprite_extent = 512.0
+            else:
+                # 其余配方：整粒子精灵（含描边）只烘焙一次，逐粒子是一次
+                # 平移/旋转/缩放的平滑贴图。
+                sprite_extent, sprite_image = _fx_baked_sprite_image(
+                    kind,
+                    fill,
+                    stroke_fill if stroke_em >= 1.0 else None,
+                    stroke2_fill if stroke2_em >= 1.0 else None,
+                    stroke_em,
+                    stroke2_em,
+                )
+        else:
+            fill = None
+            radial_ring = False
+            sprite_image = None
+            sprite_extent = 512.0
+            color_key = str(burst["color"])
+            fill_brush = brushes.get(color_key)
+            if fill_brush is None:
+                fill_brush = QBrush(QColor(color_key))
+                brushes[color_key] = fill_brush
         if burst["anchor"] == "char":
             char_index = int(burst["char_index"])
             if char_index >= len(char_x_ranges):
@@ -3608,9 +3863,47 @@ def _paint_line_fx_particles(
                 painter.rotate(state.rotation_deg)
                 scale = state.size_px / 1000.0
                 painter.scale(scale, scale)
-                painter.setPen(Qt.PenStyle.NoPen)
-                painter.setBrush(QBrush(color))
                 painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+                if radial_ring:
+                    # 径向采样色：环半径由 0.25×size 扩散到 1.10×size，
+                    # 归一化进度 = (size/size_burst - 0.25)/0.85，正好是
+                    # 求值器的 eased——量化到 1/32 档与 GPU 侧同口径。
+                    eased = (state.size_px / max(burst_size, 1.0) - 0.25) / 0.85
+                    eased = min(max(eased, 0.0), 1.0)
+                    eased = min(round(eased * 32.0), 32) / 32.0
+                    radial_brush = radial_brushes.get(eased)
+                    if radial_brush is None:
+                        radial_brush = QBrush(
+                            _fx_fill_color_at(fill, eased)
+                        )
+                        radial_brushes[eased] = radial_brush
+                    painter.setPen(Qt.PenStyle.NoPen)
+                    painter.setBrush(radial_brush)
+                    painter.drawPath(sprite)
+                    continue
+                if sprite_image is not None:
+                    # 烘焙精灵：一次平滑缩放贴图（平移/旋转/缩放/透明度
+                    # 都在变换里），无逐像素渐变光栅。
+                    painter.setRenderHint(
+                        QPainter.RenderHint.SmoothPixmapTransform, True
+                    )
+                    painter.drawImage(
+                        QRectF(
+                            -sprite_extent,
+                            -sprite_extent,
+                            sprite_extent * 2.0,
+                            sprite_extent * 2.0,
+                        ),
+                        sprite_image,
+                    )
+                    continue
+                if fill is None:
+                    painter.setPen(Qt.PenStyle.NoPen)
+                    painter.setBrush(fill_brush)
+                    painter.drawPath(sprite)
+                    continue
+                painter.setPen(Qt.PenStyle.NoPen)
+                painter.setBrush(fill_brush)
                 painter.drawPath(sprite)
             finally:
                 painter.restore()

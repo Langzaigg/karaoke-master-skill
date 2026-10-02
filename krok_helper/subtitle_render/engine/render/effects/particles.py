@@ -9,14 +9,23 @@
   由既有双后端布局奇偶校验保证。
 - sprite 轮廓是本模块定义的常量（M/L/C/Q/Z，1000 单位 em 空间、以 (0,0) 为
   中心），随场景 IR 下发（``fx_sprites``），C++ 不内置副本——单一事实源。
+- 粒子颜色模式（单独颜色 / 跟随字体·走字前后 / 复用配色方案）在规划期解析
+  成每 burst 的实色（#RRGGBB）下发，两条后端按 burst 颜色实心绘制、天然同色。
 """
 
 from __future__ import annotations
 
 import math
+from collections import OrderedDict
 from dataclasses import dataclass
 
 from krok_helper.subtitle_render.domain.models import Style
+from krok_helper.subtitle_render.domain.paint import KaraokeColorState, PaintFill
+from krok_helper.subtitle_render.engine.style.style_semantics import (
+    appearance_role_source,
+    effective_karaoke_colors,
+)
+from krok_helper.subtitle_render.serialization.paint import paint_fill_to_dict
 from krok_helper.subtitle_render.engine.render.elements.horizontal.transitions import (
     fx_unit_hash,
 )
@@ -38,13 +47,184 @@ RIPPLE_CHAR_STAGGER_MS = 350
 # 粒子拼接/消散（assemble / dissolve）：每字飞入/飞离的行程与寿命。
 ASSEMBLE_TRAVEL_EM = 2.2
 ASSEMBLE_LIFE_MS = 320
-# 出入场动画驱动的粒子（星光/涟漪/音符/拼接/消散）使用固定默认档
-#（用户口径：粒子旋钮只影响唱字装饰粒子）。
+# 出入场动画驱动的粒子（星光/涟漪/音符/拼接/消散）默认用固定默认档；
+# 开启 ``fx_apply_to_entry_exit`` 后颜色与尺寸改吃粒子旋钮（数量仍固定）。
 ANIM_PARTICLE_SIZE_EM = 0.40
 ANIM_PARTICLE_COUNT = 14
 ANIM_PARTICLE_COLOR = "#FFFFFF"
 # sparkle 整句扫过的额外错峰时长（按粒子横向位置从一端排到另一端）。
 SPARKLE_SWEEP_MS = 350
+
+
+# ---------------------------------------------------------------------------
+# 颜色模式解析：仿扫字线的 color / follow_before / follow_after / role
+# ---------------------------------------------------------------------------
+
+def _parse_hex_color(value: str) -> tuple[int, int, int] | None:
+    """Parse ``#RRGGBB`` / ``#AARRGGBB`` into RGB (alpha dropped)."""
+
+    text = str(value or "").strip()
+    if not text.startswith("#") or len(text) not in {7, 9}:
+        return None
+    digits = text[1:]
+    if any(character not in "0123456789abcdefABCDEF" for character in digits):
+        return None
+    if len(digits) == 8:
+        digits = digits[2:]
+    return (
+        int(digits[0:2], 16),
+        int(digits[2:4], 16),
+        int(digits[4:6], 16),
+    )
+
+
+def _average_hex_color(colors: list[str], fallback: str) -> str:
+    """平均若干 #RRGGBB 得到一个实色（逐通道算术平均，非法色跳过）。"""
+
+    parsed = [color for color in (_parse_hex_color(c) for c in colors) if color]
+    if not parsed:
+        return fallback
+    red = sum(channel[0] for channel in parsed) // len(parsed)
+    green = sum(channel[1] for channel in parsed) // len(parsed)
+    blue = sum(channel[2] for channel in parsed) // len(parsed)
+    return f"#{red:02X}{green:02X}{blue:02X}"
+
+
+def fill_to_solid_color(fill: PaintFill, fallback: str) -> str:
+    """把一份 PaintFill 折算成粒子可用的实色（#RRGGBB）。
+
+    solid 直接取色；渐变/拼色取全部停止色的平均（sprite 是小尺寸实心
+    剪影，平均色最接近整体观感）；图片填充取不到代表色，回退 fallback。
+    """
+
+    if fill.mode == "image":
+        return fallback
+    if fill.mode == "gradient_horizontal" or fill.mode == "gradient_vertical":
+        stops = [color for _position, color in (fill.gradient_stops or [])]
+        if not stops:
+            stops = [fill.start_color, fill.end_color]
+        return _average_hex_color(stops, fallback)
+    if fill.mode == "split_vertical":
+        stops = [color for _position, color in (fill.split_stops or [])]
+        if not stops:
+            stops = [fill.split_top_color, fill.split_bottom_color]
+        return _average_hex_color(stops, fallback)
+    return _average_hex_color([fill.color], fallback)
+
+
+def _particle_color_state(
+    style: Style,
+    char_style: Style | None,
+    mode: str,
+) -> tuple[Style, KaraokeColorState] | None:
+    """解析 (装饰来源样式, 走字前/后配色态)；``color`` 档与悬空引用为
+    ``None``（调用方回退单独颜色）。
+
+    ``follow_before`` / ``follow_after`` 用**当前字符**自己的角色方案
+    （``char_style``，由调用方按 ``role_label`` 解析；整行锚点或未提供时
+    回落行样式——歌手行的行样式已合并该歌手方案）；``role`` 用
+    ``fx_particle_role_name`` 指定来源的走字后态（扫字线同口径）。
+    """
+
+    if mode == "follow_before":
+        source = char_style if char_style is not None else style
+        return source, effective_karaoke_colors(source).before
+    if mode == "follow_after":
+        source = char_style if char_style is not None else style
+        return source, effective_karaoke_colors(source).after
+    if mode == "role":
+        resolved = appearance_role_source(
+            style, getattr(style, "fx_particle_role_name", None)
+        )
+        if resolved is None:
+            return None
+        return resolved, effective_karaoke_colors(resolved).after
+    return None
+
+
+def particle_solid_color(style: Style, char_style: Style | None = None) -> str:
+    """按 ``fx_particle_color_mode`` 解析粒子实色（行级口径，纯函数）。
+
+    ``follow_before`` / ``follow_after`` 取**当前字符**角色方案（缺省回落
+    行样式）有效配色的走字前/后「主文字」填充；``role`` 取
+    ``fx_particle_role_name`` 指定来源（扫字线「复用配色方案」同口径）
+    的「走字后-主文字」填充；填充折算见 :func:`fill_to_solid_color`。
+    悬空引用 / 未知模式回退 ``color`` 档的 ``fx_particle_color``。
+    """
+
+    fallback = str(getattr(style, "fx_particle_color", "") or "#FFFFFF")
+    mode = str(getattr(style, "fx_particle_color_mode", "color") or "color")
+    resolved = _particle_color_state(style, char_style, mode)
+    if resolved is None:
+        return fallback
+    _source, state = resolved
+    return fill_to_solid_color(state.text, fallback)
+
+
+def particle_paint_spec(
+    style: Style,
+    char_style: Style | None,
+    size_px: float,
+    *,
+    include_strokes: bool = True,
+) -> dict[str, object] | None:
+    """按颜色模式解析成 burst 级**完整装饰规格**（IR dict，随 burst 下发）。
+
+    角色装饰比单色丰富——「跟随字体 / 复用配色方案」时不再折实色，而是
+    把配色态的三层填充（主文字/描边/二重描边）原样下发，两条后端按
+    PaintFill 完整绘制（渐变/拼色直接复用；涟漪的非横向渐变由各端做径
+    向映射——每环按扩散进度取实心色）。描边宽度按 粒子尺寸/该来源字号 同比缩放（上限半个粒子
+    边长，指示灯装饰管线同款映射）。``include_strokes=False``（涟漪光环）
+    描边/二重描边宽恒 0——环体是发丝线，叠描边会显著变粗（2026-10 用户
+    口径）。图片填充暂折为单独颜色（实色回退，两端一致）。``color`` 档
+    与悬空引用返回 ``None``——burst 只带实色 ``color``，走旧的实心路径
+    （旧 sidecar 兼容）。
+    """
+
+    mode = str(getattr(style, "fx_particle_color_mode", "color") or "color")
+    resolved = _particle_color_state(style, char_style, mode)
+    if resolved is None:
+        return None
+    source, state = resolved
+    fallback = str(getattr(style, "fx_particle_color", "") or "#FFFFFF")
+
+    def _layer_fill(fill: PaintFill) -> dict[str, object]:
+        if fill.mode == "image":
+            # 图片填充没有跨端一致的笔刷映射（位图平移与粒子旋转变换
+            # 复合两端不同），折成单独颜色实心。
+            solid = PaintFill(
+                mode="solid",
+                color=fallback,
+                start_color=fallback,
+                end_color=fallback,
+                gradient_stops=[(0, fallback), (100, fallback)],
+                split_top_color=fallback,
+                split_bottom_color=fallback,
+                split_stops=[(0, fallback), (100, fallback)],
+            )
+            return paint_fill_to_dict(solid)
+        return paint_fill_to_dict(fill)
+
+    scale = float(size_px) / max(float(source.font_size_px or 0.0), 1.0)
+    half = max(float(size_px) / 2.0, 1.0)
+    if include_strokes:
+        stroke_width = min(max(int(source.stroke_width_px or 0) * scale, 0.0), half)
+        stroke2_raw = (
+            max(int(source.stroke2_width_px or 0), 0)
+            if source.stroke2_enabled
+            else 0
+        )
+        stroke2_width = min(max(stroke2_raw * scale, 0.0), half)
+    else:
+        stroke_width = 0.0
+        stroke2_width = 0.0
+    return {
+        "fill": _layer_fill(state.text),
+        "stroke": _layer_fill(state.stroke),
+        "stroke2": _layer_fill(state.stroke2),
+        "stroke_width_px": round(stroke_width, 3),
+        "stroke2_width_px": round(stroke2_width, 3),
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -170,6 +350,75 @@ def sprite_for_kind(kind: str) -> str:
 # burst 规划：同一函数供渲染 IR（native/protocol）与 QPainter 调用
 # ---------------------------------------------------------------------------
 
+# ---------------------------------------------------------------------------
+# 装饰规格缓存：同一「样式 × 角色方案 × 粒子尺寸」组合只解析一次，
+# 之后所有 burst / 所有帧复用同一份规格 dict（含涟漪径向采样的输入）。
+# 2026-10 用户口径：用过的粒子+角色组合只烘焙一次。强引用持有键里的
+# Style，防 id() 复用串缓存；LRU 上限覆盖「多角色行 × 数档尺寸」。
+# ---------------------------------------------------------------------------
+_PAINT_CACHE_MAX = 64
+_PAINT_CACHE: "OrderedDict[tuple, tuple[tuple[Style, Style | None], dict[str, object] | None]]" = OrderedDict()
+# 实色回退同理缓存（渐变平均色逐 burst 重算同样昂贵）。
+_SOLID_CACHE_MAX = 64
+_SOLID_CACHE: "OrderedDict[tuple, tuple[tuple[Style, Style | None], str]]" = OrderedDict()
+
+
+def _cached_particle_solid(style: Style, char_style: Style | None) -> str:
+    key = (id(style), id(char_style) if char_style is not None else 0)
+    entry = _SOLID_CACHE.get(key)
+    if entry is not None and entry[0][0] is style and (
+        entry[0][1] is char_style
+        if char_style is not None
+        else entry[0][1] is None
+    ):
+        _SOLID_CACHE.move_to_end(key)
+        return entry[1]
+    color = particle_solid_color(style, char_style)
+    if len(_SOLID_CACHE) >= _SOLID_CACHE_MAX:
+        _SOLID_CACHE.popitem(last=False)
+    _SOLID_CACHE[key] = ((style, char_style), color)
+    return color
+
+
+def _cached_particle_paint(
+    style: Style,
+    char_style: Style | None,
+    size_px: float,
+    *,
+    include_strokes: bool,
+) -> dict[str, object] | None:
+    key = (
+        id(style),
+        id(char_style) if char_style is not None else 0,
+        round(float(size_px), 3),
+        bool(include_strokes),
+    )
+    entry = _PAINT_CACHE.get(key)
+    if entry is not None:
+        # 键对象仍被条目强引用：id 未被复用，命中即安全。
+        if entry[0][0] is style and (
+            entry[0][1] is char_style
+            if char_style is not None
+            else entry[0][1] is None
+        ):
+            _PAINT_CACHE.move_to_end(key)
+            return entry[1]
+    spec = particle_paint_spec(
+        style, char_style, size_px, include_strokes=include_strokes
+    )
+    if len(_PAINT_CACHE) >= _PAINT_CACHE_MAX:
+        _PAINT_CACHE.popitem(last=False)
+    _PAINT_CACHE[key] = ((style, char_style), spec)
+    return spec
+
+
+def clear_particle_paint_cache() -> None:
+    """清空装饰规格缓存（测试隔离用；常规渲染无需失效——键含完整签名）。"""
+
+    _PAINT_CACHE.clear()
+    _SOLID_CACHE.clear()
+
+
 def plan_line_bursts(
     style: Style,
     line_index: int,
@@ -179,6 +428,7 @@ def plan_line_bursts(
     char_windows: list[tuple[int, int]],
     *,
     char_visible: list[bool] | None = None,
+    char_styles: list[Style | None] | None = None,
 ) -> list[dict[str, object]]:
     """把 style 的粒子档位规划成逐行 burst 列表（IR-ready dict）。
 
@@ -188,25 +438,69 @@ def plan_line_bursts(
     但窗口延伸到轨迹自然播完（不受唱字窗约束）。
     尺寸语义：``fx_particle_size_em`` 为相对主字号的 em 比例（0.40 =
     40% 字号），此处按全局字号折算成像素下发，两后端同值。
+    颜色语义：``color`` 恒为实色回退（旧 sidecar 兼容）；颜色模式非
+    ``color`` 时另附 ``paint`` 完整装饰规格（填充/描边/二重描边 PaintFill
+    + 已按粒子尺寸缩放的描边宽，见 :func:`particle_paint_spec`），两条
+    后端优先按 ``paint`` 绘制。入退场动画粒子默认固定白档，开启
+    ``fx_apply_to_entry_exit`` 后改吃粒子旋钮的颜色与尺寸（数量恒固定）。
     ``line_index`` 参与种子，保证同曲目每行轨迹不同且重开可复现。
     ``char_visible``（与 char_windows 等长）：False = 空白字符（空格等
     无字形内容）——唱字粒子跳过（无走字内容），出入场仍整行参与。
+    ``char_styles``（可选，与 char_windows 等长）：逐字符的角色样式
+    （调用方按 ``role_label`` 解析后传入）——「跟随字体」按**当前字符**
+    自己的角色配色取色；未提供时回落行样式（歌手行已合并歌手方案）。
     """
     bursts: list[dict[str, object]] = []
     count = max(2, min(64, int(style.fx_particle_count)))
     font_px = max(float(getattr(style, "font_size_px", 0.0) or 0.0), 1.0)
     size = font_px * max(0.05, min(2.0, float(getattr(style, "fx_particle_size_em", 0.40))))
-    color = str(style.fx_particle_color)
     seed_base = ((int(line_index) & 0xFFFF) * 0x9E37) & 0xFFFFFFFF
     char_count = len(char_windows)
     stagger = (
         RIPPLE_CHAR_STAGGER_MS // (char_count - 1) if char_count > 1 else 0
     )
-    # 出入场动画粒子：固定默认档（不受粒子旋钮影响）；但编排窗口随
-    # 「入场/退场动画时长」旋钮等比缩放（0 = 默认 600ms 基准）。
-    anim_size = font_px * ANIM_PARTICLE_SIZE_EM
+    # 出入场动画粒子：默认固定档（数量恒固定）；开启「联动入退场」后
+    # 颜色与尺寸改吃粒子旋钮（颜色模式同样生效）。编排窗口仍随「入场/
+    # 退场动画时长」旋钮等比缩放（0 = 默认 600ms 基准）。
+    apply_to_anim = bool(getattr(style, "fx_apply_to_entry_exit", False))
+    anim_size = size if apply_to_anim else font_px * ANIM_PARTICLE_SIZE_EM
     anim_count = ANIM_PARTICLE_COUNT
-    anim_color = ANIM_PARTICLE_COLOR
+
+    def _char_style(char_index: int | None) -> Style | None:
+        if (
+            char_index is None
+            or char_styles is None
+            or not (0 <= char_index < len(char_styles))
+        ):
+            return None
+        return char_styles[char_index]
+
+    def _burst_paint(
+        char_index: int | None,
+        burst_size: float,
+        *,
+        anim: bool,
+        ring: bool = False,
+    ) -> dict[str, object]:
+        """burst 的颜色字段：固定白档 / 实色回退 (+ 非单色模式的 paint 规格)。
+
+        规格按「样式 × 角色方案 × 尺寸 × 是否涟漪」缓存——同一组合全帧
+        复用一份（见 :func:`_cached_particle_paint`）。涟漪光环不带描边
+        （``include_strokes=False``）：环体是发丝线，叠描边显著变粗。
+        """
+
+        if anim and not apply_to_anim:
+            return {"color": ANIM_PARTICLE_COLOR}
+        char_style = _char_style(char_index)
+        fields: dict[str, object] = {
+            "color": _cached_particle_solid(style, char_style)
+        }
+        spec = _cached_particle_paint(
+            style, char_style, burst_size, include_strokes=not ring
+        )
+        if spec is not None:
+            fields["paint"] = spec
+        return fields
 
     def _duration_scale(configured: int) -> float:
         total = min(max(int(configured), 120), 3000)
@@ -226,11 +520,9 @@ def plan_line_bursts(
         *,
         stagger_ms: int,
         ring_size: float | None = None,
-        ring_color: str | None = None,
         scale: float = 1.0,
     ) -> None:
         px = anim_size * 3.6 if ring_size is None else ring_size
-        paint = anim_color if ring_color is None else ring_color
         for char_index in range(char_count):
             start = int(base_ms) + int(stagger_ms * scale) * char_index
             bursts.append({
@@ -242,7 +534,8 @@ def plan_line_bursts(
                 "seed": (seed_base + seed_offset + char_index) & 0xFFFFFFFF,
                 # 水波纹基准直径 ≈ 1.4× 字高，扩散峰值约 1.6× 字高。
                 "size_px": px, "travel_px": 0.0, "front": False,
-                "sweep": 0, "color": paint,
+                "sweep": 0,
+                **_burst_paint(char_index, px, anim=True, ring=True),
             })
 
     entry_anim = str(getattr(style, "entry_anim", "none") or "none")
@@ -254,7 +547,8 @@ def plan_line_bursts(
             + int(SPARKLE_ENTRY_LIFE_MS * entry_scale),
             "count": anim_count, "seed": (seed_base + 1) & 0xFFFFFFFF,
             "size_px": anim_size, "travel_px": anim_size * 3.2, "front": True,
-            "sweep": 1, "color": anim_color,
+            "sweep": 1,
+            **_burst_paint(None, anim_size, anim=True),
         })
     elif entry_anim == "ripple" and entry_active and display_start_ms is not None:
         _char_ripples(
@@ -270,7 +564,8 @@ def plan_line_bursts(
                 "end_ms": start + int(SING_NOTE_TOTAL_MS * entry_scale),
                 "count": 3, "seed": (seed_base + 6 + char_index) & 0xFFFFFFFF,
                 "size_px": anim_size, "travel_px": anim_size * 1.8,
-                "front": True, "sweep": 0, "color": anim_color,
+                "front": True, "sweep": 0,
+                **_burst_paint(char_index, anim_size, anim=True),
             })
 
     exit_anim = str(getattr(style, "exit_anim", "none") or "none")
@@ -286,7 +581,8 @@ def plan_line_bursts(
             "start_ms": exit_start, "end_ms": int(display_end_ms),
             "count": anim_count, "seed": (seed_base + 3) & 0xFFFFFFFF,
             "size_px": anim_size, "travel_px": anim_size * 3.2, "front": True,
-            "sweep": -1, "color": anim_color,
+            "sweep": -1,
+            **_burst_paint(None, anim_size, anim=True),
         })
     elif exit_anim == "ripple" and exit_active and display_end_ms is not None:
         exit_start = max(
@@ -328,10 +624,11 @@ def plan_line_bursts(
                 "end_ms": start + int(SING_NOTE_TOTAL_MS * exit_scale),
                 "count": 3, "seed": (seed_base + 8 + char_index) & 0xFFFFFFFF,
                 "size_px": anim_size, "travel_px": anim_size * 1.8,
-                "front": True, "sweep": 0, "color": anim_color,
+                "front": True, "sweep": 0,
+                **_burst_paint(char_index, anim_size, anim=True),
             })
 
-    # 粒子拼接/消散：像素风方块粒子，固定默认档（不吃粒子旋钮）。
+    # 粒子拼接/消散：像素风方块粒子，同出入场动画档（默认固定档）。
     per_char_assemble = max(4, ANIM_PARTICLE_COUNT // 2)
     if entry_anim == "assemble_in" and entry_active and display_start_ms is not None:
         for char_index in range(char_count):
@@ -345,7 +642,8 @@ def plan_line_bursts(
                 "seed": (seed_base + 7 + char_index) & 0xFFFFFFFF,
                 "size_px": anim_size * 0.75,
                 "travel_px": font_px * ASSEMBLE_TRAVEL_EM,
-                "front": True, "sweep": 0, "color": color,
+                "front": True, "sweep": 0,
+                **_burst_paint(char_index, anim_size * 0.75, anim=True),
             })
     if exit_anim == "dissolve_out" and exit_active and display_end_ms is not None:
         exit_start_assemble = max(
@@ -372,10 +670,11 @@ def plan_line_bursts(
                 "seed": (seed_base + 9 + char_index) & 0xFFFFFFFF,
                 "size_px": anim_size * 0.75,
                 "travel_px": font_px * ASSEMBLE_TRAVEL_EM,
-                "front": True, "sweep": 0, "color": color,
+                "front": True, "sweep": 0,
+                **_burst_paint(char_index, anim_size * 0.75, anim=True),
             })
 
-    # 唱字装饰粒子：唯一吃粒子旋钮（尺寸/数量/颜色）的档位。
+    # 唱字装饰粒子：默认唯一吃粒子旋钮（尺寸/数量/颜色）的档位。
     if style.sing_fx == "ripple":
         for char_index, (start_ms, end_ms) in enumerate(char_windows):
             duration = int(end_ms) - int(start_ms)
@@ -383,6 +682,7 @@ def plan_line_bursts(
                 continue
             if char_visible is not None and not char_visible[char_index]:
                 continue
+            ring_px = size * 3.6
             bursts.append({
                 "kind": "ripple", "anchor": "char",
                 "char_index": int(char_index),
@@ -390,8 +690,9 @@ def plan_line_bursts(
                 "end_ms": int(start_ms) + RIPPLE_LIFE_MS,
                 "count": RIPPLE_RING_COUNT,
                 "seed": (seed_base + 5 + char_index) & 0xFFFFFFFF,
-                "size_px": size * 3.6, "travel_px": 0.0, "front": False,
-                "sweep": 0, "color": color,
+                "size_px": ring_px, "travel_px": 0.0, "front": False,
+                "sweep": 0,
+                **_burst_paint(char_index, ring_px, anim=False, ring=True),
             })
     elif style.sing_fx in ("twinkle", "note"):
         per_char = max(3, count // 4) if style.sing_fx == "twinkle" else 3
@@ -414,7 +715,8 @@ def plan_line_bursts(
                 "count": per_char,
                 "seed": seed,
                 "size_px": size, "travel_px": size * 1.8, "front": True,
-                "sweep": 0, "color": color,
+                "sweep": 0,
+                **_burst_paint(char_index, size, anim=False),
             })
     return bursts
 
