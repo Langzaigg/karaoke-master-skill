@@ -611,6 +611,7 @@ krok::subtitle::native::RenderScene gpuSceneFromConfig(const RenderConfig &confi
         line.pageIndex = sourceLine.pageIndex;
         line.lane = sourceLine.lane;
         line.signalHead = sourceLine.signalHead;
+        line.signalBandJoin = sourceLine.signalBandJoin;
         line.wipeReverse = sourceLine.wipeReverse;
         line.centerOverride = sourceLine.centerOverride;
         // 标题钉在最下层（compositeOrder = kTitleCompositeOrder），所以源之间不必
@@ -678,6 +679,12 @@ krok::subtitle::native::RenderScene gpuSceneFromConfig(const RenderConfig &confi
                 burst.color = gpuColor(source.color, QStringLiteral("#FFFFFF"));
                 // 2026-10 装饰规格：PaintFillSpec → PaintStyle（文本填充
                 // 同一转换），描边宽随 scale 同比缩放。
+                burst.charColors.reserve(source.charColors.size());
+                for (const QString &hex : source.charColors) {
+                    burst.charColors.push_back(
+                        gpuColor(hex, QStringLiteral("#FFFFFF"))
+                    );
+                }
                 burst.hasPaint = source.hasPaint;
                 if (source.hasPaint) {
                     burst.fill = gpuPaint(source.fill, source.color);

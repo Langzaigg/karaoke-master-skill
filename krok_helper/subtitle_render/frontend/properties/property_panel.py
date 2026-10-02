@@ -1193,8 +1193,11 @@ class PropertyPanel(QWidget):
             self._fx_color_btn.set_color(
                 getattr(self._style, "fx_particle_color", "#FFFFFF")
             )
+            # 「仅唱字」勾选 = 不联动入退场（fx_apply_to_entry_exit=False）。
             self._fx_apply_check.setChecked(
-                bool(getattr(self._style, "fx_apply_to_entry_exit", False))
+                not bool(
+                    getattr(self._style, "fx_apply_to_entry_exit", False)
+                )
             )
             self._zoom_pulse_curve_combo.setCurrentIndex(
                 max(

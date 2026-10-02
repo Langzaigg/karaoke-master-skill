@@ -5572,6 +5572,8 @@ ProbeResult Direct2DGpuBackend::renderFrameInternal(
                     // 所有颜色档统一走这一个缓存）。
                     fillBrush = layerBrush(solidPaint(burst.color));
                 }
+                const bool hasCharColors =
+                    !burst.charColors.empty() && !line->chars.empty();
                 for (const FxParticle &particle : burstParticlesAt(
                     burst, tMs, originX, originY, boxW, boxH
                 )) {
@@ -5593,6 +5595,36 @@ ProbeResult Direct2DGpuBackend::renderFrameInternal(
                     const float alpha = std::clamp(
                         particle.alpha * globalOpacity, 0.0f, 1.0f
                     );
+                    if (hasCharColors) {
+                        // 行锚点星光逐字取色：落点 → 最近字符（中点划分，
+                        // 越界钳首末），取该字角色颜色；动画/扫过轨迹不变。
+                        std::size_t index = 0;
+                        const std::size_t charTotal = line->chars.size();
+                        for (std::size_t probe = 0; probe < charTotal;
+                             ++probe) {
+                            const Impl::CachedChar &probeChar =
+                                line->chars[probe];
+                            const float mid =
+                                (probeChar.left + probeChar.right) * 0.5f;
+                            if (particle.x < mid) {
+                                break;
+                            }
+                            index = probe;
+                        }
+                        const std::size_t colorIndex = std::min(
+                            index, burst.charColors.size() - 1
+                        );
+                        const auto charBrush = layerBrush(
+                            solidPaint(burst.charColors[colorIndex])
+                        );
+                        if (charBrush) {
+                            charBrush->SetOpacity(alpha);
+                            context->FillGeometry(
+                                spriteIt->second.Get(), charBrush.Get()
+                            );
+                        }
+                        continue;
+                    }
                     if (!burst.hasPaint) {
                         if (fillBrush) {
                             fillBrush->SetOpacity(alpha);

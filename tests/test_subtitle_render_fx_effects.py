@@ -1505,3 +1505,78 @@ def test_painter_horizontal_gradient_maps_to_line_span(qapp):
     assert left_red > 10 and left_blue == 0, (left_red, left_blue)
     assert right_blue > 10 and right_red == 0, (right_red, right_blue)
     clear_particle_paint_cache()
+
+
+def test_entry_exit_sparkle_follows_first_char_role():
+    """回归护栏（2026-10 用户实测）：联动开启时行锚点入退场跟随首字符角色。
+
+    逐字角色不进行样式（只有歌手方案进），行锚点 burst（入退场星光）此前
+    直接回落行样式 = 全局默认——主文字挂角色 A、唱字跟随正确、入退场却跟
+    了全局默认。修复后行锚点取首字符的角色样式（无角色 = 行样式，语义不
+    变；与指示灯/音量柱「段首行第一个角色」同款先例）。
+    """
+    from krok_helper.subtitle_render.domain.models import SubtitleStyleScheme
+    from krok_helper.subtitle_render.domain.paint import (
+        KaraokeColorState,
+        KaraokeColors,
+        PaintFill,
+    )
+    from krok_helper.subtitle_render.engine.render.effects.particles import (
+        clear_particle_paint_cache,
+    )
+    from krok_helper.subtitle_render.engine.style.style_semantics import style_for_role
+
+    clear_particle_paint_cache()
+    role_a = SubtitleStyleScheme(
+        karaoke_colors=KaraokeColors(
+            after=KaraokeColorState(text=PaintFill(mode="solid", color="#40E0FF"))
+        )
+    )
+    style = Style(
+        font_size_px=64,
+        sing_fx="note",
+        entry_anim="sparkle",
+        entry_lead_ms=600,
+        exit_anim="sparkle",
+        exit_fade_ms=600,
+        karaoke_anim="none",
+        fx_particle_color_mode="follow_after",
+        fx_apply_to_entry_exit=True,
+        custom_style_schemes={"A": role_a},
+        karaoke_colors=KaraokeColors(
+            after=KaraokeColorState(
+                text=PaintFill(mode="solid", color="#FF5A6F")
+            )
+        ),
+    )
+    windows = [(1200, 1600), (1600, 2000), (2000, 2400)]
+    char_styles = [style_for_role(style, "A") for _ in windows]
+    bursts = plan_line_bursts(
+        style, 0, 1000, 4000, 3900, windows, char_styles=char_styles
+    )
+    sparkle = next(b for b in bursts if b["kind"] == "sparkle")
+    note = next(b for b in bursts if b["kind"] == "note")
+    assert sparkle["color"] == "#40E0FF", sparkle["color"]
+    assert note["color"] == "#40E0FF"
+    # 联动关闭（默认）：入退场维持固定白档。
+    off = plan_line_bursts(
+        Style(
+            **{
+                **style.__dict__,
+                "fx_apply_to_entry_exit": False,
+            }
+        ),
+        0,
+        1000,
+        4000,
+        3900,
+        windows,
+        char_styles=char_styles,
+    )
+    assert (
+        next(b for b in off if b["kind"] == "sparkle")["color"] == "#FFFFFF"
+    )
+    # 星光画在主文字背后（front=False），音符仍在前。
+    assert sparkle["front"] is False
+    assert note["front"] is True
+    clear_particle_paint_cache()

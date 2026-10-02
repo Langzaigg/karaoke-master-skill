@@ -3698,12 +3698,22 @@ def _paint_line_fx_particles(
     """
     if style.vertical:
         return
+    # 早退护栏只豁免「无粒子」组合：sparkle/ripple/note 既是入退场动画也
+    # 携带粒子（2026-09 从 fx 档位晋升），assemble/dissolve 同理——旧口径
+    # 只豁免拼接/消散，唱字特效=无时入退场星光/涟漪/音符整段被跳过
+    #（CPU 与 GPU 预览也因此分歧）。
+    particle_entry_anims = {
+        "sparkle", "ripple", "note", "assemble_in",
+    }
+    particle_exit_anims = {
+        "sparkle", "ripple", "note", "dissolve_out",
+    }
     if (
         style.entry_fx == "none"
         and style.exit_fx == "none"
         and style.sing_fx == "none"
-        and style.entry_anim != "assemble_in"
-        and style.exit_anim != "dissolve_out"
+        and style.entry_anim not in particle_entry_anims
+        and style.exit_anim not in particle_exit_anims
     ):
         return
     from krok_helper.subtitle_render.engine.render.effects.particles import (
@@ -3792,6 +3802,11 @@ def _paint_line_fx_particles(
         spec = burst.get("paint")
         burst_size = float(burst["size_px"])
         kind = str(burst["kind"])
+        # 行锚点星光的逐字颜色表（跟随模式 + 联动入退场）：动画不动，
+        # 每颗粒子按落点所在字符取该字角色的颜色。
+        char_colors = burst.get("char_colors")
+        if char_colors and burst["anchor"] != "line":
+            char_colors = None
         if spec is not None:
             fill = _paint_fill_from_dict(spec["fill"])
             stroke_fill = _paint_fill_from_dict(spec["stroke"])
@@ -3886,6 +3901,24 @@ def _paint_line_fx_particles(
                 scale = state.size_px / 1000.0
                 painter.scale(scale, scale)
                 painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+                if char_colors:
+                    # 落点 → 字符：线性找包含 state.x 的字符区间（越界钳到
+                    # 首末字符——间隙/行边距归就近字符）。
+                    index = 0
+                    for probe in range(len(char_x_ranges)):
+                        left, right = char_x_ranges[probe]
+                        if state.x < (left + right) * 0.5:
+                            break
+                        index = probe
+                    color_key = str(char_colors[min(index, len(char_colors) - 1)])
+                    brush = brushes.get(color_key)
+                    if brush is None:
+                        brush = QBrush(QColor(color_key))
+                        brushes[color_key] = brush
+                    painter.setPen(Qt.PenStyle.NoPen)
+                    painter.setBrush(brush)
+                    painter.drawPath(sprite)
+                    continue
                 if horizontal_mapped:
                     # 行内横向位置采样（量化 1/32，与 GPU 同口径）：横向渐
                     # 变层取该位置的实心色，其余层（纵向渐变/纯色描边）用

@@ -467,13 +467,17 @@ def plan_line_bursts(
     anim_count = ANIM_PARTICLE_COUNT
 
     def _char_style(char_index: int | None) -> Style | None:
-        if (
-            char_index is None
-            or char_styles is None
-            or not (0 <= char_index < len(char_styles))
-        ):
-            return None
-        return char_styles[char_index]
+        # 行锚点 burst（入退场星光）取**首字符**的角色样式：逐字角色不进
+        # 行样式，直接回落行样式会退成全局默认（2026-10 用户实测——主文
+        # 字挂角色 A、唱字跟随正确、入退场却跟了全局默认）。无角色的首字
+        # 符解析结果即行样式，语义不变；与指示灯/音量柱「段首行第一个角
+        # 色」同款先例。
+        if char_styles:
+            if char_index is None:
+                char_index = 0
+            if 0 <= char_index < len(char_styles):
+                return char_styles[char_index]
+        return None
 
     def _burst_paint(
         char_index: int | None,
@@ -481,16 +485,37 @@ def plan_line_bursts(
         *,
         anim: bool,
         ring: bool = False,
+        line_anchor: bool = False,
     ) -> dict[str, object]:
         """burst 的颜色字段：固定白档 / 实色回退 (+ 非单色模式的 paint 规格)。
 
         规格按「样式 × 角色方案 × 尺寸 × 是否涟漪」缓存——同一组合全帧
         复用一份（见 :func:`_cached_particle_paint`）。涟漪光环不带描边
         （``include_strokes=False``）：环体是发丝线，叠描边显著变粗。
+
+        ``line_anchor``（入退场星光）：跟随模式下附 ``char_colors`` 逐字
+        颜色表——动画仍是整行一条 burst（扫过轨迹不变），绘制端按每颗粒
+        子落点所在字符取该字角色的颜色（2026-10 用户口径：颜色逐字、动
+        画不动）。此时不带 paint 规格（逐粒子换色无法烘焙/静态笔刷），
+        ``color`` 回退取首字符颜色（旧 sidecar 兼容）。
         """
 
         if anim and not apply_to_anim:
             return {"color": ANIM_PARTICLE_COLOR}
+        mode = str(getattr(style, "fx_particle_color_mode", "color") or "color")
+        if (
+            line_anchor
+            and mode in {"follow_before", "follow_after"}
+            and char_styles
+        ):
+            char_colors = [
+                _cached_particle_solid(style, _char_style(index))
+                for index in range(char_count)
+            ]
+            return {
+                "color": char_colors[0],
+                "char_colors": char_colors,
+            }
         char_style = _char_style(char_index)
         fields: dict[str, object] = {
             "color": _cached_particle_solid(style, char_style)
@@ -546,9 +571,10 @@ def plan_line_bursts(
             "end_ms": int(display_start_ms)
             + int(SPARKLE_ENTRY_LIFE_MS * entry_scale),
             "count": anim_count, "seed": (seed_base + 1) & 0xFFFFFFFF,
-            "size_px": anim_size, "travel_px": anim_size * 3.2, "front": True,
+            # 星光画在主文字背后（2026-10 用户口径：不再遮挡文字画面）。
+            "size_px": anim_size, "travel_px": anim_size * 3.2, "front": False,
             "sweep": 1,
-            **_burst_paint(None, anim_size, anim=True),
+            **_burst_paint(None, anim_size, anim=True, line_anchor=True),
         })
     elif entry_anim == "ripple" and entry_active and display_start_ms is not None:
         _char_ripples(
@@ -580,9 +606,9 @@ def plan_line_bursts(
             "kind": "sparkle", "anchor": "line", "char_index": -1,
             "start_ms": exit_start, "end_ms": int(display_end_ms),
             "count": anim_count, "seed": (seed_base + 3) & 0xFFFFFFFF,
-            "size_px": anim_size, "travel_px": anim_size * 3.2, "front": True,
+            "size_px": anim_size, "travel_px": anim_size * 3.2, "front": False,
             "sweep": -1,
-            **_burst_paint(None, anim_size, anim=True),
+            **_burst_paint(None, anim_size, anim=True, line_anchor=True),
         })
     elif exit_anim == "ripple" and exit_active and display_end_ms is not None:
         exit_start = max(
@@ -714,7 +740,9 @@ def plan_line_bursts(
                 "end_ms": int(start_ms) + total,
                 "count": per_char,
                 "seed": seed,
-                "size_px": size, "travel_px": size * 1.8, "front": True,
+                # 唱字星光同样垫在主文字背后（音符飘出保持在前）。
+                "size_px": size, "travel_px": size * 1.8,
+                "front": style.sing_fx != "twinkle",
                 "sweep": 0,
                 **_burst_paint(char_index, size, anim=False),
             })

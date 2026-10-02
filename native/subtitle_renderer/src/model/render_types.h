@@ -257,6 +257,8 @@ struct ParticleBurst {
     PaintStyle stroke2;
     float strokeWidth = 0.0f;
     float stroke2Width = 0.0f;
+    // 行锚点星光的逐字实色表（#RRGGBB；空 = 不启用）。
+    std::vector<RgbaColor> charColors;
     bool operator==(const ParticleBurst &) const = default;
 };
 
@@ -284,6 +286,8 @@ struct TextLine {
     // Sayatoo signal lamps (every lit style) attach only to each section's
     // first page's first line; the painter stamps this flag in the render IR.
     bool signalHead = false;
+    // 「真一组」渐变带正文侧拓宽闸门（协议注释见 render_config.h）。
+    bool signalBandJoin = false;
     // Python 在源加载入口已把整行时间戳严格逆序的行镜像理顺为顺序，仅保留
     // 本标记让走字反向（横排 rtl 翻转 / 竖排自下而上），与 Painter 同口径。
     bool wipeReverse = false;

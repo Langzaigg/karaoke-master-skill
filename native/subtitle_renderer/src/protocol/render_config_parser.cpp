@@ -1350,6 +1350,10 @@ std::optional<RenderConfig> parseRenderConfig(const QJsonObject &ir, QString *er
             line.signalHead = lineObject.value(
                 QStringLiteral("signal_head")
             ).toBool(true);
+            // 「真一组」渐变带正文侧拓宽闸门（缺省 false 兼容旧 IR）。
+            line.signalBandJoin = lineObject.value(
+                QStringLiteral("signal_band_join")
+            ).toBool(false);
             // Python 在源加载入口把整行时间戳严格逆序的行镜像理顺为顺序，
             // 并只在此处打标记；sidecar 据此对齐 Painter 的反向走字。
             line.wipeReverse = lineObject.value(
@@ -1520,6 +1524,15 @@ std::optional<RenderConfig> parseRenderConfig(const QJsonObject &ir, QString *er
                         ).toDouble(0.0),
                         0.0
                     );
+                }
+                const QJsonArray charColorsArray = burstObject.value(
+                    QStringLiteral("char_colors")
+                ).toArray();
+                for (const QJsonValue &value : charColorsArray) {
+                    const QString hex = value.toString();
+                    if (!hex.isEmpty()) {
+                        burst.charColors.push_back(hex);
+                    }
                 }
                 if (!burst.kind.isEmpty() && burst.count > 0
                     && burst.endMs > burst.startMs) {

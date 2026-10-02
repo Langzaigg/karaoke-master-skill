@@ -674,14 +674,16 @@ class EffectsPropertyPageBuilder:
         host._fx_color_btn = host._color_button(
             "fx_particle_color", getattr(host._style, "fx_particle_color", "#FFFFFF")
         )
-        host._fx_apply_check = CheckBox("入退场同用", section)
+        host._fx_apply_check = CheckBox("仅唱字", section)
         host._fx_apply_check.setToolTip(
-            "开启后，粒子的颜色与尺寸也应用于入场/退场动画携带的粒子"
-            "（星光/涟漪/音符/拼接/消散）；默认关闭——入退场动画粒子用固定"
-            "默认档（白色、40% 字号），数量恒为固定档"
+            "勾选（默认）：粒子的颜色与尺寸仅作用于唱字装饰粒子，入场/退场"
+            "动画携带的粒子用固定默认档（白色、40% 字号，数量恒固定）；"
+            "取消勾选：颜色与尺寸也应用于入场/退场动画粒子（星光/涟漪/音符/"
+            "拼接/消散，颜色模式同样生效）"
         )
+        # 语义反转：勾选「仅唱字」= fx_apply_to_entry_exit 为 False。
         host._fx_apply_check.toggled.connect(
-            lambda checked: host._update_style(fx_apply_to_entry_exit=checked)
+            lambda checked: host._update_style(fx_apply_to_entry_exit=not checked)
         )
         host._fx_param_controls_row = self._fx_size_row(
             section,
@@ -743,7 +745,7 @@ class EffectsPropertyPageBuilder:
         # 用户口径：粒子参数行与唱字闪光行互换位置（粒子参数在前）。
         host._animation_grid.add_field("唱字装饰粒子 / 颜色模式", host._fx_particle_row)
         host._animation_grid.add_field(
-            "粒子尺寸 · 数量 · 颜色 / 入退场同用",
+            "粒子尺寸 · 数量 · 颜色 / 仅唱字",
             host._fx_param_controls_row,
         )
         host._animation_grid.add_field("唱字闪光", host._stroke_flash_row)

@@ -82,6 +82,12 @@ struct TimingLine {
     // first page's first line; Python stamps the flag so both backends share
     // one decision. Absent field parses as true to keep legacy per-line IRs.
     bool signalHead = false;
+    // 「真一组」渐变带正文侧拓宽闸门：音量柱 auto/role 且装饰源与正文
+    // 第一角色同源（auto 或 role 悬空回退）+ 段首行 + 非 RTL。configure
+    // 据此把第一角色（及 ruby 共享盒）的横向渐变跨度左缘拓宽到柱组左
+    // 缘——柱体与正文共用同一条渐变带（镜像 Painter 的
+    // LineLayout.signal_band_left）。缺省 false 兼容旧 IR。
+    bool signalBandJoin = false;
     // Python 在源加载入口已把整行时间戳严格逆序的行镜像理顺为顺序，仅保留
     // 本标记让走字反向（横排 rtl 翻转 / 竖排自下而上），与 Painter 同口径。
     bool wipeReverse = false;
@@ -132,6 +138,10 @@ struct TimingLine {
         PaintFillSpec stroke2;
         double strokeWidthPx = 0.0;
         double stroke2WidthPx = 0.0;
+        // 行锚点星光的逐字颜色表（跟随模式 + 联动入退场）：动画仍是整行
+        // 一条 burst，绘制端按每颗粒子落点所在字符取色（Python 预解析，
+        // 旧 IR / 其余模式缺省为空）。
+        std::vector<QString> charColors;
     };
     std::vector<FxBurst> fxBursts;
     ResolvedLineLayout layout;

@@ -6326,10 +6326,10 @@ def test_property_panel_particle_color_mode_controls(qapp):
         panel._fx_particle_mode_combo.itemText(index)
         for index in range(panel._fx_particle_mode_combo.count())
     ] == ["单独颜色", "跟随字体·走字前", "跟随字体·走字后", "复用配色方案"]
-    # 默认单独颜色：显示颜色按钮、隐藏来源下拉；开关默认关。
+    # 默认单独颜色：显示颜色按钮、隐藏来源下拉；「仅唱字」默认勾选。
     assert not panel._fx_color_btn.isHidden()
     assert panel._fx_particle_role_combo.isHidden()
-    assert not panel._fx_apply_check.isChecked()
+    assert panel._fx_apply_check.isChecked()
     # 跟随字体两档：颜色与来源都隐藏（粒子无亮度参数）。
     panel._fx_particle_mode_combo.setCurrentIndex(
         panel._fx_particle_mode_combo.findData("follow_before")
@@ -6365,10 +6365,11 @@ def test_property_panel_particle_color_mode_controls(qapp):
         )
     )
     assert panel._fx_particle_role_combo.currentData() == "幽灵"
-    # 「入退场同用」开关：发出样式变更并回显。
-    panel._fx_apply_check.setChecked(True)
-    assert emitted[-1].fx_apply_to_entry_exit is True
+    # 「仅唱字」开关（语义反转：勾选 = 不联动入退场）：发出样式变更并回显。
+    assert panel._fx_apply_check.isChecked()  # 默认勾选
     panel._fx_apply_check.setChecked(False)
+    assert emitted[-1].fx_apply_to_entry_exit is True  # 取消勾选 = 联动入退场
+    panel._fx_apply_check.setChecked(True)
     assert emitted[-1].fx_apply_to_entry_exit is False
     # 回显：外部灌入样式后模式下拉/开关跟随、可见性按模式同步。
     panel.set_style(
@@ -6378,7 +6379,7 @@ def test_property_panel_particle_color_mode_controls(qapp):
         )
     )
     assert panel._fx_particle_mode_combo.currentData() == "follow_after"
-    assert panel._fx_apply_check.isChecked()
+    assert not panel._fx_apply_check.isChecked()
     assert panel._fx_color_btn.isHidden()
     assert panel._fx_particle_role_combo.isHidden()
     # 未知模式回落单独颜色。
