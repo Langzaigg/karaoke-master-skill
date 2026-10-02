@@ -469,3 +469,136 @@ def test_a_corrupt_file_does_not_wipe_module_namespaces(tmp_path: Path):
 
     saved = json.loads(path.read_text(encoding="utf-8"))
     assert [i["name"] for i in saved["subtitle_render"]["style_presets"]] == ["内存里的"]
+
+
+def test_namespace_write_matches_legacy_bridge_save(tmp_path: Path):
+    """命名空间级写与旧的「load → 改字段 → save(merge=False)」文件结果等价。
+
+    除命名空间外其余字段原样保留；旧链路会丢掉的未知键（未来版本写入的）
+    现在也保留——与修复写回的向前兼容口径一致。
+    """
+    from krok_helper.settings import write_app_settings_namespace
+
+    path = _settings_path(tmp_path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        json.dumps(
+            {
+                "ffmpeg_dir": "D:/keep",
+                "subtitle_render": {"old": 1},
+                "from_future_version": {"unknown": True},
+            },
+            ensure_ascii=False,
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+
+    write_app_settings_namespace("subtitle_render", {"style_presets": []})
+
+    saved = json.loads(path.read_text(encoding="utf-8"))
+    assert saved["ffmpeg_dir"] == "D:/keep"
+    assert saved["subtitle_render"] == {"style_presets": []}
+    assert saved["from_future_version"] == {"unknown": True}
+
+
+def test_namespace_write_first_run_lays_full_defaults(tmp_path: Path):
+    """盘上没有文件时，命名空间写与旧链路一致：先落完整默认值再盖命名空间。"""
+    from krok_helper.settings import write_app_settings_namespace
+
+    write_app_settings_namespace("pymss", {"install_dir": "X:/rt"})
+
+    saved = json.loads(_settings_path(tmp_path).read_text(encoding="utf-8"))
+    assert saved["pymss"] == {"install_dir": "X:/rt"}
+    # 完整默认值在场（抽查两个），与旧的 load→save 首跑产物同形。
+    assert saved["align_target"] == "video"
+    assert "lyrics_timing" in saved
+
+
+def test_repair_walk_skipped_when_no_app_dir_name_in_text(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """文本里没有任何已知应用数据目录名时，逐值修复遍历一次都不跑。"""
+    import krok_helper.settings as settings_mod
+
+    path = _settings_path(tmp_path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        json.dumps({"ffmpeg_dir": "D:/ffmpeg", "subtitle_render": {"a": 1}}),
+        encoding="utf-8",
+    )
+
+    calls: list[int] = []
+    monkeypatch.setattr(
+        settings_mod,
+        "_repair_stale_appdata_paths",
+        lambda payload: (calls.append(1), [])[1],
+    )
+
+    load_app_settings()
+    load_app_settings()
+    assert calls == []
+
+
+def test_repair_walk_runs_once_per_file_content(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """含旧目录名的内容：同一份文件重复 load 只跑一次遍历（无事可修后跳过）。"""
+    import krok_helper.settings as settings_mod
+
+    path = _settings_path(tmp_path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    # 文本里出现旧应用名（Karaoke Studio）但不是可修复路径 → 遍历空手，
+    # 之后同一份内容（stat 不变）不再重跑。
+    path.write_text(
+        json.dumps(
+            {"note": "曾经用过 Karaoke Studio 的机器", "subtitle_render": {}}
+        ),
+        encoding="utf-8",
+    )
+
+    calls: list[int] = []
+    real = settings_mod._repair_stale_appdata_paths
+    monkeypatch.setattr(
+        settings_mod,
+        "_repair_stale_appdata_paths",
+        lambda payload: (calls.append(1), real(payload))[1],
+    )
+
+    load_app_settings()
+    load_app_settings()
+    assert calls == [1]
+
+    # 外部改盘（mtime 变化）→ 缓存失效，新内容重新参与判定。
+    path.write_text(
+        json.dumps({"note": "外部实例改写", "subtitle_render": {}}),
+        encoding="utf-8",
+    )
+    future = path.stat().st_mtime_ns + 10_000_000
+    import os as _os
+
+    _os.utime(path, ns=(future, future))
+    load_app_settings()
+    assert load_app_settings().subtitle_render == {}
+
+
+def test_settings_cache_reflects_own_and_external_writes(tmp_path: Path):
+    """自己写盘后缓存即刻反映新内容；外部改盘（stat 变化）后被重新读取。"""
+    import os as _os
+
+    path = _settings_path(tmp_path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps({"ffmpeg_dir": "one"}), encoding="utf-8")
+    assert load_app_settings().ffmpeg_dir == "one"
+
+    # 自己整份写盘：不重读盘也能看到新内容（缓存已刷新为写入文本）。
+    settings = load_app_settings()
+    settings.ffmpeg_dir = "two"
+    save_app_settings(settings)
+    assert load_app_settings().ffmpeg_dir == "two"
+
+    # 外部改盘：mtime 变化使缓存失效，读到新值。
+    path.write_text(json.dumps({"ffmpeg_dir": "three"}), encoding="utf-8")
+    future = path.stat().st_mtime_ns + 10_000_000
+    _os.utime(path, ns=(future, future))
+    assert load_app_settings().ffmpeg_dir == "three"
