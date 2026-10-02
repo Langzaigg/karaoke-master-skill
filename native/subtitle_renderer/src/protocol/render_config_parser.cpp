@@ -1285,7 +1285,10 @@ static void applyLineStyleSection(
 ) {
     // 行级样式派生字段（信号旗标 + 出入场/唱字动画 + 装饰粒子）。
     // 全量解析（parseSourceTracks）与差分更新（applyLineStylePatch）
-    // 共用同一份代码，两处口径不漂移。
+    // 共用同一份代码，两处口径不漂移。其余字段都是赋值型；bursts 是
+    // 唯一的累积型（push_back）——差分合并时行上带着上一版的 bursts，
+    // 不先清空会把差分载荷追加成两倍（2026-10 现象B 根因）。
+    line.fxBursts.clear();
             // Default true: an IR from an older Python host has no stamp, and
             // the pre-change behavior (bars on every line) must survive that
             // pairing. New IRs always stamp the flag explicitly.
