@@ -18,6 +18,7 @@
 
 namespace krok::subtitle::native {
 
+
 struct Direct2DGpuBackend::Impl {
     struct CachedImage {
         std::wstring path;
@@ -35,6 +36,25 @@ struct Direct2DGpuBackend::Impl {
     // 装饰粒子 sprite 轮廓几何（em 空间、中心原点；随场景重建，绘制期经
     // matrix 缩放平移）。key = sprite 名（star4 / ring / note）。
     std::map<std::string, Microsoft::WRL::ComPtr<ID2D1PathGeometry>> fxSpriteGeometries;
+    // 2026-10 涟漪极坐标环烘焙纹理：非横向渐变映射为角向扫过（conic，
+    // p=φ/2π，与 painter._fx_polar_ring_brush 镜像）。按 PaintStyle 签名
+    // 缓存，随场景失效重建（fxSpriteGeometries 同一清理点）。
+    // 2026-10 粒子装饰笔刷缓存：同一 (PaintStyle × 回退色 × 是否极坐标)
+    // 组合全帧全 burst 复用一把笔刷——逐 burst 逐帧 CreateLinearGradientBrush
+    // /位图笔刷曾是 GPU 粒子路径的性能大头（用户口径：用过的粒子+角色组合
+    // 只烘焙一次）。极坐标分支连烘焙位图带包装笔刷一起缓存。LRU 尾部为
+    // 最新，随场景失效重建。
+    struct FxPaintBrushEntry {
+        PaintStyle paint;
+        RgbaColor fallback{255, 255, 255, 255};
+        Microsoft::WRL::ComPtr<ID2D1Brush> brush;
+    };
+    std::vector<FxPaintBrushEntry> fxPaintBrushes;
+    // 粒子描边样式（圆角连接/端点）。必须挂在 Impl 上：每个后端实例有
+    // 自己的 D2D factory（worker 池/导出后端并存时多 factory 同进程），
+    // 跨 factory 复用 stroke style 会在 EndDraw 报 D2DERR_WRONG_FACTORY
+    // （2026-10 实测：函数级 static 缓存导致 GPU 预览直接回退）。
+    Microsoft::WRL::ComPtr<ID2D1StrokeStyle> fxRoundStrokeStyle;
     // 指示灯「星型/音符」路径几何：按 (litStyle, size) 缓存，随场景失效重建。
     std::map<std::pair<std::string, float>, Microsoft::WRL::ComPtr<ID2D1PathGeometry>>
         lampShapeGeometries;

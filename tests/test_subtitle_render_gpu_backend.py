@@ -12813,3 +12813,51 @@ def test_line_avatar_and_inline_svg_survive_in_every_render_core(
     assert avatar_pixels(gpu_frames[0]) > 100
     assert avatar_pixels(native_frame) > 100
 
+
+@pytest.mark.skipif(os.name != "nt", reason="Direct2D GPU backend is Windows-only")
+def test_gpu_particle_stroke_style_survives_backend_recreation() -> None:
+    """回归护栏（2026-10 实测）：粒子描边样式不得跨 factory 复用。
+
+    每个后端实例有自己的 D2D factory（worker 池/导出后端并存、二次
+    configure 重建）。粒子装饰规格的圆角描边样式曾用函数级 static 缓存，
+    第二个 factory 的实例首帧 DrawGeometry 即报
+    ``D2DERR_WRONG_FACTORY (0x88990012)``、EndDraw 失败 → GPU 预览直接
+    回退 Painter。现在按 Impl 缓存；这里在同一 sidecar 进程里连续三轮
+    configure（每轮重建后端 = 新 factory）渲染带描边规格的粒子帧。
+    """
+    from krok_helper.subtitle_render.domain.paint import (
+        KaraokeColorState,
+        KaraokeColors,
+        PaintFill,
+    )
+
+    track = _g1_track()
+    style = _g1_style(
+        sing_fx="note",
+        fx_particle_color_mode="follow_before",
+        fx_particle_size_em=0.6,
+        stroke_width_px=6,
+        stroke2_enabled=True,
+        stroke2_width_px=3,
+        karaoke_colors=KaraokeColors(
+            before=KaraokeColorState(text=PaintFill(mode="solid", color="#40E0FF")),
+            after=KaraokeColorState(text=PaintFill(mode="solid", color="#FF5A6F")),
+        ),
+    )
+    with NativeRendererProcess(
+        _renderer_path(), response_timeout_s=25.0
+    ) as renderer:
+        for round_no in range(3):
+            configured = renderer.configure_gpu(
+                track,
+                style,
+                width=640,
+                height=360,
+                fps=60,
+                force_warp=True,
+            )
+            assert configured["ok"], configured
+            for t_ms in (600, 1_000, 1_300):
+                event = renderer.render_gpu_frame(t_ms, force_warp=True)
+                assert event.get("ok"), f"round {round_no} t={t_ms}: {event}"
+

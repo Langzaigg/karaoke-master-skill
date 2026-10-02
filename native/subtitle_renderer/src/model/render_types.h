@@ -246,6 +246,17 @@ struct ParticleBurst {
     // sparkle 整句扫过方向：+1 入场（左→右）、-1 退场（右→左）、0 不扫。
     int sweep = 0;
     RgbaColor color{255, 255, 255, 255};
+    // 2026-10 颜色模式装饰规格（跟随字体/复用配色方案）：hasPaint=false
+    // 时按 ``color`` 实心绘制（旧 IR / 单独颜色档）。宽度为物理 px（投影
+    // 时随 scale 同比缩放，与 sizePx 同基准）；涟漪的非横向渐变由渲染端
+    // 做径向映射（每环按扩散进度在渐变轴上采样实心色：内圈新环=起点
+    // 色、外圈老环=终点色）。
+    bool hasPaint = false;
+    PaintStyle fill;
+    PaintStyle stroke;
+    PaintStyle stroke2;
+    float strokeWidth = 0.0f;
+    float stroke2Width = 0.0f;
     bool operator==(const ParticleBurst &) const = default;
 };
 

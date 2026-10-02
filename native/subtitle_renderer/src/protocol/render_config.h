@@ -53,6 +53,20 @@ struct ResolvedLineLayout {
     int rubyGapPx = 0;
 };
 
+struct PaintFillSpec {
+    QString mode = QStringLiteral("solid");
+    QString color = QStringLiteral("#FFFFFF");
+    QString startColor = QStringLiteral("#FFFFFF");
+    QString endColor = QStringLiteral("#FFFFFF");
+    std::vector<std::pair<double, QString>> gradientStops;
+    QString splitTopColor = QStringLiteral("#FFFFFF");
+    QString splitBottomColor = QStringLiteral("#FFFFFF");
+    int splitPositionPct = 50;
+    std::vector<std::pair<double, QString>> splitStops;
+    QString imagePath;
+    int imageScalePct = 100;
+};
+
 struct TimingLine {
     std::vector<TimingChar> chars;
     int endMs = 0;
@@ -108,6 +122,16 @@ struct TimingLine {
         bool reverse = false;
         int sweep = 0;
         QString color = QStringLiteral("#FFFFFF");
+        // 2026-10 颜色模式（跟随字体/复用配色方案）：完整装饰规格——
+        // 填充/描边/二重描边的 PaintFill + 已按 粒子尺寸/来源字号 缩放的
+        // 描边宽（px，与 sizePx 同基准）。旧 IR 缺省 hasPaint=false，按
+        // ``color`` 实心绘制（旧 sidecar 读到未知键自动忽略，兼容互通）。
+        bool hasPaint = false;
+        PaintFillSpec fill;
+        PaintFillSpec stroke;
+        PaintFillSpec stroke2;
+        double strokeWidthPx = 0.0;
+        double stroke2WidthPx = 0.0;
     };
     std::vector<FxBurst> fxBursts;
     ResolvedLineLayout layout;
@@ -129,20 +153,6 @@ struct RubyAnnotation {
     int targetLineIndex = -1;
     int targetCharStart = -1;
     int targetCharEnd = -1;
-};
-
-struct PaintFillSpec {
-    QString mode = QStringLiteral("solid");
-    QString color = QStringLiteral("#FFFFFF");
-    QString startColor = QStringLiteral("#FFFFFF");
-    QString endColor = QStringLiteral("#FFFFFF");
-    std::vector<std::pair<double, QString>> gradientStops;
-    QString splitTopColor = QStringLiteral("#FFFFFF");
-    QString splitBottomColor = QStringLiteral("#FFFFFF");
-    int splitPositionPct = 50;
-    std::vector<std::pair<double, QString>> splitStops;
-    QString imagePath;
-    int imageScalePct = 100;
 };
 
 struct ResolvedStyle {

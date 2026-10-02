@@ -676,6 +676,20 @@ krok::subtitle::native::RenderScene gpuSceneFromConfig(const RenderConfig &confi
                 burst.reverse = source.reverse;
                 burst.sweep = source.sweep;
                 burst.color = gpuColor(source.color, QStringLiteral("#FFFFFF"));
+                // 2026-10 装饰规格：PaintFillSpec → PaintStyle（文本填充
+                // 同一转换），描边宽随 scale 同比缩放。
+                burst.hasPaint = source.hasPaint;
+                if (source.hasPaint) {
+                    burst.fill = gpuPaint(source.fill, source.color);
+                    burst.stroke = gpuPaint(source.stroke, source.color);
+                    burst.stroke2 = gpuPaint(source.stroke2, source.color);
+                    burst.strokeWidth = static_cast<float>(
+                        source.strokeWidthPx * scale
+                    );
+                    burst.stroke2Width = static_cast<float>(
+                        source.stroke2WidthPx * scale
+                    );
+                }
                 line.bursts.push_back(std::move(burst));
             }
         }

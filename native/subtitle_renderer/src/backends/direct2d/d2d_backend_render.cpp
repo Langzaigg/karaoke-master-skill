@@ -87,6 +87,53 @@ PaintStyle solidPaint(const RgbaColor &color) {
     return result;
 }
 
+// 2026-10 粒子装饰规格：按位置采样一份 PaintStyle（0..1）——渐变按 8bit
+// 通道线性插值、拼色分段常数。与 painter._fx_fill_color_at 镜像。
+RgbaColor paintColorAt(const PaintStyle &paint, float position) {
+    const auto &stops = paint.stops;
+    if (stops.empty()) {
+        return paint.color;
+    }
+    position = std::clamp(position, 0.0f, 1.0f);
+    const bool split = paint.mode == "split_vertical";
+    if (split) {
+        // 拼色带语义（与 createPaintBrush 的重复停止点硬边一致）：每个
+        // 停止点标记该色起点，取最后一个起点 <= position 的颜色。
+        RgbaColor active = stops.front().color;
+        for (const PaintStop &stop : stops) {
+            if (position >= stop.position) {
+                active = stop.color;
+            } else {
+                break;
+            }
+        }
+        return active;
+    }
+    if (position <= stops.front().position) {
+        return stops.front().color;
+    }
+    for (std::size_t index = 0; index + 1 < stops.size(); ++index) {
+        const PaintStop &s0 = stops[index];
+        const PaintStop &s1 = stops[index + 1];
+        if (position <= s1.position) {
+            const float span = s1.position - s0.position;
+            const float t = span > 0.0f ? (position - s0.position) / span : 0.0f;
+            const auto channel = [&](std::uint8_t a, std::uint8_t b) {
+                return static_cast<std::uint8_t>(
+                    std::lround(a + (static_cast<float>(b) - a) * t)
+                );
+            };
+            return RgbaColor{
+                channel(s0.color.red, s1.color.red),
+                channel(s0.color.green, s1.color.green),
+                channel(s0.color.blue, s1.color.blue),
+                channel(s0.color.alpha, s1.color.alpha),
+            };
+        }
+    }
+    return stops.back().color;
+}
+
 }  // namespace
 
 ProbeResult Direct2DGpuBackend::renderFrame(int tMs, bool compactBands) {
@@ -5394,6 +5441,124 @@ ProbeResult Direct2DGpuBackend::renderFrameInternal(
                     || !spriteIt->second) {
                     continue;
                 }
+                // 2026-10 装饰规格：hasPaint 时按完整 PaintStyle 绘制——
+                // 填充/描边/二重描边（二重描边宽 = 描边+二重描边，与文字
+                // 层叠及 CPU painter 同口径）。笔刷逻辑坐标用 sprite 的
+                // em 空间（±500），随下面的世界变换（缩放/旋转/平移）走。
+                // 涟漪 + 非横向渐变（纵向渐变/拼色）→ 径向映射：渐变轴
+                // 映射到半径方向，每颗环按扩散进度在渐变轴上采样一个实心
+                // 色（内圈新环=起点色、外圈老环=终点色，镜像 painter 的
+                // 径向采样；环色随生命期变化，不走静态笔刷/精灵）。
+                const bool radialRing =
+                    burst.hasPaint
+                    && burst.kind == "ripple"
+                    && (burst.fill.mode == "gradient_vertical"
+                        || burst.fill.mode == "split_vertical");
+                const D2D1_RECT_F emRect = D2D1::RectF(
+                    -500.0f, -500.0f, 500.0f, 500.0f
+                );
+                Microsoft::WRL::ComPtr<ID2D1Brush> fillBrush;
+                Microsoft::WRL::ComPtr<ID2D1Brush> strokeBrush;
+                Microsoft::WRL::ComPtr<ID2D1Brush> stroke2Brush;
+                float strokeEm = 0.0f;
+                float stroke2Em = 0.0f;
+                Microsoft::WRL::ComPtr<ID2D1StrokeStyle> roundStyle;
+            // 层笔刷按 (PaintStyle × 回退色) 缓存（LRU，随场景失效）
+            // ——同一「粒子+角色组合」全帧复用，逐帧重建渐变/实心笔刷
+            // 曾是性能大头；分支外定义，单独颜色档与径向涟漪环也走它。
+            const auto layerBrush =
+                    [&](const PaintStyle &paint)
+                    -> Microsoft::WRL::ComPtr<ID2D1Brush> {
+                        for (std::size_t index = 0;
+                             index < impl_->fxPaintBrushes.size();
+                             ++index) {
+                            auto &entry = impl_->fxPaintBrushes[index];
+                            if (entry.paint == paint
+                                && entry.fallback == burst.color
+                                && entry.brush) {
+                                // LRU：命中挪到尾部。
+                                if (index + 1
+                                    != impl_->fxPaintBrushes.size()) {
+                                    auto moved = std::move(entry);
+                                    impl_->fxPaintBrushes.erase(
+                                        impl_->fxPaintBrushes.begin()
+                                        + static_cast<
+                                            std::ptrdiff_t>(index)
+                                    );
+                                    impl_->fxPaintBrushes.push_back(
+                                        std::move(moved)
+                                    );
+                                }
+                                return impl_->fxPaintBrushes.back()
+                                    .brush;
+                            }
+                        }
+                        Microsoft::WRL::ComPtr<ID2D1Brush> created =
+                            createPaintBrush(
+                                context, paint, emRect, burst.color,
+                                device_, nullptr, 0.0f, 0.0f, nullptr, 1.0f
+                            );
+                        if (created) {
+                            if (impl_->fxPaintBrushes.size() >= 64) {
+                                impl_->fxPaintBrushes.erase(
+                                    impl_->fxPaintBrushes.begin()
+                                );
+                            }
+                            impl_->fxPaintBrushes.push_back(
+                                decltype(impl_->fxPaintBrushes)
+                                    ::value_type{
+                                        paint, burst.color, created
+                                    }
+                            );
+                        }
+                        return created;
+                    };
+                if (burst.hasPaint) {
+                    strokeEm = burst.sizePx > 0.0f
+                        ? burst.strokeWidth / burst.sizePx * 1000.0f
+                        : 0.0f;
+                    stroke2Em = burst.sizePx > 0.0f
+                        ? burst.stroke2Width / burst.sizePx * 1000.0f
+                        : 0.0f;
+                    // 径向环跳过静态填充笔刷（逐粒子换色）；其余配方
+                    // 用缓存的填充笔刷。宽度为 0 的描边层不建笔刷。
+                    if (!radialRing) {
+                        fillBrush = layerBrush(burst.fill);
+                    }
+                    if (strokeEm >= 1.0f) {
+                        strokeBrush = layerBrush(burst.stroke);
+                    }
+                    if (stroke2Em >= 1.0f) {
+                        stroke2Brush = layerBrush(burst.stroke2);
+                    }
+                    if ((strokeEm >= 1.0f || stroke2Em >= 1.0f)
+                        && !impl_->fxRoundStrokeStyle) {
+                        // 圆角连接/端点（painter QPen RoundJoin/RoundCap
+                        // 同款）；按 Impl 缓存，随本实例 factory 生命周期。
+                        const D2D1_STROKE_STYLE_PROPERTIES properties =
+                            D2D1::StrokeStyleProperties(
+                                D2D1_CAP_STYLE_ROUND,
+                                D2D1_CAP_STYLE_ROUND,
+                                D2D1_CAP_STYLE_ROUND,
+                                D2D1_LINE_JOIN_ROUND,
+                                10.0f,
+                                D2D1_DASH_STYLE_SOLID,
+                                0.0f
+                            );
+                        device_.d2dFactory()->CreateStrokeStyle(
+                            properties,
+                            nullptr,
+                            0,
+                            impl_->fxRoundStrokeStyle.ReleaseAndGetAddressOf()
+                        );
+                    }
+                    roundStyle = impl_->fxRoundStrokeStyle;
+                } else {
+                    // 单独颜色档：合成 solid PaintStyle 走同一把 LRU——
+                    // 实心笔刷也按颜色缓存，逐帧零创建（所有粒子类型、
+                    // 所有颜色档统一走这一个缓存）。
+                    fillBrush = layerBrush(solidPaint(burst.color));
+                }
                 for (const FxParticle &particle : burstParticlesAt(
                     burst, tMs, originX, originY, boxW, boxH
                 )) {
@@ -5412,21 +5577,65 @@ ProbeResult Direct2DGpuBackend::renderFrameInternal(
                             * D2D1::Matrix3x2F::Translation(particle.x, particle.y)
                             * previousTransform
                     );
-                    Microsoft::WRL::ComPtr<ID2D1SolidColorBrush> brush;
                     const float alpha = std::clamp(
                         particle.alpha * globalOpacity, 0.0f, 1.0f
                     );
-                    if (SUCCEEDED(context->CreateSolidColorBrush(
-                        D2D1::ColorF(
-                            static_cast<float>(burst.color.red) / 255.0f,
-                            static_cast<float>(burst.color.green) / 255.0f,
-                            static_cast<float>(burst.color.blue) / 255.0f,
-                            alpha
-                        ),
-                        brush.ReleaseAndGetAddressOf()
-                    ))) {
+                    if (!burst.hasPaint) {
+                        if (fillBrush) {
+                            fillBrush->SetOpacity(alpha);
+                            context->FillGeometry(
+                                spriteIt->second.Get(), fillBrush.Get()
+                            );
+                        }
+                        continue;
+                    }
+                    if (radialRing) {
+                        // 环半径由 0.25×size 扩散到 1.10×size：进度 =
+                        // (sizePx/sizeBurst - 0.25)/0.85（恰为求值器的
+                        // eased），量化 1/32 档与 CPU painter 同口径。
+                        float eased =
+                            (particle.sizePx / std::max(burst.sizePx, 1.0f)
+                             - 0.25f)
+                            / 0.85f;
+                        eased = std::clamp(eased, 0.0f, 1.0f);
+                        eased = std::min(
+                            std::round(eased * 32.0f), 32.0f
+                        ) / 32.0f;
+                        const RgbaColor sampled = paintColorAt(
+                            burst.fill, eased
+                        );
+                        const auto ringBrush =
+                            layerBrush(solidPaint(sampled));
+                        if (ringBrush) {
+                            ringBrush->SetOpacity(alpha);
+                            context->FillGeometry(
+                                spriteIt->second.Get(), ringBrush.Get()
+                            );
+                        }
+                        continue;
+                    }
+                    if (stroke2Em >= 1.0f && stroke2Brush && roundStyle) {
+                        stroke2Brush->SetOpacity(alpha);
+                        context->DrawGeometry(
+                            spriteIt->second.Get(),
+                            stroke2Brush.Get(),
+                            strokeEm + stroke2Em,
+                            roundStyle.Get()
+                        );
+                    }
+                    if (strokeEm >= 1.0f && strokeBrush && roundStyle) {
+                        strokeBrush->SetOpacity(alpha);
+                        context->DrawGeometry(
+                            spriteIt->second.Get(),
+                            strokeBrush.Get(),
+                            strokeEm,
+                            roundStyle.Get()
+                        );
+                    }
+                    if (fillBrush) {
+                        fillBrush->SetOpacity(alpha);
                         context->FillGeometry(
-                            spriteIt->second.Get(), brush.Get()
+                            spriteIt->second.Get(), fillBrush.Get()
                         );
                     }
                 }

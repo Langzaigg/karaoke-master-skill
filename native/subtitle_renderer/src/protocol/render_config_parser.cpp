@@ -1488,6 +1488,39 @@ std::optional<RenderConfig> parseRenderConfig(const QJsonObject &ir, QString *er
                     burstObject, QStringLiteral("color"),
                     QStringLiteral("#FFFFFF")
                 );
+                // 2026-10 粒子装饰规格（颜色模式非单色时随 burst 下发）：
+                // fill/stroke/stroke2 为 PaintFill dict，宽度已按粒子尺寸
+                // 缩放。旧 IR 无 "paint" 键 → hasPaint=false 走实色路径。
+                const QJsonObject paintObject = burstObject.value(
+                    QStringLiteral("paint")
+                ).toObject();
+                if (!paintObject.isEmpty()) {
+                    burst.hasPaint = true;
+                    burst.fill = paintFillSpec(
+                        paintObject.value(QStringLiteral("fill")).toObject(),
+                        burst.color
+                    );
+                    burst.stroke = paintFillSpec(
+                        paintObject.value(QStringLiteral("stroke")).toObject(),
+                        burst.color
+                    );
+                    burst.stroke2 = paintFillSpec(
+                        paintObject.value(QStringLiteral("stroke2")).toObject(),
+                        burst.color
+                    );
+                    burst.strokeWidthPx = std::max(
+                        paintObject.value(
+                            QStringLiteral("stroke_width_px")
+                        ).toDouble(0.0),
+                        0.0
+                    );
+                    burst.stroke2WidthPx = std::max(
+                        paintObject.value(
+                            QStringLiteral("stroke2_width_px")
+                        ).toDouble(0.0),
+                        0.0
+                    );
+                }
                 if (!burst.kind.isEmpty() && burst.count > 0
                     && burst.endMs > burst.startMs) {
                     line.fxBursts.push_back(std::move(burst));
