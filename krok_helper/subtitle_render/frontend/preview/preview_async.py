@@ -463,6 +463,7 @@ class AsyncSubtitleRenderer(QObject):
 
     frame_ready = Signal(QImage, int)
     renderProgress = Signal(int, str)
+    backendModeChanged = Signal(str)
     _state_changed = Signal(object, object, object, object)
     _target_changed = Signal(int, int, float)
     _frame_requested = Signal(int)
@@ -536,6 +537,11 @@ class AsyncSubtitleRenderer(QObject):
         """Playback state hook kept for API symmetry with the native preview path."""
         return
 
+    @property
+    def current_backend_mode(self) -> str:
+        """Painter 渲染器恒为 CPU（与 GPU 渲染器的 API 对称，见该类注释）。"""
+        return "cpu"
+
     def stop(self) -> None:
         if self._stopped:
             return
@@ -563,6 +569,7 @@ class GpuAsyncSubtitleRenderer(QObject):
     frame_presented = Signal(int)
     renderProgress = Signal(int, str)
     fallback_occurred = Signal(str)
+    backendModeChanged = Signal(str)
 
     _STALE_TOLERANCE_MS = 120
     _SEEK_DISCONTINUITY_MS = 250
@@ -630,6 +637,9 @@ class GpuAsyncSubtitleRenderer(QObject):
         self._frame_index = 0
         self._condition = threading.Condition()
         self._stats_lock = threading.Lock()
+        # 最近一次确认的实际出帧后端（"gpu"=sidecar / "cpu"=Painter 回退）；
+        # None = 尚无帧定论（GUI 侧按渲染器选择展示）。仅在翻转时发信号。
+        self._backend_mode: Optional[str] = None
         self._stats = {
             "requests": 0,
             "cache_hits": 0,
@@ -793,6 +803,8 @@ class GpuAsyncSubtitleRenderer(QObject):
                 self._note("cache_hits")
                 self._note("frames_emitted")
                 self.frame_ready.emit(cached, requested_t)
+                # 缓存里只会有 sidecar 渲染的帧（回退帧不入缓存）。
+                self._note_backend_mode("gpu")
             else:
                 self._note("cache_misses")
             if self._playing and self._lookahead_frames > 0:
@@ -900,6 +912,9 @@ class GpuAsyncSubtitleRenderer(QObject):
                     continue
                 unsupported = gpu_unsupported_features(track, style, extra_tracks)
                 if unsupported:
+                    # 能力回退期间（含投机请求被跳过的播放态）实际后端就是
+                    # Painter：哪怕本帧不回退出帧，也不该继续显示 GPU。
+                    self._note_backend_mode("cpu")
                     if not speculative:
                         if self._native_preview:
                             self._close_renderer()
@@ -1119,6 +1134,7 @@ class GpuAsyncSubtitleRenderer(QObject):
                         self._note("frames_emitted")
                         self.frame_ready.emit(image, int(t_ms))
                         self._schedule_lookahead(t_ms, serial, generation)
+                        self._note_backend_mode("gpu")
                     else:
                         self._note("stale_frames_dropped")
                 except Exception as exc:  # noqa: BLE001 - worker 线程必须自愈
@@ -1136,6 +1152,7 @@ class GpuAsyncSubtitleRenderer(QObject):
                         self._needs_configure = True
                         self._needs_target_resize = False
                     self._note("renderer_failures")
+                    self._note_backend_mode("cpu")
                     self._report_fallback(
                         f"GPU 字幕预览异常，当前帧已回退 Painter，稍后会自动重试：{exc}"
                     )
@@ -1258,6 +1275,7 @@ class GpuAsyncSubtitleRenderer(QObject):
             elif self._may_emit(request_t, generation):
                 self._note("frames_emitted")
                 self.frame_ready.emit(image, request_t)
+                self._note_backend_mode("gpu")
             else:
                 self._note("stale_frames_dropped")
 
@@ -1393,6 +1411,24 @@ class GpuAsyncSubtitleRenderer(QObject):
             self._note("fallback_frames")
             self._note("frames_emitted")
             self.frame_ready.emit(image, int(t_ms))
+            self._note_backend_mode("cpu")
+
+    def _note_backend_mode(self, mode: str) -> None:
+        """记录并广播当前实际出帧后端（"gpu"=sidecar / "cpu"=Painter 回退）。
+
+        按翻转去重发信号：稳态运行时每帧调用只是一次锁内比较。
+        """
+        with self._stats_lock:
+            if self._backend_mode == mode:
+                return
+            self._backend_mode = mode
+        self.backendModeChanged.emit(mode)
+
+    @property
+    def current_backend_mode(self) -> Optional[str]:
+        """最近一次确认的实际渲染后端；None = 尚无帧定论（按选择态展示）。"""
+        with self._stats_lock:
+            return self._backend_mode
 
     def _note(self, key: str) -> None:
         with self._stats_lock:
@@ -1444,6 +1480,7 @@ class NativeAsyncSubtitleRenderer(QObject):
     frame_ready = Signal(QImage, int)
     renderProgress = Signal(int, str)
     fallback_occurred = Signal(str)
+    backendModeChanged = Signal(str)
 
     def __init__(self, width: int, height: int, parent: Optional[QObject] = None) -> None:
         super().__init__(parent)
@@ -1502,6 +1539,8 @@ class NativeAsyncSubtitleRenderer(QObject):
         self._waiting_request_by_key: dict[int, int] = {}
         self._emitted_request_keys: set[int] = set()
         self._stats = NativePreviewStats()
+        self._backend_lock = threading.Lock()
+        self._backend_mode: Optional[str] = None
         self._condition = threading.Condition()
         self._process_lock = threading.Lock()
         self._thread = threading.Thread(
@@ -1565,6 +1604,8 @@ class NativeAsyncSubtitleRenderer(QObject):
             with self._condition:
                 self._emitted_request_keys.add(requested_key)
             self.frame_ready.emit(cached, requested_t)
+            # 缓存里只会有 sidecar 渲染的帧（回退帧不入缓存）。
+            self._note_backend_mode("gpu")
         else:
             self._stats.note_cache_miss()
         with self._condition:
@@ -1632,6 +1673,7 @@ class NativeAsyncSubtitleRenderer(QObject):
             if track is None or style is None:
                 continue
             if self._renderer_failed:
+                self._note_backend_mode("cpu")
                 self._emit_python_fallback(
                     track, style, width, height, dpr, t_ms, generation, duration_ms
                 )
@@ -1652,6 +1694,7 @@ class NativeAsyncSubtitleRenderer(QObject):
                     skip_current=skip_current,
                     relayout_scope=relayout_scope,
                 )
+                self._note_backend_mode("gpu")
             except NativeRendererError as exc:
                 self._stats.note_native_renderer_failure()
                 if _env_enabled("KROK_SUBTITLE_NATIVE_DEBUG_FAILURES", "0"):
@@ -1661,19 +1704,35 @@ class NativeAsyncSubtitleRenderer(QObject):
                 )
                 self._renderer_failed = True
                 self._close_renderer()
+                self._note_backend_mode("cpu")
                 self._emit_python_fallback(
                     track, style, width, height, dpr, t_ms, generation, duration_ms
                 )
             except Exception as exc:  # noqa: BLE001 - worker 线程必须自愈，不得静默死亡
                 _log.exception("native 预览路径出现非预期异常（本帧回退 Painter）")
                 self._report_fallback(
-                    f"native 字幕预览出现非预期异常，当前帧已回退 Painter：{exc}"
+                    f"native 预览路径出现非预期异常，当前帧已回退 Painter：{exc}"
                 )
                 self._renderer_failed = True
                 self._close_renderer()
+                self._note_backend_mode("cpu")
                 self._emit_python_fallback(
                     track, style, width, height, dpr, t_ms, generation, duration_ms
                 )
+
+    def _note_backend_mode(self, mode: str) -> None:
+        """记录并广播当前实际出帧后端（"gpu"=sidecar / "cpu"=Painter 回退）。"""
+        with self._backend_lock:
+            if self._backend_mode == mode:
+                return
+            self._backend_mode = mode
+        self.backendModeChanged.emit(mode)
+
+    @property
+    def current_backend_mode(self) -> Optional[str]:
+        """最近一次确认的实际渲染后端；None = 尚无帧定论（按选择态展示）。"""
+        with self._backend_lock:
+            return self._backend_mode
 
     def _take_next_request(
         self,

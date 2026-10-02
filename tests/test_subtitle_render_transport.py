@@ -2702,6 +2702,294 @@ def test_preview_graphics_render_badge_closes_on_snapped_frame_while_paused(
         qapp.processEvents()
 
 
+def test_preview_graphics_render_backend_label_tracks_actual_mode(qapp, monkeypatch):
+    """画布的实际后端标签：以真实出帧后端为准，渲染器切换时发信号。"""
+    import krok_helper.subtitle_render.frontend.preview.preview_async as preview_async
+    from krok_helper.subtitle_render.frontend.preview import preview_graphics as pg
+    from krok_helper.subtitle_render.frontend.preview.preview_graphics import (
+        PreviewGraphicsView,
+    )
+    from krok_helper.subtitle_render.domain.models import (
+        TimingChar,
+        TimingLine,
+        TimingTrack,
+    )
+
+    from krok_helper.subtitle_render.native.backend import NativeRendererError
+
+    class BrokenSidecar:
+        def __init__(self, *_args, **_kwargs):
+            pass
+
+        def start(self):
+            raise NativeRendererError("sidecar unavailable in test")
+
+        def close(self):
+            return None
+
+    monkeypatch.setattr(preview_async, "NativeRendererProcess", BrokenSidecar)
+    monkeypatch.setattr(pg, "async_preview_enabled", lambda: True)
+    monkeypatch.setattr(pg, "gpu_preview_enabled", lambda: True)
+
+    graphics = PreviewGraphicsView()
+    try:
+        # 尚无帧定论：按选择态显示 GPU。
+        assert graphics.render_backend_label() == "GPU"
+
+        # sidecar 起不来 → 故障回退 Painter，标签翻转为 CPU。
+        track = TimingTrack(
+            lines=[TimingLine(chars=[TimingChar("歌", 0)], end_ms=1_000)]
+        )
+        graphics.set_track(track)
+        deadline = time.monotonic() + 5.0
+        while graphics.render_backend_label() != "CPU" and time.monotonic() < deadline:
+            qapp.processEvents()
+            time.sleep(0.01)
+        assert graphics.render_backend_label() == "CPU"
+
+        # 运行时切渲染器：切到 Painter → CPU；切回 GPU（无帧定论）→ GPU。
+        received: list[str] = []
+        graphics.renderBackendChanged.connect(received.append)
+        graphics.set_gpu_preview_enabled(False)
+        assert received == ["CPU"]
+        assert graphics.render_backend_label() == "CPU"
+        graphics.set_gpu_preview_enabled(True)
+        assert received == ["CPU", "GPU"]
+        assert graphics.render_backend_label() == "GPU"
+    finally:
+        graphics.close()
+        graphics.deleteLater()
+        qapp.processEvents()
+
+
+def test_preview_graphics_render_backend_emits_in_sync_painter_mode(qapp, monkeypatch):
+    """async 全关时手动开/关 GPU：两次切换都必须发信号（关回同步模式不漏报）。"""
+    import krok_helper.subtitle_render.frontend.preview.preview_async as preview_async
+    from krok_helper.subtitle_render.frontend.preview import preview_graphics as pg
+    from krok_helper.subtitle_render.frontend.preview.preview_graphics import (
+        PreviewGraphicsView,
+    )
+    from krok_helper.subtitle_render.native.backend import NativeRendererError
+
+    class BrokenSidecar:
+        def __init__(self, *_args, **_kwargs):
+            pass
+
+        def start(self):
+            raise NativeRendererError("sidecar unavailable in test")
+
+        def close(self):
+            return None
+
+    monkeypatch.setattr(preview_async, "NativeRendererProcess", BrokenSidecar)
+    monkeypatch.setattr(pg, "async_preview_enabled", lambda: False)
+    monkeypatch.setattr(pg, "gpu_preview_enabled", lambda: False)
+
+    graphics = PreviewGraphicsView()
+    try:
+        assert graphics.render_backend_label() == "CPU"  # 同步 QPainter，无渲染器
+        received: list[str] = []
+        graphics.renderBackendChanged.connect(received.append)
+
+        graphics.set_gpu_preview_enabled(True)
+        assert received == ["GPU"]
+        assert graphics.render_backend_label() == "GPU"
+
+        # 关回同步模式：async 全关的早退分支也必须通知 UI。
+        graphics.set_gpu_preview_enabled(False)
+        assert received == ["GPU", "CPU"]
+        assert graphics.render_backend_label() == "CPU"
+    finally:
+        graphics.close()
+        graphics.deleteLater()
+        qapp.processEvents()
+
+
+def test_preview_graphics_ignores_stale_backend_signal_after_renderer_swap(
+    qapp, monkeypatch
+):
+    """渲染器热切换后，旧渲染器仍在事件队列里的迟到信号不得污染新状态。"""
+    import krok_helper.subtitle_render.frontend.preview.preview_async as preview_async
+    from krok_helper.subtitle_render.frontend.preview import preview_graphics as pg
+    from krok_helper.subtitle_render.frontend.preview.preview_graphics import (
+        PreviewGraphicsView,
+    )
+    from krok_helper.subtitle_render.native.backend import NativeRendererError
+
+    class BrokenSidecar:
+        def __init__(self, *_args, **_kwargs):
+            pass
+
+        def start(self):
+            raise NativeRendererError("sidecar unavailable in test")
+
+        def close(self):
+            return None
+
+    monkeypatch.setattr(preview_async, "NativeRendererProcess", BrokenSidecar)
+    monkeypatch.setattr(pg, "async_preview_enabled", lambda: True)
+    monkeypatch.setattr(pg, "gpu_preview_enabled", lambda: True)
+
+    graphics = PreviewGraphicsView()
+    try:
+        old_renderer = graphics._async_renderer
+        assert old_renderer is not None
+        received: list[str] = []
+        graphics.renderBackendChanged.connect(received.append)
+
+        graphics.set_gpu_preview_enabled(False)  # → Painter
+        graphics.set_gpu_preview_enabled(True)  # → 新 GPU 渲染器
+        assert received == ["CPU", "GPU"]
+        assert graphics.render_backend_label() == "GPU"
+
+        # 旧渲染器的迟到信号（断开连接 + sender 双保险）不得翻回 CPU。
+        old_renderer.backendModeChanged.emit("cpu")
+        qapp.processEvents()
+        assert graphics.render_backend_label() == "GPU"
+        assert received == ["CPU", "GPU"]
+    finally:
+        graphics.close()
+        graphics.deleteLater()
+        qapp.processEvents()
+
+
+def test_preview_graphics_backend_label_follows_gpu_failure_and_recovery(
+    qapp, monkeypatch
+):
+    """端到端恢复环：GPU 故障 → 回退 CPU 出帧 → 冷却后自动重试拉起 GPU。
+
+    覆盖用户列出的切换场景：sidecar 故障/显存爆（异常路径）、Painter 回退帧、
+    CPU 态自动重试恢复 GPU，标签全程跟随真实出帧后端。
+    """
+    import krok_helper.subtitle_render.frontend.preview.preview_async as preview_async
+    from krok_helper.subtitle_render.frontend.preview import preview_graphics as pg
+    from krok_helper.subtitle_render.frontend.preview.preview_graphics import (
+        PreviewGraphicsView,
+    )
+    from krok_helper.subtitle_render.domain.models import (
+        TimingChar,
+        TimingLine,
+        TimingTrack,
+    )
+    from krok_helper.subtitle_render.native.backend import NativeRendererError
+
+    start_attempts = 0
+
+    class FlakySidecar:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def start(self):
+            nonlocal start_attempts
+            start_attempts += 1
+            if start_attempts == 1:
+                # 首次拉起失败（模拟 GPU 访问异常 / 显存爆）。
+                raise NativeRendererError("flaky sidecar first start fails")
+            return {"ok": True, "event": "ready"}
+
+        def configure_gpu(self, *args, **kwargs):
+            return {"ok": True, "event": "gpu_configured", "worker_count": 1}
+
+        def render_gpu_frame(self, t_ms, **kwargs):
+            return {
+                "ok": True,
+                "event": "gpu_frame_ready",
+                "shm_key": "gpu-recovery-ring",
+                "t_ms": int(t_ms),
+            }
+
+        def close(self):
+            return None
+
+    class FakeGpuReader:
+        def __init__(self, shm_key):
+            self.shm_key = shm_key
+
+        @classmethod
+        def from_event(cls, event):
+            return cls(event["shm_key"])
+
+        def read_qimage(self, event):
+            image = QImage(8, 8, QImage.Format.Format_RGBA8888)
+            image.fill(QColor("#112233"))
+            return image
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(preview_async, "NativeRendererProcess", FlakySidecar)
+    monkeypatch.setattr(preview_async, "SharedFrameRingReader", FakeGpuReader)
+    monkeypatch.setattr(pg, "async_preview_enabled", lambda: True)
+    monkeypatch.setattr(pg, "gpu_preview_enabled", lambda: True)
+
+    graphics = PreviewGraphicsView()
+    try:
+        track = TimingTrack(
+            lines=[TimingLine(chars=[TimingChar("歌", 0)], end_ms=1_000)]
+        )
+        graphics.set_track(track)
+
+        # 首帧：sidecar 拉起失败 → 回退 Painter 出帧 → 标签 CPU。
+        graphics.set_time(1_000)
+        deadline = time.monotonic() + 5.0
+        while graphics.render_backend_label() != "CPU" and time.monotonic() < deadline:
+            qapp.processEvents()
+            time.sleep(0.01)
+        assert graphics.render_backend_label() == "CPU"
+
+        # 冷却结束后新请求 → 自动重试拉起 sidecar（这次成功）→ 标签 GPU。
+        graphics._async_renderer._retry_after = 0.0
+        graphics.set_time(2_000)
+        deadline = time.monotonic() + 5.0
+        while graphics.render_backend_label() != "GPU" and time.monotonic() < deadline:
+            qapp.processEvents()
+            time.sleep(0.01)
+        assert graphics.render_backend_label() == "GPU"
+        assert start_attempts == 2
+    finally:
+        graphics.close()
+        graphics.deleteLater()
+        qapp.processEvents()
+
+
+def test_preview_player_window_backend_indicator(qapp, monkeypatch):
+    """预览窗口标题栏的实际渲染后端指示：位于标题与预览质量之间并联动。"""
+    from PyQt6.QtWidgets import QWidget
+
+    from krok_helper.subtitle_render.frontend.preview import preview_graphics as pg
+    from krok_helper.subtitle_render.frontend.preview.player_window import (
+        PreviewPlayerWindow,
+    )
+
+    monkeypatch.setattr(pg, "async_preview_enabled", lambda: True)
+    monkeypatch.setattr(pg, "gpu_preview_enabled", lambda: False)
+
+    owner = QWidget()
+    window = PreviewPlayerWindow(owner)
+    try:
+        layout = window._top_controls.layout()
+        title_idx = layout.indexOf(window._title_label)
+        backend_idx = layout.indexOf(window._backend_label)
+        quality_idx = layout.indexOf(window._transport_bar._preview_quality_label)
+        assert title_idx < backend_idx < quality_idx
+
+        # offscreen 下画布是 Painter 异步渲染器 → 初始即 CPU。
+        assert window._backend_label.text() == "CPU渲染中"
+        window._set_render_backend_label("GPU")
+        assert window._backend_label.text() == "GPU渲染中"
+
+        window._collapse_window()
+        assert window._backend_label.isHidden()
+        window._restore_from_collapsed()
+        assert not window._backend_label.isHidden()
+    finally:
+        window._preview_panel.canvas.close()
+        window.close()
+        window.deleteLater()
+        owner.deleteLater()
+        qapp.processEvents()
+
+
 def test_preview_graphics_pause_re_requests_current_frame(qapp, monkeypatch):
     """回归：暂停必须补发当前位帧请求。
 
@@ -3617,6 +3905,89 @@ def test_gpu_preview_request_snap_is_deterministic_for_same_frame(qapp, monkeypa
             renderer.request(raw_t)
             seen.add(renderer._latest_t)
         assert seen == {10_000}
+    finally:
+        renderer.stop()
+
+
+def test_gpu_renderer_backend_mode_reports_gpu_on_delivered_frame(qapp, monkeypatch):
+    """实际后端上报：sidecar 出帧到达 → gpu。"""
+
+    from krok_helper.subtitle_render.frontend.preview import preview_async as pa
+    from krok_helper.subtitle_render.domain.models import Style, TimingTrack
+
+    class FakeGpuProcess:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def start(self):
+            return {"ok": True, "event": "ready"}
+
+        def configure_gpu(self, *args, **kwargs):
+            return {"ok": True, "event": "gpu_configured", "worker_count": 1}
+
+        def render_gpu_frame(self, t_ms, **kwargs):
+            return {
+                "ok": True,
+                "event": "gpu_frame_ready",
+                "shm_key": "gpu-backend-mode-ring",
+                "t_ms": int(t_ms),
+            }
+
+        def close(self):
+            return None
+
+    class FakeGpuReader:
+        def __init__(self, shm_key):
+            self.shm_key = shm_key
+
+        @classmethod
+        def from_event(cls, event):
+            return cls(event["shm_key"])
+
+        def read_qimage(self, event):
+            image = QImage(8, 8, QImage.Format.Format_RGBA8888)
+            image.fill(QColor("#112233"))
+            return image
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(pa, "NativeRendererProcess", FakeGpuProcess)
+    monkeypatch.setattr(pa, "SharedFrameRingReader", FakeGpuReader)
+    renderer = pa.GpuAsyncSubtitleRenderer(320, 180)
+    try:
+        renderer.set_state(TimingTrack(), Style())
+        renderer.request(1_000)
+        deadline = time.monotonic() + 5.0
+        while renderer.current_backend_mode != "gpu" and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert renderer.current_backend_mode == "gpu"
+    finally:
+        renderer.stop()
+
+
+def test_gpu_renderer_backend_mode_flips_to_cpu_on_sidecar_failure(qapp, monkeypatch):
+    """实际后端上报：sidecar 起不来（故障路径）→ cpu，与选择态相反。"""
+
+    from krok_helper.subtitle_render.domain.models import Style
+    from krok_helper.subtitle_render.domain.timing import (
+        TimingChar,
+        TimingLine,
+        TimingTrack,
+    )
+
+    renderer = _broken_sidecar_renderer(monkeypatch, qapp)
+    try:
+        track = TimingTrack(
+            lines=[TimingLine(chars=[TimingChar("歌", 0)], end_ms=1_000)]
+        )
+        renderer.set_state(track, Style())
+        assert renderer.current_backend_mode is None  # 尚无帧定论
+        renderer.request(1_000)
+        deadline = time.monotonic() + 5.0
+        while renderer.current_backend_mode != "cpu" and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert renderer.current_backend_mode == "cpu"
     finally:
         renderer.stop()
 

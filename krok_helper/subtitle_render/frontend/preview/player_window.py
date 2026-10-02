@@ -212,6 +212,17 @@ class PreviewPlayerWindow(QWidget):
         self._transport_bar._preview_quality_combo.setObjectName(
             "PreviewQualityCombo"
         )
+        # 实际渲染后端指示（GPU / CPU）：跟随最近一次真实出帧后端翻转，
+        # 而不是用户/环境选择的渲染器——GPU 故障或能力回退时如实际显示 CPU。
+        self._backend_label = QLabel("GPU渲染中", self._top_controls)
+        self._backend_label.setObjectName("PreviewBackendLabel")
+        self._backend_label.setToolTip(
+            "当前实际渲染后端：GPU 渲染器故障或工程包含暂不支持的功能时，"
+            "预览自动回退 CPU（Painter）绘制"
+        )
+        self._backend_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._backend_label.setFixedSize(76, 28)
+        top_layout.addWidget(self._backend_label)
         top_layout.addWidget(self._transport_bar._preview_quality_label)
         top_layout.addWidget(self._transport_bar._preview_quality_combo)
 
@@ -228,6 +239,15 @@ class PreviewPlayerWindow(QWidget):
         self._close_button.clicked.connect(self.close)
 
         self._init_playback_shortcuts()
+
+        canvas = self._preview_panel.canvas
+        backend_changed = getattr(canvas, "renderBackendChanged", None)
+        if backend_changed is not None:
+            backend_changed.connect(self._set_render_backend_label)
+            self._set_render_backend_label(canvas.render_backend_label())
+        else:
+            # raster 回退画布恒为 QPainter 绘制，无后端状态可接。
+            self._set_render_backend_label("CPU")
 
         self._hide_controls_timer = QTimer(self)
         self._hide_controls_timer.setSingleShot(True)
@@ -277,6 +297,13 @@ class PreviewPlayerWindow(QWidget):
                 }
                 #PreviewTopControls QPushButton:pressed {
                     background: rgba(255, 255, 255, 72);
+                }
+                #PreviewTopControls QLabel#PreviewBackendLabel {
+                    color: rgba(255, 255, 255, 210);
+                    border: 1px solid rgba(255, 255, 255, 36);
+                    border-radius: 4px;
+                    font-size: 9pt;
+                    font-family: "Microsoft YaHei UI";
                 }
                 #PreviewTopControls QComboBox#PreviewQualityCombo {
                     background: transparent;
@@ -465,6 +492,10 @@ class PreviewPlayerWindow(QWidget):
         self._media_title = path.name if path is not None else "字幕视频预览"
         if not self._collapsed:
             self._title_label.setText(self._media_title)
+
+    def _set_render_backend_label(self, label: str) -> None:
+        """刷新标题栏的实际渲染后端指示（GPU渲染中 / CPU渲染中，来自画布真实出帧状态）。"""
+        self._backend_label.setText(f"{label}渲染中")
 
     def _init_playback_shortcuts(self) -> None:
         self._space_shortcut = QShortcut(QKeySequence(Qt.Key.Key_Space), self)
@@ -667,6 +698,7 @@ class PreviewPlayerWindow(QWidget):
         self._bottom_controls.hide()
         self._transport_bar._preview_quality_label.hide()
         self._transport_bar._preview_quality_combo.hide()
+        self._backend_label.hide()
         self._minimize_button.hide()
         self._maximize_button.setToolTip("恢复预览窗口")
         self._title_label.setText("预览窗口")
@@ -685,6 +717,7 @@ class PreviewPlayerWindow(QWidget):
         self._apply_minimum_window_size()
         self._transport_bar._preview_quality_label.show()
         self._transport_bar._preview_quality_combo.show()
+        self._backend_label.show()
         self._minimize_button.show()
         self._maximize_button.setToolTip("")
         self._title_label.setText(self._media_title)

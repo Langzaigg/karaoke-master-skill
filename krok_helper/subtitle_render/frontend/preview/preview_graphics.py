@@ -279,6 +279,8 @@ class PreviewGraphicsView(QGraphicsView):
 
     framePainted = Signal()
     gpuFallback = Signal(str)
+    renderBackendChanged = Signal(str)
+    """实际渲染后端翻转或渲染器切换时 emit 用户可见标签（GPU / CPU）。"""
 
     def __init__(self, parent: Optional[QWidget] = None) -> None:
         super().__init__(parent)
@@ -400,6 +402,7 @@ class PreviewGraphicsView(QGraphicsView):
             self._connect_render_progress_signal()
             self._connect_native_preview_signal()
             self._connect_gpu_fallback_signal()
+            self._connect_backend_mode_signal()
             self._subtitle_item.set_async_mode(True)
             self._refresh_async_target()
 
@@ -479,6 +482,8 @@ class PreviewGraphicsView(QGraphicsView):
         if not enabled and not async_preview_enabled():
             self._subtitle_item.set_async_mode(False)
             self._subtitle_item.set_time(self._t_ms)
+            # 同步 QPainter 模式（async 全关）后端确定是 CPU，也必须通知 UI。
+            self.renderBackendChanged.emit(self.render_backend_label())
             return
         self._async_renderer = target_cls(self._output_w, self._output_h, self)
         self._async_renderer.frame_ready.connect(
@@ -487,11 +492,13 @@ class PreviewGraphicsView(QGraphicsView):
         self._connect_render_progress_signal()
         self._connect_native_preview_signal()
         self._connect_gpu_fallback_signal()
+        self._connect_backend_mode_signal()
         self._subtitle_item.set_async_mode(True)
         if hasattr(self._async_renderer, "set_playing"):
             self._async_renderer.set_playing(self._video_playing)
         self._refresh_async_target()
         self._refresh_async_state()
+        self.renderBackendChanged.emit(self.render_backend_label())
 
     def set_preview_quality(self, quality: object) -> None:
         """Update the preview-only subtitle raster target without restarting video."""
@@ -510,6 +517,39 @@ class PreviewGraphicsView(QGraphicsView):
         signal = getattr(self._async_renderer, "fallback_occurred", None)
         if signal is not None:
             signal.connect(self.gpuFallback.emit, Qt.ConnectionType.QueuedConnection)
+
+    def _connect_backend_mode_signal(self) -> None:
+        signal = getattr(self._async_renderer, "backendModeChanged", None)
+        if signal is not None:
+            signal.connect(
+                self._on_render_backend_mode_changed,
+                Qt.ConnectionType.QueuedConnection,
+            )
+
+    def _on_render_backend_mode_changed(self, mode: str) -> None:
+        sender = self.sender()
+        if sender is not None and sender is not self._async_renderer:
+            # 渲染器热切换后，旧渲染器仍在事件队列里的迟到信号不得污染新状态。
+            return
+        self.renderBackendChanged.emit("CPU" if mode == "cpu" else "GPU")
+
+    def render_backend_label(self) -> str:
+        """当前实际渲染后端的用户可见标签（GPU / CPU）。
+
+        以渲染器最近一次确认的实际出帧后端为准（GPU 渲染器可能因 sidecar
+        故障或功能不支持逐帧回退 Painter）；尚无帧定论时按渲染器选择展示。
+        """
+        renderer = self._async_renderer
+        if renderer is None:
+            return "CPU"
+        mode = getattr(renderer, "current_backend_mode", None)
+        if mode is not None:
+            return "CPU" if mode == "cpu" else "GPU"
+        if isinstance(
+            renderer, (GpuAsyncSubtitleRenderer, NativeAsyncSubtitleRenderer)
+        ):
+            return "GPU"
+        return "CPU"
 
     def _connect_render_progress_signal(self) -> None:
         signal = getattr(self._async_renderer, "renderProgress", None)
@@ -761,6 +801,13 @@ class PreviewGraphicsView(QGraphicsView):
         renderer = self._async_renderer
         if renderer is None:
             return
+        signal = getattr(renderer, "backendModeChanged", None)
+        if signal is not None:
+            try:
+                signal.disconnect(self._on_render_backend_mode_changed)
+            except TypeError:
+                # 未连接过（Painter 恒 CPU，从不发射）。
+                pass
         self._async_renderer = None
         renderer.stop()
 
