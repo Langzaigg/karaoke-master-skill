@@ -1,10 +1,12 @@
 #include "gpu_lifecycle_commands.h"
 
+#include "../backends/qt/qt_render_cache.h"
 #include "../backends/render_backend.h"
 #include "../backends/qt/gpu_scene_projection.h"
 #include "../diagnostics/gpu_diagnostics_json.h"
 #include "../protocol/json_protocol.h"
 #include "../protocol/json_value.h"
+#include "../protocol/render_config_parser.h"
 #include "../runtime/gpu_backend_runtime.h"
 #include "../runtime/gpu_preview_worker_pool.h"
 #include "../runtime/render_runtime.h"
@@ -12,15 +14,20 @@
 #include <QtCore/QElapsedTimer>
 #include <QtCore/QJsonArray>
 #include <QtCore/QJsonObject>
+#include <QtCore/QtGlobal>
 
 #include <cstdint>
 #include <stdexcept>
+#include <utility>
 #include <vector>
 
 namespace krok::subtitle::native::commands {
 
 using diagnostics::appendGpuDiagnostics;
 using diagnostics::backendCapsJson;
+using legacy_qt::clearGlowBitmapCache;
+using legacy_qt::clearLayoutCache;
+using legacy_qt::clearTextLayerCache;
 using legacy_qt::gpuSceneFromConfig;
 using protocol::RenderConfig;
 using protocol::intValue;
@@ -34,6 +41,37 @@ using runtime::gpuConfigured;
 using runtime::gpuPreviewPool;
 using runtime::markGpuConfigured;
 using runtime::resetGpuPreviewPool;
+
+QJsonObject handleConfigureGpuStyle(
+    const QJsonObject &request,
+    std::optional<RenderConfig> *config,
+    RenderRuntime *runtime
+) {
+    if (!config->has_value()) {
+        QJsonObject out = response(false, QStringLiteral("gpu_configure_style"));
+        out.insert(
+            QStringLiteral("error"),
+            QStringLiteral("renderer is not configured")
+        );
+        return out;
+    }
+    // 与全量路径（handleConfigure）同一套缓存清账：glow 位图 / 文本层 /
+    // 布局缓存都以样式为输入，差分更新不清会把旧样式的位图带进新场景。
+    clearGlowBitmapCache();
+    clearTextLayerCache();
+    clearLayoutCache();
+    QString patchError;
+    auto patched = protocol::applyRenderConfigStylePatch(
+        request, config->value(), &patchError
+    );
+    if (!patched.has_value()) {
+        QJsonObject out = response(false, QStringLiteral("gpu_configure_style"));
+        out.insert(QStringLiteral("error"), patchError);
+        return out;
+    }
+    *config = std::move(*patched);
+    return handleConfigureGpu(request, *config, runtime);
+}
 
 QJsonObject handleConfigureGpu(
     const QJsonObject &request,

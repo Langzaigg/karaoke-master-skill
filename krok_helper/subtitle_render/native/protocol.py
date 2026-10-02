@@ -652,3 +652,95 @@ def track_to_ir(
         ],
         "rubies": [ruby_to_ir(ruby) for ruby in track.rubies],
     }
+
+
+def lines_style_to_ir(
+    track: TimingTrack,
+    style: Style,
+    layout_plan: TrackLayoutPlan,
+    *,
+    source_index: int = 0,
+) -> list[dict[str, object]]:
+    """逐行「样式派生字段」载荷（``gpu_configure_style`` 差分更新用）。
+
+    与 :func:`track_to_ir` 的行级样式字段同口径：出入场/唱字动画档位、
+    信号旗标、装饰粒子 bursts——bursts 嵌有逐字解析色（实色回退）与动画
+    时长缩放，**改色也必须随差分更新行数据**，这正是本载荷存在的原因。
+    ``source_index`` 与 sidecar 解析 IR 时的 ``sourceIndex`` 对齐（主轨 0、
+    副轨 1..N）；行号用源内下标，两边一一对应。测试逐字段对照
+    :func:`track_to_ir` 的输出防两处漂移。
+    """
+    schedule: dict[int, tuple[int, int, int]] = {
+        item.track_index: (
+            item.lane,
+            item.display_start_ms,
+            item.display_end_ms,
+        )
+        for item in layout_plan.lines
+        if item.display_start_ms is not None and item.display_end_ms is not None
+    }
+    animation_styles = [item.animation_style for item in layout_plan.lines]
+    render_lines = [item.render_line for item in layout_plan.lines]
+    resolved_intervals = [list(item.resolved_intervals) for item in layout_plan.lines]
+    signal_heads: frozenset[int] = frozenset()
+    if (style.lit_enabled or style.volume_enabled) and not style.vertical:
+        signal_heads = section_head_line_indices(
+            track, style, section_gap_ms=max(style.section_gap_ms, 0)
+        )
+    signal_band_style_joins = (
+        style.volume_enabled
+        and style.volume_appearance_mode in {"auto", "role"}
+        and not (
+            style.volume_appearance_mode == "role"
+            and appearance_role_source(style, style.volume_role_name) is not None
+        )
+    )
+    entries: list[dict[str, object]] = []
+    for index, line in enumerate(track.lines):
+        entries.append(
+            {
+                "source_index": int(source_index),
+                "source_line_index": index,
+                "signal_head": index in signal_heads,
+                "signal_band_join": (
+                    signal_band_style_joins
+                    and index in signal_heads
+                    and line is not None
+                    and style.right_to_left == line.wipe_reverse
+                ),
+                "entry_anim": animation_styles[index].entry_anim,
+                "entry_duration_ms": animation_styles[index].entry_lead_ms,
+                "exit_anim": animation_styles[index].exit_anim,
+                "exit_duration_ms": animation_styles[index].exit_fade_ms,
+                "karaoke_anim": effective_karaoke_animation(
+                    animation_styles[index]
+                ),
+                "scanline": effective_karaoke_scanline(animation_styles[index]),
+                "zoom_pulse": effective_karaoke_zoom_pulse(
+                    animation_styles[index]
+                ),
+                "stroke_flash": bool(
+                    animation_styles[index].karaoke_stroke_flash
+                ),
+                "fx_bursts": plan_line_bursts(
+                    animation_styles[index],
+                    index,
+                    schedule[index][1] if index in schedule else None,
+                    schedule[index][2] if index in schedule else None,
+                    line_end_ms(render_lines[index]),
+                    resolved_intervals[index],
+                    char_visible=[
+                        not str(getattr(ch, "text", "") or "").isspace()
+                        for ch in render_lines[index].chars
+                    ],
+                    char_styles=[
+                        style_for_role(
+                            animation_styles[index],
+                            getattr(ch, "role_label", None),
+                        )
+                        for ch in render_lines[index].chars
+                    ],
+                ),
+            }
+        )
+    return entries

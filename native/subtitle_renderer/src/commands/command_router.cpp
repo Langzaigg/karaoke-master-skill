@@ -74,6 +74,10 @@ CommandDispatchResult CommandRouter::dispatch(const QJsonObject &request) {
         return output(handleRenderProbe(request, &impl_->runtime));
     case Command::GpuConfigure:
         return output(handleConfigureGpu(request, impl_->config, &impl_->runtime));
+    case Command::GpuConfigureStyle:
+        return output(
+            handleConfigureGpuStyle(request, &impl_->config, &impl_->runtime)
+        );
     case Command::GpuResizeTarget:
         return output(handleResizeGpuTarget(request, &impl_->config, &impl_->runtime));
     case Command::GpuRenderFrame:

@@ -15,6 +15,8 @@ enum class Command {
     BackendInfo,
     RenderProbe,
     GpuConfigure,
+    // Style-only differential configure: reuses the parsed lines/rubies state.
+    GpuConfigureStyle,
     GpuResizeTarget,
     GpuRenderFrame,
     GpuPresentFrame,

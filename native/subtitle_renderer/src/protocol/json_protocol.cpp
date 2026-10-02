@@ -18,6 +18,9 @@ Command commandFromName(const QString &name) {
     if (name == QStringLiteral("gpu_configure")) {
         return Command::GpuConfigure;
     }
+    if (name == QStringLiteral("gpu_configure_style")) {
+        return Command::GpuConfigureStyle;
+    }
     if (name == QStringLiteral("gpu_resize_target")) {
         return Command::GpuResizeTarget;
     }

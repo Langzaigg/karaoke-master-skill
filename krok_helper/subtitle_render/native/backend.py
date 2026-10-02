@@ -965,6 +965,47 @@ class NativeRendererProcess:
             )
         )
 
+    def configure_style_gpu(
+        self,
+        style_ir: dict[str, Any],
+        *,
+        force_warp: bool = False,
+        prewarm_t_ms: int = 0,
+        worker_count: int = 1,
+        defer_followers: bool = False,
+        defer_realizations_until_first_frame: bool = False,
+    ) -> dict[str, Any]:
+        """Style-only differential configure (``gpu_configure_style``).
+
+        ``style_ir`` 是 :func:`build_style_patch_ir` 的产物：sidecar 在上一
+        次全量 configure 解析出的行数据上重放 style/titles/fx_sprites 段并
+        逐行合并样式派生字段（动画/信号旗标/粒子 bursts）。尚未全量
+        configure、画面段漂移或行集对不上时返回协议错误——调用方应回落
+        全量 :meth:`configure_gpu`。
+        """
+        payload: dict[str, Any] = {
+            "cmd": "gpu_configure_style",
+            "force_warp": bool(force_warp),
+            "prewarm_t_ms": max(int(prewarm_t_ms), 0),
+            "worker_count": max(1, min(int(worker_count), 8)),
+            "defer_followers": bool(defer_followers),
+            "defer_realizations_until_first_frame": bool(
+                defer_realizations_until_first_frame
+            ),
+            "screen": style_ir["screen"],
+            "style": style_ir["style"],
+            "titles": style_ir["titles"],
+            "fx_sprites": style_ir["fx_sprites"],
+            "lines_style": style_ir["lines_style"],
+        }
+        self._send(payload)
+        return self._expect_ok(
+            self._read_until_event(
+                "gpu_configured",
+                timeout_s=self.gpu_configure_timeout_s,
+            )
+        )
+
     def resize_gpu_target(
         self,
         *,

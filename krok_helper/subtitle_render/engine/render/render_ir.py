@@ -41,6 +41,7 @@ from krok_helper.subtitle_render.native.protocol import (
     RENDER_IR_SCHEMA,
     VectorGlyphTable,
     bitmap_guide_to_ir,
+    lines_style_to_ir,
     title_overlay_to_ir,
     track_to_ir,
 )
@@ -274,3 +275,77 @@ def build_render_ir(
         if not glyph_table.empty:
             ir["vector_glyphs"] = glyph_table.payload
         return ir
+
+
+def build_style_patch_ir(
+    track: TimingTrack,
+    style: Style,
+    *,
+    width: int,
+    height: int,
+    fps: int,
+    dpr: float = 1.0,
+    extra_tracks: list[TimingTrack] | None = None,
+    duration_ms: int | None = None,
+) -> dict[str, Any]:
+    """paint scope 差分更新载荷（``gpu_configure_style``）。
+
+    轨道内容与布局签名不变、只有样式变化时，完整 ``configure`` 里 99% 的
+    字节（逐字 text/时间 IR + 大 JSON 解析）都是重复劳动。本函数只产出会
+    变的段：style / titles / fx_sprites / screen，外加**逐行样式派生字段**
+    （动画档位 + 信号旗标 + 粒子 bursts——bursts 嵌有逐字解析色，改色也会
+    变）。sidecar 在既有行数据上重放这些段，等价于一次全量重配。
+
+    正确性闸门在调用方（GpuAsyncSubtitleRenderer）：布局签名/轨道签名/画面
+    尺寸任一变化都不得走差分。布局计划按缓存复用（签名命中即几何不变）。
+    """
+    style = style_with_output_signal_offsets(
+        style_with_output_scanline(style, height), height
+    )
+    with layout_pass():
+        primary_style = style_for_track(style, track)
+        primary_plan = build_track_layout_plan(
+            track,
+            primary_style,
+            logical_w=width,
+            logical_h=height,
+            use_cache=True,
+        )
+        extra_sources = list(extra_tracks or ())
+        extra_styles = [style_for_track(style, source) for source in extra_sources]
+        extra_plans = [
+            build_track_layout_plan(
+                source,
+                source_style,
+                logical_w=width,
+                logical_h=height,
+                use_cache=True,
+            )
+            for source, source_style in zip(extra_sources, extra_styles, strict=True)
+        ]
+        lines_style: list[dict[str, Any]] = lines_style_to_ir(
+            track, primary_style, primary_plan, source_index=0
+        )
+        for source_index, (source, source_style, plan) in enumerate(
+            zip(extra_sources, extra_styles, extra_plans, strict=True), start=1
+        ):
+            lines_style.extend(
+                lines_style_to_ir(
+                    source, source_style, plan, source_index=source_index
+                )
+            )
+        return {
+            "schema": RENDER_IR_SCHEMA,
+            "screen": {
+                "width": max(int(width), 1),
+                "height": max(int(height), 1),
+                "fps": max(int(fps), 1),
+                "dpr": max(float(dpr or 1.0), 0.01),
+            },
+            "style": style_to_dict(
+                resolve_lit_appearance(resolve_volume_appearance(style))
+            ),
+            "titles": titles_to_ir(track, style, duration_ms=duration_ms),
+            "fx_sprites": dict(FX_SPRITES),
+            "lines_style": lines_style,
+        }
