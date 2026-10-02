@@ -46,6 +46,7 @@ VolumeSignalState volumeSignalState(
     int lineStartMs,
     const TextStyle &style,
     int tMs,
+    int displayStartMs,
     int displayEndMs,
     bool signalHead
 );
@@ -56,6 +57,7 @@ ShapeSignalState shapeSignalState(
     int lineStartMs,
     const TextStyle &style,
     int tMs,
+    int displayStartMs,
     int displayEndMs,
     bool signalHead
 );

@@ -1464,6 +1464,67 @@ def test_volume_auto_colors_reach_painting(qapp):
     _assert_blue_pixels_in(img, left=int(layout.signal_x), right=int(layout.text_x) - 1)
 
 
+def test_signal_effects_enter_with_long_display_line(qapp):
+    # 所在行显示时长超过特效时长（默认 4000ms）时，特效随行一并入场：
+    # 显示窗起点即特效可见（满灯初始态），闪烁/逐个熄灭动画仍从自身
+    # 时间轴的 active_start 播放（锚点不变），动画播完后特效消失而行
+    # 继续显示。
+    track = TimingTrack(
+        lines=[
+            TimingLine(
+                chars=[TimingChar(text="A", start_ms=6000)],
+                end_ms=8000,
+            )
+        ]
+    )
+    style = Style(
+        font_size_px=20,
+        line_y_margin_px=10,
+        dual_line_layout=False,
+        line_lead_in_ms=8000,
+        line_tail_ms=0,
+        entry_anim="none",
+        exit_anim="none",
+        section_head_anim="none",
+        lit_enabled=True,
+        lit_appearance_mode="custom",
+        lit_style="circle",
+        lit_number=4,
+        lit_size=24,
+        lit_offset_x=-90,
+        lit_fill_color="#2040FF",
+        lit_stroke_color="#2040FF",
+        lit_stroke_width=0,
+        lit_shadow=False,
+        lit_transition_mode="none",
+        signals_duration_ms=4000,
+        lit_waiting_time_ms=0,
+        lit_time_offset_ms=0,
+        base_color="#FF0000",
+    )
+    # 显示窗 [−2000, 8000)，动画窗 [2000, 6000)：前段为入场初始态。
+    group, resolved = _lit_auto_group(track, style, 1000, w=320, h=90)
+    pitch = resolved.lit_size * 1.5 + resolved.lit_tracking
+
+    def solid_lamp_count(t_ms: int) -> int:
+        img = _blank(320, 90)
+        paint_frame(img, track, t_ms, style)
+        count = 0
+        for index in range(resolved.lit_number):
+            cx = int(group.x + index * pitch + resolved.lit_size * 0.5)
+            cy = int(group.y + resolved.lit_size * 0.62)
+            color = QColor(img.pixel(cx, cy))
+            # 只数蓝色灯心，排除文字（红）墨迹干扰。
+            if color.blue() > 120 and color.red() < 120:
+                count += 1
+        return count
+
+    assert solid_lamp_count(1000) == 4, "入场初始态应为满灯"
+    assert solid_lamp_count(2500) == 4, "动画前段（elapsed 500）仍满灯"
+    assert solid_lamp_count(3300) == 3, "动画中段按自身时间轴逐个熄灭"
+    assert solid_lamp_count(6100) == 0, "动画播完后特效消失，行继续显示"
+
+
 def _lit_auto_group(
     track: TimingTrack,
     style: Style,

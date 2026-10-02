@@ -640,10 +640,12 @@ ProbeResult Direct2DGpuBackend::renderFrameInternal(
         if (animation.opacity <= 0.0f) {
             bool litAutoLampVisible = false;
             if (litAutoDecorated && lineEntryAnimationAt(*line).opacity > 0.0f) {
+                int litGuardStartMs = line->startMs;
                 int litGuardEndMs = line->endMs
                     + std::max(line->style.tailMs, 0);
                 for (const DisplayWindow &window : line->displayWindows) {
                     if (tMs >= window.startMs && tMs < window.endMs) {
+                        litGuardStartMs = window.startMs;
                         litGuardEndMs = window.endMs;
                         break;
                     }
@@ -652,6 +654,7 @@ ProbeResult Direct2DGpuBackend::renderFrameInternal(
                     line->startMs,
                     line->style,
                     tMs,
+                    litGuardStartMs,
                     litGuardEndMs,
                     line->signalHead
                 );
@@ -1613,12 +1616,22 @@ ProbeResult Direct2DGpuBackend::renderFrameInternal(
                 break;
             }
         }
+        int displayStartMs = line->startMs;
+        for (const DisplayWindow &window : line->displayWindows) {
+            if (tMs >= window.startMs && tMs < window.endMs) {
+                displayStartMs = window.startMs;
+                displayEndMs = window.endMs;
+                break;
+            }
+        }
         const VolumeSignalState signalState = volumeSignalState(
-            line->startMs, style, tMs, displayEndMs, line->signalHead
+            line->startMs, style, tMs, displayStartMs, displayEndMs,
+            line->signalHead
         );
         const VolumeSignalGeometry signalGeometry = volumeSignalGeometry(style);
         const ShapeSignalState shapeState = shapeSignalState(
-            line->startMs, style, tMs, displayEndMs, line->signalHead
+            line->startMs, style, tMs, displayStartMs, displayEndMs,
+            line->signalHead
         );
         const ShapeSignalGeometry shapeGeometry = shapeSignalGeometry(style);
         const bool independentVolume = style.volumeEnabled;
@@ -1909,7 +1922,7 @@ ProbeResult Direct2DGpuBackend::renderFrameInternal(
             && !style.vertical
             && signalActiveDuration > 0
             && line->signalHead
-            && tMs >= signalEndMs - signalActiveDuration
+            && tMs >= displayStartMs
             && tMs < displayEndMs;
         float lyricLeft = line->bounds.left;
         float lyricRight = line->bounds.right;

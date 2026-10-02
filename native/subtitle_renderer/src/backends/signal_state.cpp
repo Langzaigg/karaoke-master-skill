@@ -99,9 +99,13 @@ ShapeSignalState shapeSignalState(
     int lineStartMs,
     const TextStyle &style,
     int tMs,
+    int displayStartMs,
     int displayEndMs,
     bool signalHead
 ) {
+    // 可见下界 = 所在行显示窗起点（特效随所在行一并入场）；动画（逐个
+    // 熄灭）仍从 activeStart 播放——elapsed 钳 0 即满灯初始态。镜像
+    // Painter 的 resolve_signal_lit_groups。
     ShapeSignalState state;
     if (!signalHead) {
         return state;
@@ -118,7 +122,7 @@ ShapeSignalState shapeSignalState(
     }
     const int signalEnd = lineStartMs + style.litTimeOffsetMs;
     const int activeStart = signalEnd - activeDuration;
-    if (tMs < activeStart || tMs >= displayEndMs) {
+    if (tMs < displayStartMs || tMs >= displayEndMs) {
         return state;
     }
     state.visible = true;
@@ -171,6 +175,7 @@ VolumeSignalState volumeSignalState(
     int lineStartMs,
     const TextStyle &style,
     int tMs,
+    int displayStartMs,
     int displayEndMs,
     bool signalHead
 ) {
@@ -199,7 +204,9 @@ VolumeSignalState volumeSignalState(
         style.volumeEnabled ? style.volumeTimeOffsetMs : style.litTimeOffsetMs
     );
     const int activeStart = signalEnd - activeDuration;
-    if (tMs < activeStart || tMs >= displayEndMs) {
+    // 可见下界 = 所在行显示窗起点（特效随所在行一并入场）；闪烁段/填充
+    // 段仍从 activeStart 播放——elapsed 钳 0 即初帧柱体。
+    if (tMs < displayStartMs || tMs >= displayEndMs) {
         return state;
     }
     const int elapsed = std::min(

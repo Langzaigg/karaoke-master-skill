@@ -6094,6 +6094,75 @@ def test_gpu_g5_volume_auto_decorations_follow_first_role_painter(monkeypatch) -
 
 
 @pytest.mark.skipif(os.name != "nt", reason="Direct2D GPU backend is Windows-only")
+def test_gpu_g4_signal_effects_enter_with_long_display_line(monkeypatch) -> None:
+    # 所在行显示时长超过特效时长时，特效随行一并入场（显示窗起点即可
+    # 见，初始满灯/初帧柱体），动画时间轴锚点不变；native 与 Painter
+    # 逐帧对齐。
+    monkeypatch.setenv("QT_QPA_PLATFORM", "offscreen")
+    track = TimingTrack(
+        lines=[
+            TimingLine(chars=[TimingChar("A", 6_000)], end_ms=8_000)
+        ]
+    )
+    base = dict(
+        font_family="Meiryo",
+        font_family_latin="Meiryo",
+        font_size_px=64,
+        stroke_width_px=0,
+        stroke2_enabled=False,
+        decoration_kind="none",
+        dual_line_layout=False,
+        line_horizontal_layout="center",
+        line_lead_in_ms=8_000,
+        line_tail_ms=0,
+        entry_anim="none",
+        exit_anim="none",
+        section_head_anim="none",
+        lit_appearance_mode="custom",
+        lit_number=4,
+        lit_size=34,
+        lit_stroke_width=2,
+        lit_shadow=False,
+        lit_transition_mode="none",
+        signals_duration_ms=4_000,
+        lit_waiting_time_ms=0,
+        lit_time_offset_ms=0,
+    )
+    for lit_style, enabled in (("circle", True), ("volume", True)):
+        style = _g1_style(
+            lit_enabled=enabled,
+            lit_style=lit_style,
+            volume_enabled=(lit_style == "volume"),
+            volume_duration_ms=4_000,
+            volume_waiting_time_ms=0,
+            volume_time_offset_ms=0,
+            volume_flash_times=0,
+            **{k: v for k, v in base.items()
+               if k not in {"lit_transition_mode", "signals_duration_ms"}
+               or lit_style == "circle"},
+        )
+        # 显示窗 [−2000, 8000)，动画窗 [2000, 6000)。
+        timestamps = (1_000, 2_500, 3_300, 6_100)
+        painter = [
+            _render_painter_oracle(style, t_ms=t_ms, track=track)
+            for t_ms in timestamps
+        ]
+        with NativeRendererProcess(
+            _renderer_path(), response_timeout_s=15.0
+        ) as renderer:
+            _, gpu = _render_g1_frames(
+                renderer, style, timestamps, force_warp=True, track=track
+            )
+        for t_ms, gpu_frame, painter_frame in zip(timestamps, gpu, painter):
+            gpu_bounds = _payload_alpha_bounds(gpu_frame)
+            painter_bounds = _payload_alpha_bounds(painter_frame)
+            assert all(
+                abs(actual - expected) <= 20
+                for actual, expected in zip(gpu_bounds, painter_bounds)
+            ), (lit_style, t_ms, gpu_bounds, painter_bounds)
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Direct2D GPU backend is Windows-only")
 def test_gpu_g5_lit_auto_decorations_follow_painter(monkeypatch) -> None:
     # auto 外观模式指示灯走主文字装饰管线（全程走字后配色/二重描边/发光/
     # 阴影/整字放大），native 端镜像 _draw_lit_decorated_group：alpha 包络

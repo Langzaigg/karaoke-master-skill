@@ -2235,6 +2235,7 @@ def _resolve_sayatoo_line_layouts(
                     signal_head_ids is None
                     or index_of_signal_lines.get(id(line)) in signal_head_ids
                 ),
+                display_start_ms=display_line.display_start_ms,
                 display_end_ms=display_line.display_end_ms,
             )
         ):
