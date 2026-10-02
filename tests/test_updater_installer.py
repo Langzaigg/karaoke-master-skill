@@ -106,3 +106,47 @@ def test_launch_updater_uses_temp_cwd_and_fresh_pyinstaller_environment(
         == "fallback_old_updater"
     )
     assert captured["env"] is not os.environ
+
+
+# ───────────────── 启动时的更新残留兜底清理 ─────────────────
+
+
+def _make_residue_install(app_dir: Path) -> None:
+    internal = app_dir / "_internal"
+    internal.mkdir(parents=True)
+    (app_dir / "Lin-K Lyrics.exe").write_bytes(b"new-exe")
+    (app_dir / "Lin-K Lyrics.exe.bak").write_bytes(b"old-exe")
+    (internal / "python314.dll").write_bytes(b"new-dll")
+    (internal / "python314.dll.bak").write_bytes(b"old-dll")
+    (app_dir / "孤儿备份.exe.bak").write_bytes(b"no-original")
+
+
+def test_cleanup_update_residue_is_noop_when_not_frozen(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """开发环境（非 frozen）绝不清理——仓库里的 *.bak 可能是手工备份。"""
+    app_dir = tmp_path / "app"
+    _make_residue_install(app_dir)
+    monkeypatch.delattr(sys, "frozen", raising=False)
+
+    assert installer.cleanup_update_residue() == 0
+    assert (app_dir / "Lin-K Lyrics.exe.bak").exists()
+    assert (app_dir / "_internal" / "python314.dll.bak").exists()
+
+
+def test_cleanup_update_residue_removes_leftovers_when_frozen(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """frozen 安装启动即回收本体存在的 .bak 残留；本体缺失的备份保留。"""
+    app_dir = tmp_path / "app"
+    _make_residue_install(app_dir)
+    monkeypatch.setattr(sys, "frozen", True, raising=False)
+    monkeypatch.setattr(sys, "executable", str(app_dir / "Lin-K Lyrics.exe"))
+
+    assert installer.cleanup_update_residue() == 2
+    assert not (app_dir / "Lin-K Lyrics.exe.bak").exists()
+    assert not (app_dir / "_internal" / "python314.dll.bak").exists()
+    assert (app_dir / "Lin-K Lyrics.exe").read_bytes() == b"new-exe"
+    assert (app_dir / "_internal" / "python314.dll").read_bytes() == b"new-dll"
+    # 对应本体不存在的备份可能是唯一副本，保留。
+    assert (app_dir / "孤儿备份.exe.bak").read_bytes() == b"no-original"

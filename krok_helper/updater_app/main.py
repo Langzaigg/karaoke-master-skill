@@ -1274,6 +1274,60 @@ def _cleanup_legacy_main_exe(app_dir, app_exe, log) -> None:
             )
 
 
+def _cleanup_part_backup_residue(app_dir, log) -> None:
+    """成功拉起后兜底回收增量更新遗留的 ``*.bak`` 备份（用户实测
+    ``Lin-K Lyrics.exe.bak`` 永久残留）。
+
+    SUG ``_apply_part`` 把旧 target 改名 ``<target>.bak``，成功后只做一次裸
+    unlink：被杀软瞬时扫描或残留的旧实例占着镜像时删除失败，而失败不影响
+    更新成功。既有回收路径都够不到这种残留——SUG ``_cleanup_old_files`` 只清
+    ``*.old``；工作台 stale 清理只针对「本次更新 part 的 targets」，下次更新
+    若不含该文件（runtime-only 增量 / 全量回退 / 已是最新）它就永远没人清。
+    与 ``_cleanup_legacy_main_exe`` 同一启动挂钩、同一尽力而为口径，覆盖
+    全量/增量/已是最新三条路径。
+
+    扫描范围是安装根目录与 ``_internal/`` 顶层：增量 targets（app part 的
+    根 EXE + ``_internal/krok_helper`` 等，runtime part 的 ``_internal/*``）
+    的备份只会落在这两处。安全策略与 ``_cleanup_old_files`` 一致——仅当去掉
+    ``.bak`` 后的同名本体存在时才删除（本体缺失说明上次会话半途而废，备份
+    可能是唯一可恢复副本）。删除带短重试，仍失败只记日志等下次会话再试，
+    绝不影响更新结果。
+    """
+
+    root = Path(app_dir)
+    victims = sorted(root.glob("*.bak"), key=lambda p: p.name)
+    internal = root / "_internal"
+    if internal.is_dir():
+        victims.extend(sorted(internal.glob("*.bak"), key=lambda p: p.name))
+    for victim in victims:
+        orig = victim.with_suffix("")
+        if not _path_lexists(orig):
+            log.info(
+                "保留增量备份残留（对应本体不存在，可能上次更新未完成）: %s", victim.name
+            )
+            continue
+        last_exc: OSError | None = None
+        for _ in range(3):
+            try:
+                if victim.is_symlink() or not victim.is_dir():
+                    victim.unlink()
+                else:
+                    shutil.rmtree(str(victim), ignore_errors=False)
+                last_exc = None
+                break
+            except OSError as exc:
+                last_exc = exc
+                time.sleep(1.0)
+        if last_exc is None:
+            log.info("已清理增量更新备份残留: %s", victim.name)
+        else:
+            log.warning(
+                "清理增量备份残留 %s 失败（不影响更新结果，下次更新会话重试）: %s",
+                victim.name,
+                last_exc,
+            )
+
+
 def _apply_workbench_update(app_dir, app_exe, internal_name, new_root, log):
     """Replace the package's full root payload, not only the ``--app-exe`` entry.
 
@@ -1416,6 +1470,10 @@ def _launch_main_app_workbench(app_dir, app_exe, log) -> bool:
     # 启动，任何时刻安装里都保住至少一个可运行入口（新名 EXE 缺失/启动失败时
     # 旧名原样保留）。这里也是清理的唯一挂钩，覆盖全量/增量/「已是最新」路径。
     _cleanup_legacy_main_exe(app_dir, app_exe, log)
+    # 增量 .bak 残留同挂在此处回收：SUG 侧成功清理失败一次就会永久遗留
+    # （详见 _cleanup_part_backup_residue），只有本兜底能覆盖「下次更新不含
+    # 该文件」的所有路径。
+    _cleanup_part_backup_residue(app_dir, log)
     return True
 
 

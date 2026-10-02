@@ -96,6 +96,52 @@ def find_app_exe_name() -> str:
     return DEFAULT_APP_EXE_NAME
 
 
+def cleanup_update_residue() -> int:
+    """主程序启动时兜底清理更新器遗留的 ``*.bak`` 备份，返回清理个数。
+
+    背景：增量更新把旧 target 改名 ``<target>.bak`` 后只做一次裸删除，被
+    杀软瞬时扫描或残留旧实例占着镜像时删除失败，且不影响更新成功；旧
+    更新器的回收只覆盖 ``*.old`` 与「下次更新恰好包含同一文件」，用户实测
+    ``Lin-K Lyrics.exe.bak`` 会永久残留。更新器侧已在成功拉起后统一兜底
+    （``updater_app._cleanup_part_backup_residue``），但把修复发给用户的
+    那次更新本身仍由旧更新器执行——主程序首次启动即回收，不依赖用户
+    再次更新。
+
+    仅 frozen 安装生效（开发仓库里的 ``*.bak`` 可能是手工备份，绝不能碰）；
+    只扫安装根目录与 ``_internal`` 顶层（增量 targets 的备份只会落在这两
+    处）；仅当去掉 ``.bak`` 的同名本体存在时才删除。全程尽力而为，任何
+    异常吞掉，绝不影响启动。
+    """
+    if not getattr(sys, "frozen", False):
+        return 0
+    cleaned = 0
+    try:
+        root = find_app_dir()
+        internal = root / "_internal"
+        victims = list(root.glob("*.bak"))
+        if internal.is_dir():
+            victims.extend(internal.glob("*.bak"))
+        for victim in victims:
+            orig = victim.with_suffix("")
+            if not orig.exists():
+                continue
+            try:
+                if victim.is_dir() and not victim.is_symlink():
+                    shutil.rmtree(str(victim), ignore_errors=True)
+                    if victim.exists():
+                        continue
+                else:
+                    victim.unlink()
+            except OSError as exc:
+                log.debug("清理更新残留 %s 失败: %s", victim, exc)
+                continue
+            cleaned += 1
+            log.info("已清理更新残留备份: %s", victim)
+    except Exception:  # noqa: BLE001
+        pass
+    return cleaned
+
+
 def find_updater_exe(app_dir: Optional[Path] = None) -> Optional[Path]:
     root = app_dir or find_app_dir()
     for path in (

@@ -203,4 +203,9 @@ def main() -> int:
             print(str(exc), file=sys.stderr)
             return 1
 
+    # frozen 安装内兜底清理更新遗留的 .bak 备份（非 frozen 直接 no-op），
+    # 尽力而为、异常全吞，绝不影响启动。
+    from krok_helper.updater.installer import cleanup_update_residue
+
+    cleanup_update_residue()
     return run_gui(args)

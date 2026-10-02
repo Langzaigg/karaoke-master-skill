@@ -1302,3 +1302,106 @@ def test_cleanup_falls_back_to_rename_when_delete_is_denied(
     assert not (app_dir / "Karaoke Studio.exe").exists()
     assert (app_dir / "Karaoke Studio.exe.old").read_bytes() == b"legacy"
     assert any("已暂存为 .old" in message for message in caplog.messages)
+
+
+# ───────────────── 增量 .bak 备份残留的兜底清理 ─────────────────
+
+
+def _make_backup_residue_install(app_dir: Path) -> None:
+    """模拟一次「增量更新成功但 .bak 清理失败」后的安装目录。"""
+    internal = app_dir / "_internal"
+    internal.mkdir(parents=True, exist_ok=True)
+    (app_dir / "Lin-K Lyrics.exe").write_bytes(b"new-exe")
+    (app_dir / "Lin-K Lyrics.exe.bak").write_bytes(b"old-exe")
+    (internal / "python314.dll").write_bytes(b"new-dll")
+    (internal / "python314.dll.bak").write_bytes(b"old-dll")
+    (internal / "krok_helper").mkdir()
+    (internal / "krok_helper" / "__init__.py").write_bytes(b"")
+    (internal / "krok_helper.bak").mkdir()
+    (internal / "krok_helper.bak" / "__init__.py").write_bytes(b"old")
+
+
+def test_cleanup_part_backup_residue_removes_leftovers_with_original_present(
+    tmp_path: Path,
+) -> None:
+    """用户实测回归：Lin-K Lyrics.exe.bak 等残留（本体在）应被启动挂钩回收。"""
+    app_dir = tmp_path / "app"
+    _make_backup_residue_install(app_dir)
+
+    workbench_updater._cleanup_part_backup_residue(
+        app_dir, logging.getLogger("sug.updater")
+    )
+
+    assert not (app_dir / "Lin-K Lyrics.exe.bak").exists()
+    assert (app_dir / "Lin-K Lyrics.exe").read_bytes() == b"new-exe"
+    assert not (app_dir / "_internal" / "python314.dll.bak").exists()
+    assert not (app_dir / "_internal" / "krok_helper.bak").exists()
+    assert (app_dir / "_internal" / "python314.dll").read_bytes() == b"new-dll"
+    assert (app_dir / "_internal" / "krok_helper" / "__init__.py").exists()
+
+
+def test_cleanup_part_backup_residue_keeps_backup_when_original_missing(
+    tmp_path: Path,
+) -> None:
+    """本体缺失说明上次会话半途而废，备份可能是唯一可恢复副本——保留。"""
+    app_dir = tmp_path / "app"
+    (app_dir / "_internal").mkdir(parents=True)
+    (app_dir / "Lin-K Lyrics.exe.bak").write_bytes(b"only-copy")
+
+    workbench_updater._cleanup_part_backup_residue(
+        app_dir, logging.getLogger("sug.updater")
+    )
+
+    assert (app_dir / "Lin-K Lyrics.exe.bak").read_bytes() == b"only-copy"
+
+
+def test_cleanup_part_backup_residue_retries_then_leaves_residue_on_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """删除持续被拒（镜像仍被占用/杀软扫描）时短重试后放弃，不影响更新结果。"""
+    app_dir = tmp_path / "app"
+    _make_backup_residue_install(app_dir)
+    monkeypatch.setattr(workbench_updater.time, "sleep", lambda _seconds: None)
+    real_unlink = Path.unlink
+    attempts: list[Path] = []
+
+    def refusing_unlink(self, missing_ok=False):
+        if self.name == "Lin-K Lyrics.exe.bak":
+            attempts.append(self)
+            raise PermissionError(5, "拒绝访问。", str(self), 5, str(self))
+        return real_unlink(self, missing_ok)
+
+    monkeypatch.setattr(Path, "unlink", refusing_unlink)
+
+    with caplog.at_level(logging.INFO, logger="sug.updater"):
+        workbench_updater._cleanup_part_backup_residue(
+            app_dir, logging.getLogger("sug.updater")
+        )
+
+    assert len(attempts) == 3
+    assert (app_dir / "Lin-K Lyrics.exe.bak").exists()
+    # 其余残留不受单个失败影响，照常清理。
+    assert not (app_dir / "_internal" / "python314.dll.bak").exists()
+    assert not (app_dir / "_internal" / "krok_helper.bak").exists()
+    assert any("下次更新会话重试" in message for message in caplog.messages)
+
+
+def test_launch_hook_sweeps_part_backup_residue(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """启动挂钩（全量/增量/已是最新共用）必须顺带回收 .bak 残留。"""
+    app_dir = tmp_path / "app"
+    _make_backup_residue_install(app_dir)
+    monkeypatch.setattr(
+        workbench_updater.subprocess,
+        "Popen",
+        lambda *args, **kwargs: type("FakeProcess", (), {})(),
+    )
+
+    assert workbench_updater._launch_main_app_workbench(
+        app_dir, workbench_updater.PRIMARY_APP_EXE_NAME, logging.getLogger("sug.updater")
+    )
+    assert not (app_dir / "Lin-K Lyrics.exe.bak").exists()
+    assert not (app_dir / "_internal" / "python314.dll.bak").exists()
