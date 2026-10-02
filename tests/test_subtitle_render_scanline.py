@@ -948,21 +948,21 @@ def test_remap_appearance_role_references_follow_rename_and_delete() -> None:
     assert renamed.lit_appearance_mode == "role"
     assert renamed.lit_role_name == "标题"
 
-    # 删除：名字与模式一起回退 auto（渲染端悬空回退本就落到 auto 口径），
-    # 不留悬空 role 档。
+    # 删除：保留悬空引用（UI 下拉幽灵条目展示原名、渲染回退 auto 口径，
+    # 角色重建同名方案后自动接回），模式与名字都不动。
     deleted = remap_appearance_role_references(style, {"锋面": None})
-    assert deleted is not None
-    assert deleted.volume_appearance_mode == "auto"
-    assert deleted.volume_role_name is None
+    assert deleted is None
+    assert style.volume_appearance_mode == "role"
+    assert style.volume_role_name == "锋面"
 
-    # 两字段独立改写：同一次映射同时改名 + 删除互不影响。
+    # 两字段独立改写：同一次映射里被改名者连写、被删除者保留悬空。
     both = remap_appearance_role_references(
         style, {"锋面": "新锋面", "标题": None}
     )
     assert both is not None
     assert both.volume_role_name == "新锋面"
-    assert both.lit_appearance_mode == "auto"
-    assert both.lit_role_name is None
+    assert both.lit_appearance_mode == "role"
+    assert both.lit_role_name == "标题"
 
     # 名字为空（历史悬空）时删除映射不动。
     dangling = Style(volume_appearance_mode="role", volume_role_name=None)

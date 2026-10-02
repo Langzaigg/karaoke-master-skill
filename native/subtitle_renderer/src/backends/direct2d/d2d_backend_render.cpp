@@ -1661,23 +1661,26 @@ ProbeResult Direct2DGpuBackend::renderFrameInternal(
         // （Painter 取第一个非空白字符的 role，两端一致；无角色回退行样式）。
         // role 档（复用配色方案）：装饰源换成 scene 级按名解析的固定方案
         // （悬空 nullopt 时维持 auto 扫描，两端同一回退口径）。
-        const TextStyle *volumeBarDecorStylePtr = &style;
-        if (style.volumeAppearanceMode == "role"
-            && scene.volumeDecorStyle.has_value()) {
-            volumeBarDecorStylePtr = &*scene.volumeDecorStyle;
-        } else {
+        // 指示灯与音量柱各持一份来源、各自独立回落首字符扫描：auto 档的
+        // 灯不得借用音量柱 role 档的方案（双模块同开时互相串色，镜像
+        // Painter 按模块独立解析 bar_style 的口径）。
+        const auto firstCharDecorStyle = [&]() -> const TextStyle & {
             for (const Impl::CachedChar &ch : line->chars) {
                 if ((ch.geometry != nullptr || ch.bitmapGuide.has_value())
                     && ch.styleIndex >= 0
                     && ch.styleIndex
                         < static_cast<int>(scene.charStyles.size())) {
-                    volumeBarDecorStylePtr = &scene.charStyles[
+                    return scene.charStyles[
                         static_cast<std::size_t>(ch.styleIndex)];
-                    break;
                 }
             }
-        }
-        const TextStyle &barDecor = *volumeBarDecorStylePtr;
+            return style;
+        };
+        const TextStyle &barDecor =
+            (style.volumeAppearanceMode == "role"
+                && scene.volumeDecorStyle.has_value())
+            ? *scene.volumeDecorStyle
+            : firstCharDecorStyle();
         const float volumeDecorScale = barDecor.fontSize > 0.0f
             ? signalGeometry.size / barDecor.fontSize
             : 1.0f;
@@ -1689,15 +1692,14 @@ ProbeResult Direct2DGpuBackend::renderFrameInternal(
             std::max(barDecor.stroke2Width * volumeDecorScale, 0.0f),
             std::floor(signalGeometry.columnWidth * 0.5f)
         );
-        // auto/role 档形状灯装饰参数：auto 与柱体共用装饰源 barDecor；
-        // role 档可独立指定来源（scene.litDecorStyle，悬空时同样回落
-        // barDecor）。缩放与上限（半个灯宽）口径镜像 Painter 的
-        // _draw_lit_decorated_group。
+        // auto/role 档形状灯装饰参数：独立于柱体解析（auto 悬空/未选方案
+        // 都回落首字符扫描，不借用柱体的 role 档方案）。缩放与上限（半个
+        // 灯宽）口径镜像 Painter 的 _draw_lit_decorated_group。
         const TextStyle &litDecor =
             (style.litAppearanceMode == "role"
                 && scene.litDecorStyle.has_value())
             ? *scene.litDecorStyle
-            : barDecor;
+            : firstCharDecorStyle();
         const float litDecorScale = litDecor.fontSize > 0.0f
             ? shapeGeometry.size / litDecor.fontSize
             : 1.0f;

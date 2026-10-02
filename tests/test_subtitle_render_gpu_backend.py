@@ -6179,6 +6179,116 @@ def test_gpu_g5_volume_role_decorations_follow_named_scheme_painter(
 
 
 @pytest.mark.skipif(os.name != "nt", reason="Direct2D GPU backend is Windows-only")
+def test_gpu_g5_volume_role_does_not_leak_into_lit_auto_painter(
+    monkeypatch,
+) -> None:
+    # 双模块同开的装饰源独立性：音量柱 role 档选「青」（红系柱体），
+    # 指示灯 auto 档仍取所在行配色（无角色 → 行样式，绿系灯体）。修复前
+    # native 的灯装饰源借用柱体的 role 方案（auto 档沿用 barDecor），
+    # 灯被染成柱体方案的颜色——绿系像素计数两端显著分歧。
+    monkeypatch.setenv("QT_QPA_PLATFORM", "offscreen")
+    track = TimingTrack(
+        lines=[
+            TimingLine(
+                chars=[TimingChar("歌", 1_000), TimingChar("詞", 1_400)],
+                end_ms=2_000,
+            )
+        ]
+    )
+
+    def role_state(color: str) -> KaraokeColorState:
+        return KaraokeColorState(text=PaintFill(mode="solid", color=color))
+
+    style = _g1_style(
+        font_family="Meiryo",
+        font_family_latin="Meiryo",
+        font_size_px=64,
+        stroke_width_px=0,
+        stroke2_enabled=False,
+        decoration_kind="none",
+        base_color="#FFFFFF",
+        fill_color="#20FF50",
+        dual_line_layout=False,
+        line_horizontal_layout="center",
+        line_lead_in_ms=0,
+        line_tail_ms=1_000,
+        volume_enabled=True,
+        volume_appearance_mode="role",
+        volume_role_name="青",
+        volume_duration_ms=1_500,
+        volume_waiting_time_ms=0,
+        volume_time_offset_ms=0,
+        volume_flash_times=0,
+        lit_enabled=True,
+        lit_style="circle",
+        signals_duration_ms=1_500,
+        lit_waiting_time_ms=0,
+        lit_time_offset_ms=0,
+        lit_transition_mode="fade",
+        custom_style_schemes={
+            "青": SubtitleStyleScheme(
+                font_family="Meiryo",
+                font_family_latin="Meiryo",
+                font_size_px=64,
+                stroke_width_px=0,
+                decoration_kind="none",
+                karaoke_colors=KaraokeColors(
+                    before=role_state("#FF20FF"),
+                    after=role_state("#FF2050"),
+                ),
+            ),
+        },
+    )
+    timestamps = (700, 1_400)
+    painter = [
+        _render_painter_oracle(style, t_ms=t_ms, track=track)
+        for t_ms in timestamps
+    ]
+    with NativeRendererProcess(_renderer_path(), response_timeout_s=15.0) as renderer:
+        _, gpu = _render_g1_frames(
+            renderer, style, timestamps, force_warp=True, track=track
+        )
+
+    def green_pixels(payload: bytes) -> int:
+        return sum(
+            payload[index + 1] > payload[index] + 40
+            and payload[index + 1] > payload[index + 2] + 40
+            and payload[index + 3] > 16
+            for index in range(0, len(payload), 4)
+        )
+
+    def red_pixels(payload: bytes) -> int:
+        return sum(
+            payload[index] > payload[index + 1] + 40
+            and payload[index] > payload[index + 2] + 40
+            and payload[index + 3] > 16
+            for index in range(0, len(payload), 4)
+        )
+
+    for t_ms, gpu_frame, painter_frame in zip(timestamps, gpu, painter):
+        gpu_bounds = _payload_alpha_bounds(gpu_frame)
+        painter_bounds = _payload_alpha_bounds(painter_frame)
+        assert all(
+            abs(actual - expected) <= 14
+            for actual, expected in zip(gpu_bounds, painter_bounds)
+        ), (t_ms, gpu_bounds, painter_bounds)
+        # 柱体按「青」方案渲染（红系像素两端都有），灯体不被串染成柱色
+        # （绿系像素 = 文字走字后 + 灯体，两端计数一致）。
+        gpu_green = green_pixels(gpu_frame)
+        painter_green = green_pixels(painter_frame)
+        assert painter_green > 500, (t_ms, painter_green)
+        assert abs(gpu_green / painter_green - 1.0) <= 0.15, (
+            t_ms,
+            gpu_green,
+            painter_green,
+        )
+        assert red_pixels(gpu_frame) > 500, t_ms
+        assert abs(
+            red_pixels(gpu_frame) / red_pixels(painter_frame) - 1.0
+        ) <= 0.15, (t_ms, red_pixels(gpu_frame), red_pixels(painter_frame))
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Direct2D GPU backend is Windows-only")
 def test_gpu_g5_lit_role_decorations_follow_named_scheme_painter(
     monkeypatch,
 ) -> None:

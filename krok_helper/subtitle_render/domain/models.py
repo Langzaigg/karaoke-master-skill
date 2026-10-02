@@ -1232,9 +1232,10 @@ class Style:
     lit_role_name: Optional[str] = None
     """指示灯 ``role`` 外观档引用的来源名：保留键 ``__global__`` 表示全局
     默认（主样式自身配色），其余为 ``custom_style_schemes`` 的键（角色名
-    或「标题」）；仅 ``lit_appearance_mode == "role"`` 时生效。来源改名/
-    删除时由 ``roleReferencesRemapped`` 维护链同步改写；渲染时名字查不到
-    则回退 auto 档口径（段首行第一个角色）。"""
+    或「标题」）；仅 ``lit_appearance_mode == "role"`` 时生效。来源改名时
+    由 ``roleReferencesRemapped`` 维护链同步改写；**删除被引用角色时保留
+    悬空引用**（UI 下拉以幽灵条目展示原名，渲染按 auto 档口径回退——段
+    首行第一个角色）。"""
     lit_auto_size_ratio_pct: int = 50
     """auto/role 档灯边长相对主文字字号的百分比（默认 50%）；仅非 custom
     模式生效。"""
@@ -1248,8 +1249,9 @@ class Style:
     ``custom`` 时全部使用下面的独立字段。推导在渲染期实时进行，改字号/
     配色/输出高度后音量柱自动跟随，工程里不落具体值。"""
     volume_role_name: Optional[str] = None
-    """音量柱 ``role`` 外观档引用的来源名：语义同 ``lit_role_name``；仅
-    ``volume_appearance_mode == "role"`` 时生效。"""
+    """音量柱 ``role`` 外观档引用的来源名：语义同 ``lit_role_name``（改名
+    连写、删除保留悬空引用）；仅 ``volume_appearance_mode == "role"`` 时
+    生效。"""
     volume_auto_size_ratio_pct: int = 50
     """auto/role 档整体高度相对主文字字号的百分比（默认 50%）；仅非
     custom 模式生效。"""
@@ -3278,26 +3280,23 @@ def remap_scanline_role_reference(
 def remap_appearance_role_references(
     style: "Style", mapping: dict[str, Optional[str]]
 ) -> Optional["Style"]:
-    """Rename or clear the lit/volume appearance role references.
+    """Rename the lit/volume appearance role references.
 
     指示灯/音量柱 ``role`` 外观档的来源名（``lit_role_name`` /
-    ``volume_role_name``）与扫字线同一条改名/删除维护链。删除被引用角色
-    时外观模式回退 ``auto``（渲染端悬空回退本就落到 auto 口径——段首行
-    第一个角色），不留一个引用悬空的 role 档。Returns ``None`` when no
-    reference is touched, so callers can skip the style write.
+    ``volume_role_name``）与扫字线同一条改名维护链：改名连带改写引用。
+    **删除被引用角色时不动**——保留悬空引用（UI 下拉以幽灵条目展示原名，
+    渲染端按 auto 口径回退：段首行第一个角色），角色重建同名方案后自动
+    接回，不静默改写用户的外观档选择。Returns ``None`` when no reference
+    is touched, so callers can skip the style write.
     """
 
     changes: dict[str, object] = {}
-    mode_field_by_name = {"lit_role_name": "lit_appearance_mode", "volume_role_name": "volume_appearance_mode"}
-    for name_field, mode_field in mode_field_by_name.items():
+    for name_field in ("lit_role_name", "volume_role_name"):
         name = getattr(style, name_field, None)
         if name is None or name not in mapping:
             continue
         target = mapping.get(name)
-        if target is None:
-            changes[name_field] = None
-            changes[mode_field] = "auto"
-        else:
+        if target is not None:
             changes[name_field] = target
     if not changes:
         return None

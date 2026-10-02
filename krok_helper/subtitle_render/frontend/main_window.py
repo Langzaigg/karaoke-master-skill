@@ -4391,8 +4391,8 @@ class SubtitleRenderWindow(QWidget):
                 style, role_remap
             )
             if appearance_style is not None:
-                # 指示灯/音量柱「复用配色方案」同一条维护链：改名连带改写，
-                # 删除连模式一起回退「自动配合字体」。
+                # 指示灯/音量柱「复用配色方案」同一条维护链：改名连带改写；
+                # 删除保留悬空引用（下拉展示幽灵条目，渲染回退 auto 口径）。
                 style = appearance_style
                 self._style = style
                 role_remap_applied = True

@@ -2047,6 +2047,87 @@ def test_lit_role_global_and_dangling_sources(qapp):
     assert color.green() > 120 and color.blue() < 120, color.name()
 
 
+def test_volume_role_does_not_leak_into_lit_auto(qapp):
+    # 双模块同开的装饰源独立性：音量柱 role 档选「青」，指示灯 auto 档
+    # 仍取所在行第一角色（赤）——两模块各解析各的 bar_style，互不串扰。
+    from krok_helper.subtitle_render.engine.render.elements.signal import (
+        SignalLineMeasurement,
+        resolve_signal_layers,
+    )
+    from krok_helper.subtitle_render.engine.style.style_semantics import (
+        effective_karaoke_colors,
+    )
+
+    track = _lit_role_scheme_track()
+    style = Style(
+        font_family="Arial",
+        font_size_px=64,
+        volume_enabled=True,
+        volume_appearance_mode="role",
+        volume_role_name="青",
+        volume_duration_ms=1500,
+        volume_waiting_time_ms=0,
+        volume_time_offset_ms=0,
+        volume_flash_times=0,
+        dual_line_layout=False,
+        line_lead_in_ms=0,
+        line_tail_ms=500,
+        lit_enabled=True,
+        lit_style="circle",
+        fill_color="#2030FF",
+        custom_style_schemes={
+            "赤": SubtitleStyleScheme(
+                font_family="Arial",
+                font_family_latin="Arial",
+                font_size_px=32,
+                stroke_width_px=0,
+                decoration_kind="none",
+                fill_color="#20FF50",
+            ),
+            "青": SubtitleStyleScheme(
+                font_family="Arial",
+                font_family_latin="Arial",
+                font_size_px=32,
+                stroke_width_px=0,
+                decoration_kind="none",
+                fill_color="#FF2050",
+            ),
+        },
+    )
+
+    def measure(_track, display_line, baselines, _img_h, line_style):
+        return SignalLineMeasurement(
+            baseline_y=baselines.get(display_line.lane, 0),
+            line_style=line_style,
+            metrics=QFontMetrics(_build_font(line_style)),
+            total_w=200,
+            signal_x=20.0,
+            signal_y=20.0,
+        )
+
+    display_style = _display_style_for_signal_window(style)
+    display_lines = _visible_lines_for_style(track, 500, display_style)
+    baselines = _resolve_display_baselines(90, track, display_lines, display_style)
+    layers = resolve_signal_layers(
+        track,
+        display_lines,
+        baselines,
+        160,
+        90,
+        500,
+        style,
+        measure_line=measure,
+    )
+    volume_layers = [layer for layer in layers if layer.is_volume]
+    lit_layers = [layer for layer in layers if not layer.is_volume]
+    assert len(volume_layers) == 1 and len(lit_layers) == 1
+    volume_colors = effective_karaoke_colors(volume_layers[0].group.bar_style)
+    lit_colors = effective_karaoke_colors(lit_layers[0].group.bar_style)
+    # 柱体 = 青方案（红系）；指示灯 = 第一角色「赤」（绿系），不是青。
+    assert volume_colors.after.text.color == "#FF2050"
+    assert lit_colors.after.text.color == "#20FF50"
+
+
 def test_lit_auto_decorations_follow_text_pipeline(qapp):
     # auto 档矢量灯走文字装饰管线：发光装饰在灯体外扩出光晕（灯带纵向
     # 墨迹显著多于关装饰帧）。
