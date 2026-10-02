@@ -278,6 +278,9 @@ void applySignalStyleOverrides(ResolvedStyle &cfg, const QJsonObject &style) {
     cfg.litAppearanceMode = stringValue(
         style, QStringLiteral("lit_appearance_mode"), cfg.litAppearanceMode
     );
+    cfg.litRoleName = stringValue(
+        style, QStringLiteral("lit_role_name"), cfg.litRoleName
+    ).trimmed();
     cfg.litImagePath = stringValue(
         style, QStringLiteral("lit_image_path"), cfg.litImagePath
     );
@@ -307,6 +310,9 @@ void applySignalStyleOverrides(ResolvedStyle &cfg, const QJsonObject &style) {
     }
     cfg.volumeDurationMs = std::max(0, intValue(style, QStringLiteral("volume_duration_ms"), cfg.volumeDurationMs));
     cfg.volumeAppearanceMode = stringValue(style, QStringLiteral("volume_appearance_mode"), cfg.volumeAppearanceMode);
+    cfg.volumeRoleName = stringValue(
+        style, QStringLiteral("volume_role_name"), cfg.volumeRoleName
+    ).trimmed();
     cfg.volumeWaitingTimeMs = std::max(0, intValue(style, QStringLiteral("volume_waiting_time_ms"), cfg.volumeWaitingTimeMs));
     cfg.volumeTimeOffsetMs = intValue(style, QStringLiteral("volume_time_offset_ms"), cfg.volumeTimeOffsetMs);
     cfg.volumeStrokeWidth = std::max(0, intValue(style, QStringLiteral("volume_stroke_width"), cfg.volumeStrokeWidth));

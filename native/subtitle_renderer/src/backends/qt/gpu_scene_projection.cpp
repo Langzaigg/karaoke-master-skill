@@ -1214,6 +1214,43 @@ krok::subtitle::native::RenderScene gpuSceneFromConfig(const RenderConfig &confi
             [](const auto &a, const auto &b) { return a.first < b.first; }
         );
     }
+    // 指示灯/音量柱 ``role`` 外观档（复用配色方案）的固定装饰源：方案叠加
+    // 到全局 base 后投影成完整 TextStyle（镜像 Painter 的
+    // appearance_role_source——``__global__`` 取主样式自身，其余名字查
+    // customStyleSchemes；悬空/空名返回 nullopt，渲染端回退 auto 口径：
+    // 段首行第一个角色）。
+    const auto roleDecorTextStyle = [&](
+        const QString &mode, const QString &roleName
+    ) -> std::optional<TextStyle> {
+        if (mode != QStringLiteral("role")) {
+            return std::nullopt;
+        }
+        const QString name = roleName.trimmed();
+        if (name.isEmpty()) {
+            return std::nullopt;
+        }
+        if (name != QStringLiteral("__global__")) {
+            const QJsonObject scheme =
+                config.customStyleSchemes.value(name).toObject();
+            if (scheme.isEmpty()) {
+                return std::nullopt;
+            }
+            TextStyle decorStyle = scene.style;
+            applyGpuResolvedStyle(
+                decorStyle,
+                protocol::resolvedStyleForRole(config, config.baseStyle, name),
+                scale
+            );
+            return decorStyle;
+        }
+        return scene.style;
+    };
+    scene.litDecorStyle = roleDecorTextStyle(
+        config.baseStyle.litAppearanceMode, config.baseStyle.litRoleName
+    );
+    scene.volumeDecorStyle = roleDecorTextStyle(
+        config.baseStyle.volumeAppearanceMode, config.baseStyle.volumeRoleName
+    );
     return scene;
 }
 

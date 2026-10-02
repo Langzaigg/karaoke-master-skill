@@ -125,17 +125,39 @@ class EffectsPropertyPageBuilder:
         add = group("布局", min_column_width=220, max_columns=2)
         host._volume_appearance_mode_combo = self._combo(
             section,
-            (("自动配合字体", "auto"), ("自定义", "custom")),
+            (
+                ("自动配合字体", "auto"),
+                ("复用配色方案", "role"),
+                ("自定义", "custom"),
+            ),
             "volume_appearance_mode",
         )
         host._volume_appearance_mode_combo.setToolTip(
             "自动配合字体：整体高度、柱宽按主文字字号推导（比例由「相对字号」"
             "调整）；柱体改用段首行第一个角色的完整装饰管线——填充/渐变、描边"
             "与二重描边、发光/阴影、整字放大动画与该角色同款同比缩放。对应控件"
-            "停用并回显推导值，改字号或输出高度后自动跟随；自定义：全部参数"
-            "独立设置"
+            "停用并回显推导值，改字号或输出高度后自动跟随；"
+            "复用配色方案：大小推导同自动配合字体，但装饰管线固定改用"
+            "「配色来源」所选方案（全局默认/「标题」/角色方案）的配色，"
+            "不随所在行的角色变化（与扫字线「复用配色方案」同口径）；"
+            "自定义：全部参数独立设置"
         )
         add("外观模式", host._volume_appearance_mode_combo)
+        host._volume_role_combo = WheelFocusedComboBox(section)
+        compact_property_control(host._volume_role_combo)
+        host._volume_role_combo.setToolTip(
+            "复用配色方案模式下装饰管线引用的来源（全局默认/「标题」方案或"
+            "角色方案）；在「角色」卡片编辑该来源的配色与描边/发光等装饰，"
+            "音量柱即可使用渐变/拼色等效果。来源悬空时按「自动配合字体」"
+            "口径回退（段首行第一个角色）"
+        )
+        host._volume_role_combo.currentIndexChanged.connect(
+            lambda _index: host._update_style(
+                volume_role_name=host._volume_role_combo.currentData()
+            )
+        )
+        host._volume_role_combo.hide()
+        add("配色来源", host._volume_role_combo)
         self._add_canvas_spin(
             add,
             "_volume_auto_size_ratio_spin",
@@ -147,8 +169,8 @@ class EffectsPropertyPageBuilder:
             suffix=" %",
         )
         host._volume_auto_size_ratio_spin.setToolTip(
-            "auto 模式下整体高度相对主文字字号的百分比（默认 50%）；"
-            "自定义模式下停用"
+            "auto/复用配色方案模式下整体高度相对主文字字号的百分比"
+            "（默认 50%）；自定义模式下停用"
         )
         self._add_canvas_spin(
             add,
@@ -161,7 +183,7 @@ class EffectsPropertyPageBuilder:
             suffix=" %",
         )
         host._volume_auto_column_ratio_spin.setToolTip(
-            "auto 模式下柱宽相对整体高度的百分比（默认 25%，"
+            "auto/复用配色方案模式下柱宽相对整体高度的百分比（默认 25%，"
             "与 N3 默认比例一致）；描边上限随柱宽推导。自定义模式下停用"
         )
         self._add_canvas_spin(add, "_volume_size_spin", "整体高度", 4, 240, "volume_size", "short_quarter", suffix=" px")
@@ -277,7 +299,11 @@ class EffectsPropertyPageBuilder:
         add("图片", lit_image_row)
         host._lit_appearance_mode_combo = self._combo(
             section,
-            (("自动配合字体", "auto"), ("自定义", "custom")),
+            (
+                ("自动配合字体", "auto"),
+                ("复用配色方案", "role"),
+                ("自定义", "custom"),
+            ),
             "lit_appearance_mode",
         )
         host._lit_appearance_mode_combo.setToolTip(
@@ -285,9 +311,28 @@ class EffectsPropertyPageBuilder:
             "矢量灯改用段首行第一个角色的完整装饰管线——填充/渐变、描边与"
             "二重描边、发光/阴影与高光取该角色走字后配色并同比缩放，且不跟随"
             "行入退场动画（独立悬浮，靠自身倒计时转场淡出）。对应控件停用并"
-            "回显推导值，改字号或输出高度后自动跟随；自定义：全部参数独立设置"
+            "回显推导值，改字号或输出高度后自动跟随；"
+            "复用配色方案：大小推导同自动配合字体，但装饰管线固定改用"
+            "「配色来源」所选方案（全局默认/「标题」/角色方案）的配色，"
+            "不随所在行的角色变化（与扫字线「复用配色方案」同口径）；"
+            "自定义：全部参数独立设置"
         )
         add("外观模式", host._lit_appearance_mode_combo)
+        host._lit_role_combo = WheelFocusedComboBox(section)
+        compact_property_control(host._lit_role_combo)
+        host._lit_role_combo.setToolTip(
+            "复用配色方案模式下装饰管线引用的来源（全局默认/「标题」方案或"
+            "角色方案）；在「角色」卡片编辑该来源的配色与描边/发光等装饰，"
+            "指示灯即可使用渐变/拼色等效果。来源悬空时按「自动配合字体」"
+            "口径回退（段首行第一个角色）"
+        )
+        host._lit_role_combo.currentIndexChanged.connect(
+            lambda _index: host._update_style(
+                lit_role_name=host._lit_role_combo.currentData()
+            )
+        )
+        host._lit_role_combo.hide()
+        add("配色来源", host._lit_role_combo)
         self._add_canvas_spin(
             add,
             "_lit_auto_size_ratio_spin",
@@ -299,8 +344,8 @@ class EffectsPropertyPageBuilder:
             suffix=" %",
         )
         host._lit_auto_size_ratio_spin.setToolTip(
-            "auto 模式下灯边长相对主文字字号的百分比（默认 50%）；"
-            "自定义模式下停用"
+            "auto/复用配色方案模式下灯边长相对主文字字号的百分比"
+            "（默认 50%）；自定义模式下停用"
         )
         self._add_canvas_spin(add, "_lit_number_spin", "数量", 1, 8, "lit_number", "hard")
         self._add_canvas_spin(add, "_lit_size_spin", "大小", 4, 160, "lit_size", "short_quarter", suffix=" px")

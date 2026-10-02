@@ -1440,6 +1440,181 @@ def test_volume_auto_decorations_follow_first_role(qapp):
     assert not region_has("#2030FF")
 
 
+def test_volume_role_appearance_sizing_matches_auto(qapp):
+    # role 档（复用配色方案）大小推导与 auto 完全一致；来源悬空不改尺寸，
+    # custom 仍用独立字段。
+    base = Style(volume_enabled=True, font_size_px=64)
+    auto = volume_style(replace(base, volume_appearance_mode="auto"))
+    role = volume_style(
+        replace(base, volume_appearance_mode="role", volume_role_name="__global__")
+    )
+    assert (
+        role.volume_size,
+        role.volume_column_width,
+        role.volume_stroke_width,
+    ) == (
+        auto.volume_size,
+        auto.volume_column_width,
+        auto.volume_stroke_width,
+    )
+    dangling = volume_style(
+        replace(base, volume_appearance_mode="role", volume_role_name="不存在")
+    )
+    assert dangling.volume_size == role.volume_size
+    assert volume_style(replace(base, volume_appearance_mode="custom")).volume_size == 48
+
+
+def test_volume_role_decorations_follow_named_scheme(qapp):
+    # role 档装饰源 = 指定方案（青），不随所在行第一角色（赤）：柱体用
+    # 青方案的已唱色，赤方案与全局色都不出现（扫字线「复用配色方案」
+    # 同口径的固定来源语义）。
+    track = TimingTrack(
+        lines=[
+            TimingLine(
+                chars=[
+                    TimingChar(text="あ", start_ms=1000, role_label="赤"),
+                    TimingChar(text="い", start_ms=1300),
+                ],
+                end_ms=2000,
+            )
+        ]
+    )
+    style = Style(
+        font_family="Arial",
+        font_size_px=64,
+        volume_enabled=True,
+        volume_appearance_mode="role",
+        volume_role_name="青",
+        volume_duration_ms=1500,
+        volume_waiting_time_ms=0,
+        volume_time_offset_ms=0,
+        volume_flash_times=0,
+        dual_line_layout=False,
+        line_lead_in_ms=0,
+        line_tail_ms=500,
+        stroke_width_px=0,
+        decoration_kind="none",
+        base_color="#FFFFFF",
+        fill_color="#2030FF",
+        custom_style_schemes={
+            "赤": SubtitleStyleScheme(
+                font_family="Arial",
+                font_family_latin="Arial",
+                font_size_px=64,
+                stroke_width_px=0,
+                decoration_kind="none",
+                fill_color="#20FF50",
+            ),
+            "青": SubtitleStyleScheme(
+                font_family="Arial",
+                font_family_latin="Arial",
+                font_size_px=64,
+                stroke_width_px=0,
+                decoration_kind="none",
+                fill_color="#FF2050",
+            ),
+        },
+    )
+    img = _blank(800, 450)
+    paint_frame(img, track, 1300, style)
+    layout = _sayatoo_layout_for(track, style, 1300, w=800, h=450)
+    x0 = max(int(layout.signal_x) - 4, 0)
+    x1 = int(layout.text_x)
+
+    def region_has(color: str) -> bool:
+        target = QColor(color)
+        for y in range(img.height()):
+            for x in range(x0, x1):
+                c = QColor(img.pixel(x, y))
+                if (
+                    abs(c.red() - target.red()) < 24
+                    and abs(c.green() - target.green()) < 24
+                    and abs(c.blue() - target.blue()) < 24
+                ):
+                    return True
+        return False
+
+    assert region_has("#FF2050"), "柱体应取青方案的已唱填充色"
+    assert not region_has("#20FF50"), "不应随所在行第一角色（赤）"
+    assert not region_has("#2030FF"), "不应取全局 fill_color"
+
+
+def test_volume_role_global_and_dangling_sources(qapp):
+    # __global__ → 主样式自身配色（柱体取全局已唱色）；名字悬空 → 回退
+    # auto 口径（段首行第一角色）。
+    track = TimingTrack(
+        lines=[
+            TimingLine(
+                chars=[
+                    TimingChar(text="あ", start_ms=1000, role_label="赤"),
+                    TimingChar(text="い", start_ms=1300),
+                ],
+                end_ms=2000,
+            )
+        ]
+    )
+    base = dict(
+        font_family="Arial",
+        font_size_px=64,
+        volume_enabled=True,
+        volume_duration_ms=1500,
+        volume_waiting_time_ms=0,
+        volume_time_offset_ms=0,
+        volume_flash_times=0,
+        dual_line_layout=False,
+        line_lead_in_ms=0,
+        line_tail_ms=500,
+        stroke_width_px=0,
+        decoration_kind="none",
+        base_color="#FFFFFF",
+        fill_color="#2030FF",
+        custom_style_schemes={
+            "赤": SubtitleStyleScheme(
+                font_family="Arial",
+                font_family_latin="Arial",
+                font_size_px=64,
+                stroke_width_px=0,
+                decoration_kind="none",
+                fill_color="#20FF50",
+            ),
+        },
+    )
+
+    def region_has(style: Style, color: str) -> bool:
+        img = _blank(800, 450)
+        paint_frame(img, track, 1300, style)
+        layout = _sayatoo_layout_for(track, style, 1300, w=800, h=450)
+        x0 = max(int(layout.signal_x) - 4, 0)
+        x1 = int(layout.text_x)
+        target = QColor(color)
+        for y in range(img.height()):
+            for x in range(x0, x1):
+                c = QColor(img.pixel(x, y))
+                if (
+                    abs(c.red() - target.red()) < 24
+                    and abs(c.green() - target.green()) < 24
+                    and abs(c.blue() - target.blue()) < 24
+                ):
+                    return True
+        return False
+
+    global_style = Style(
+        volume_appearance_mode="role",
+        volume_role_name="__global__",
+        **base,
+    )
+    assert region_has(global_style, "#2030FF"), "__global__ 应取全局已唱色"
+    assert not region_has(global_style, "#20FF50")
+
+    dangling_style = Style(
+        volume_appearance_mode="role",
+        volume_role_name="无此方案",
+        **base,
+    )
+    assert region_has(dangling_style, "#20FF50"), "悬空应回退第一角色（赤）"
+    assert not region_has(dangling_style, "#2030FF")
+
+
 def test_volume_auto_colors_reach_painting(qapp):
     # 覆盖柱填充跟随 fill_color：auto 模式下柱区出现「已唱填充色」像素。
     img = _blank(160, 90)
@@ -1763,6 +1938,113 @@ def test_lit_auto_colors_follow_first_role(qapp):
         cy = int(group.y + resolved.lit_size * 0.62)
         color = QColor(img.pixel(cx, cy))
         assert color.green() > 120 and color.blue() < 120, (index, color.name())
+
+
+def _lit_role_scheme_track() -> TimingTrack:
+    return TimingTrack(
+        lines=[
+            TimingLine(
+                chars=[
+                    TimingChar(text="あ", start_ms=1000, role_label="赤"),
+                    TimingChar(text="い", start_ms=1300),
+                ],
+                end_ms=2000,
+            )
+        ]
+    )
+
+
+def _lit_lamp_core_color(track: TimingTrack, style: Style, t_ms: int) -> str:
+    group, resolved = _lit_auto_group(track, style, t_ms)
+    img = _blank(160, 90)
+    paint_frame(img, track, t_ms, style)
+    cx = int(group.x + resolved.lit_size * 0.5)
+    cy = int(group.y + resolved.lit_size * 0.62)
+    return QColor(img.pixel(cx, cy)).name()
+
+
+def test_lit_role_appearance_sizing_matches_auto(qapp):
+    # role 档灯大小推导与 auto 一致；custom 仍用独立字段。
+    from krok_helper.subtitle_render.domain.models import resolve_lit_appearance
+
+    base = Style(lit_enabled=True, font_size_px=64, stroke_width_px=8)
+    auto = resolve_lit_appearance(base)
+    role = resolve_lit_appearance(
+        replace(base, lit_appearance_mode="role", lit_role_name="__global__")
+    )
+    assert (role.lit_size, role.lit_stroke_width) == (
+        auto.lit_size,
+        auto.lit_stroke_width,
+    )
+    custom = resolve_lit_appearance(replace(base, lit_appearance_mode="custom"))
+    assert custom.lit_size == 45
+
+
+def test_lit_role_colors_follow_named_scheme(qapp):
+    # role 档装饰源 = 指定方案（青），不随所在行第一角色（赤）：灯体用青
+    # 方案的走字后填充（红系），赤方案（绿）不出现。
+    track = _lit_role_scheme_track()
+    style = Style(
+        fill_color="#2030FF",
+        lit_appearance_mode="role",
+        lit_role_name="青",
+        custom_style_schemes={
+            "赤": SubtitleStyleScheme(
+                font_family="Arial",
+                font_family_latin="Arial",
+                font_size_px=32,
+                stroke_width_px=0,
+                decoration_kind="none",
+                fill_color="#20FF50",
+            ),
+            "青": SubtitleStyleScheme(
+                font_family="Arial",
+                font_family_latin="Arial",
+                font_size_px=32,
+                stroke_width_px=0,
+                decoration_kind="none",
+                fill_color="#FF2050",
+            ),
+        },
+        **_lit_auto_pixel_base(),
+    )
+    color = QColor(_lit_lamp_core_color(track, style, 500))
+    assert color.red() > 120 and color.green() < 120, color.name()
+
+
+def test_lit_role_global_and_dangling_sources(qapp):
+    # __global__ → 主样式自身配色（蓝）；名字悬空 → 回退 auto 口径（第一
+    # 角色「赤」的绿）。
+    track = _lit_role_scheme_track()
+    schemes = {
+        "赤": SubtitleStyleScheme(
+            font_family="Arial",
+            font_family_latin="Arial",
+            font_size_px=32,
+            stroke_width_px=0,
+            decoration_kind="none",
+            fill_color="#20FF50",
+        ),
+    }
+    global_style = Style(
+        fill_color="#2030FF",
+        lit_appearance_mode="role",
+        lit_role_name="__global__",
+        custom_style_schemes=schemes,
+        **_lit_auto_pixel_base(),
+    )
+    color = QColor(_lit_lamp_core_color(track, global_style, 500))
+    assert color.blue() > 120 and color.green() < 120, color.name()
+
+    dangling_style = Style(
+        fill_color="#2030FF",
+        lit_appearance_mode="role",
+        lit_role_name="无此方案",
+        custom_style_schemes=schemes,
+        **_lit_auto_pixel_base(),
+    )
+    color = QColor(_lit_lamp_core_color(track, dangling_style, 500))
+    assert color.green() > 120 and color.blue() < 120, color.name()
 
 
 def test_lit_auto_decorations_follow_text_pipeline(qapp):

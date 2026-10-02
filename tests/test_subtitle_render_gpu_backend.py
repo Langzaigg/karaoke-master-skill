@@ -6094,6 +6094,178 @@ def test_gpu_g5_volume_auto_decorations_follow_first_role_painter(monkeypatch) -
 
 
 @pytest.mark.skipif(os.name != "nt", reason="Direct2D GPU backend is Windows-only")
+def test_gpu_g5_volume_role_decorations_follow_named_scheme_painter(
+    monkeypatch,
+) -> None:
+    # role 外观档（复用配色方案）：装饰源 = 指定方案（副），不随所在行
+    # 第一个角色（主）。native 端经 scene 级 volumeDecorStyle（gpu_scene_
+    # projection 按名解析），与 Painter 的 appearance_role_source 同口径，
+    # alpha 包络逐帧对齐。
+    monkeypatch.setenv("QT_QPA_PLATFORM", "offscreen")
+    track = TimingTrack(
+        lines=[
+            TimingLine(
+                chars=[
+                    TimingChar("歌", 1_000, role_label="主"),
+                    TimingChar("詞", 1_400),
+                ],
+                end_ms=2_000,
+            )
+        ]
+    )
+
+    def role_state(color: str) -> KaraokeColorState:
+        return KaraokeColorState(text=PaintFill(mode="solid", color=color))
+
+    def scheme(before: str, after: str) -> SubtitleStyleScheme:
+        return SubtitleStyleScheme(
+            font_family="Meiryo",
+            font_family_latin="Meiryo",
+            font_size_px=64,
+            stroke_width_px=0,
+            decoration_kind="none",
+            karaoke_colors=KaraokeColors(
+                before=role_state(before),
+                after=role_state(after),
+            ),
+        )
+
+    style = _g1_style(
+        font_family="Meiryo",
+        font_family_latin="Meiryo",
+        font_size_px=64,
+        stroke_width_px=4,
+        stroke2_enabled=False,
+        decoration_kind="glow",
+        glow_radius_px=6,
+        glow_before_radius_px=6,
+        glow_after_radius_px=6,
+        base_color="#FFFFFF",
+        fill_color="#FF2030",
+        dual_line_layout=False,
+        line_horizontal_layout="center",
+        line_lead_in_ms=0,
+        line_tail_ms=1_000,
+        volume_enabled=True,
+        volume_appearance_mode="role",
+        volume_role_name="副",
+        volume_duration_ms=1_500,
+        volume_waiting_time_ms=0,
+        volume_time_offset_ms=0,
+        volume_flash_times=0,
+        volume_size=36,
+        volume_column_spacing=2,
+        custom_style_schemes={
+            "主": scheme("#40FFFF", "#FFFF40"),
+            "副": scheme("#FF40FF", "#40FF40"),
+        },
+    )
+    timestamps = (600, 1_200)
+    painter = [
+        _render_painter_oracle(style, t_ms=t_ms, track=track)
+        for t_ms in timestamps
+    ]
+    with NativeRendererProcess(_renderer_path(), response_timeout_s=15.0) as renderer:
+        _, gpu = _render_g1_frames(
+            renderer, style, timestamps, force_warp=True, track=track
+        )
+    for t_ms, gpu_frame, painter_frame in zip(timestamps, gpu, painter):
+        gpu_bounds = _payload_alpha_bounds(gpu_frame)
+        painter_bounds = _payload_alpha_bounds(painter_frame)
+        assert all(
+            abs(actual - expected) <= 14
+            for actual, expected in zip(gpu_bounds, painter_bounds)
+        ), (t_ms, gpu_bounds, painter_bounds)
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Direct2D GPU backend is Windows-only")
+def test_gpu_g5_lit_role_decorations_follow_named_scheme_painter(
+    monkeypatch,
+) -> None:
+    # 指示灯 role 外观档：装饰源 = 「标题」方案（不被任何字符引用也能
+    # 选用），native 端经 scene.litDecorStyle 与 Painter 对齐；悬空名回退
+    # auto 口径（第一个角色）两端同样一致。
+    monkeypatch.setenv("QT_QPA_PLATFORM", "offscreen")
+    track = TimingTrack(
+        lines=[
+            TimingLine(
+                chars=[
+                    TimingChar("歌", 1_000, role_label="主"),
+                    TimingChar("詞", 1_400),
+                ],
+                end_ms=2_000,
+            )
+        ]
+    )
+
+    def role_state(color: str) -> KaraokeColorState:
+        return KaraokeColorState(text=PaintFill(mode="solid", color=color))
+
+    def scheme(after: str) -> SubtitleStyleScheme:
+        return SubtitleStyleScheme(
+            font_family="Meiryo",
+            font_family_latin="Meiryo",
+            font_size_px=64,
+            stroke_width_px=0,
+            decoration_kind="none",
+            karaoke_colors=KaraokeColors(
+                before=role_state("#FFFFFF"),
+                after=role_state(after),
+            ),
+        )
+
+    base = dict(
+        font_family="Meiryo",
+        font_family_latin="Meiryo",
+        font_size_px=64,
+        stroke_width_px=4,
+        stroke2_enabled=False,
+        decoration_kind="glow",
+        glow_radius_px=6,
+        glow_before_radius_px=6,
+        glow_after_radius_px=6,
+        dual_line_layout=False,
+        line_horizontal_layout="center",
+        line_lead_in_ms=0,
+        line_tail_ms=1_000,
+        lit_enabled=True,
+        lit_style="circle",
+        signals_duration_ms=1_500,
+        lit_waiting_time_ms=0,
+        lit_time_offset_ms=0,
+        lit_transition_mode="fade",
+        custom_style_schemes={
+            "主": scheme("#40FFFF"),
+            "标题": scheme("#FF40FF"),
+        },
+    )
+    timestamps = (700, 1_400)
+    for mode, name in (("role", "标题"), ("role", "无此方案")):
+        style = _g1_style(
+            lit_appearance_mode=mode,
+            lit_role_name=name,
+            **base,
+        )
+        painter = [
+            _render_painter_oracle(style, t_ms=t_ms, track=track)
+            for t_ms in timestamps
+        ]
+        with NativeRendererProcess(
+            _renderer_path(), response_timeout_s=15.0
+        ) as renderer:
+            _, gpu = _render_g1_frames(
+                renderer, style, timestamps, force_warp=True, track=track
+            )
+        for t_ms, gpu_frame, painter_frame in zip(timestamps, gpu, painter):
+            gpu_bounds = _payload_alpha_bounds(gpu_frame)
+            painter_bounds = _payload_alpha_bounds(painter_frame)
+            assert all(
+                abs(actual - expected) <= 14
+                for actual, expected in zip(gpu_bounds, painter_bounds)
+            ), (mode, name, t_ms, gpu_bounds, painter_bounds)
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Direct2D GPU backend is Windows-only")
 def test_gpu_g4_signal_effects_enter_with_long_display_line(monkeypatch) -> None:
     # 所在行显示时长超过特效时长时，特效随行一并入场（显示窗起点即可
     # 见，初始满灯/初帧柱体），动画时间轴锚点不变；native 与 Painter

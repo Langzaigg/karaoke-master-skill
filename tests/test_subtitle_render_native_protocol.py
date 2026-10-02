@@ -2333,6 +2333,38 @@ def test_build_render_ir_materializes_lit_auto_appearance():
     assert disabled_ir["style"]["lit_size"] == 7
 
 
+def test_build_render_ir_carries_role_appearance_sources():
+    # role 外观档（复用配色方案）：大小推导同 auto 物化成数值；来源名与
+    # 方案表原样下发——native 端按名解析装饰源（gpu_scene_projection 的
+    # scene.litDecorStyle / volumeDecorStyle），悬空时回退 auto 口径。
+    track = TimingTrack(lines=[TimingLine(chars=[TimingChar("A", 100)], end_ms=500)])
+    style = Style(
+        font_size_px=100,
+        volume_enabled=True,
+        volume_appearance_mode="role",
+        volume_role_name="青",
+        volume_size=7,
+        lit_enabled=True,
+        lit_style="circle",
+        lit_appearance_mode="role",
+        lit_role_name="__global__",
+        lit_size=7,
+        custom_style_schemes={
+            "青": SubtitleStyleScheme(fill_color="#20FF50"),
+        },
+    )
+
+    ir = build_render_ir(track, style, width=640, height=360, fps=30)
+
+    assert ir["style"]["volume_appearance_mode"] == "role"
+    assert ir["style"]["volume_role_name"] == "青"
+    assert ir["style"]["volume_size"] == 50
+    assert ir["style"]["lit_appearance_mode"] == "role"
+    assert ir["style"]["lit_role_name"] == "__global__"
+    assert ir["style"]["lit_size"] == 50
+    assert ir["style"]["custom_style_schemes"]["青"]["fill_color"] == "#20FF50"
+
+
 def test_shared_track_layout_plan_is_the_gpu_ir_semantic_source():
     track = TimingTrack(
         lines=[

@@ -261,9 +261,12 @@ struct ResolvedStyle {
     std::optional<int> rubyGlowConcentrationLevel;
     bool litEnabled = false;
     QString litStyle = QStringLiteral("volume");
-    // 指示灯 auto 外观模式：矢量灯走主文字装饰管线（镜像 Painter 的
-    // _draw_lit_decorated_group）；大小/颜色已在 IR 侧物化成数值。
+    // 指示灯 auto/role 外观模式：矢量灯走主文字装饰管线（镜像 Painter 的
+    // _draw_lit_decorated_group）；大小/颜色已在 IR 侧物化成数值。``role``
+    // 档装饰源改为 ``litRoleName`` 指定方案（场景投影额外产出一个 decor
+    // TextStyle，见 RenderScene::litDecorStyle；名字悬空回退 auto 口径）。
     QString litAppearanceMode = QStringLiteral("custom");
+    QString litRoleName;
     int litNumber = 4;
     int litSize = 32;
     int litOffsetX = 0;
@@ -285,7 +288,12 @@ struct ResolvedStyle {
     int litTransitionDistance = 0;
     int signalsDurationMs = 4000;
     bool volumeEnabled = false;
+    // 音量柱外观模式：``auto``/``role`` 同走主文字装饰管线（镜像 Painter
+    // 的 _draw_volume_decorated_group）；``role`` 档装饰源由
+    // ``volumeRoleName`` 指定（悬空回退 auto 口径），大小/颜色已在 IR 侧
+    // 物化成数值。
     QString volumeAppearanceMode = QStringLiteral("custom");
+    QString volumeRoleName;
     int volumeDurationMs = 4000;
     int volumeWaitingTimeMs = 0;
     int volumeTimeOffsetMs = 0;

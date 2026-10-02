@@ -159,12 +159,16 @@ LitStyle = Literal[
     "volume", "circle", "square", "rounded", "image", "star",
     "note8", "note16", "notepair",
 ]
-VolumeAppearanceMode = Literal["custom", "auto"]
+VolumeAppearanceMode = Literal["custom", "auto", "role"]
 """音量柱外观模式：``custom`` 手动逐项设置；``auto`` 大小与颜色自动跟随
-主文字的字号与配色（见 :func:`resolve_volume_appearance`）。"""
-LitAppearanceMode = Literal["custom", "auto"]
+主文字的字号与配色（见 :func:`resolve_volume_appearance`）；``role`` 大小
+同 auto 按字号推导，装饰管线改用 ``volume_role_name`` 指定来源的配色
+（与扫字线「复用配色方案」同口径）。"""
+LitAppearanceMode = Literal["custom", "auto", "role"]
 """指示灯外观模式：``custom`` 手动逐项设置；``auto`` 大小自动跟随主文字
-字号，矢量灯走主文字装饰管线（见 :func:`resolve_lit_appearance`）。"""
+字号，矢量灯走主文字装饰管线（见 :func:`resolve_lit_appearance`）；
+``role`` 大小同 auto 按字号推导，装饰管线改用 ``lit_role_name`` 指定
+来源的配色（与扫字线「复用配色方案」同口径）。"""
 # 标题字幕（B7）：静态叠加文字的锚点 / 对齐 / 显示时段模式。
 TitleAnchor = Literal[
     "top_left",
@@ -1221,22 +1225,37 @@ class Style:
     （无角色时为该行样式）的走字后状态，整字放大唱字动画与文字同款并按
     灯尺寸/字号 同比缩放（见 ``signal._draw_lit_decorated_group``）；auto
     档不跟随行入退场动画（独立悬浮模块，靠自身倒计时转场淡出）。
+    ``role`` 大小推导同 auto，装饰管线改用 ``lit_role_name`` 指定来源
+    （扫字线「复用配色方案」同口径，见 :func:`appearance_role_source`）。
     ``custom`` 时全部使用下面的独立字段。推导在渲染期实时进行，改字号/
     配色/输出高度后指示灯自动跟随，工程里不落具体值。"""
+    lit_role_name: Optional[str] = None
+    """指示灯 ``role`` 外观档引用的来源名：保留键 ``__global__`` 表示全局
+    默认（主样式自身配色），其余为 ``custom_style_schemes`` 的键（角色名
+    或「标题」）；仅 ``lit_appearance_mode == "role"`` 时生效。来源改名/
+    删除时由 ``roleReferencesRemapped`` 维护链同步改写；渲染时名字查不到
+    则回退 auto 档口径（段首行第一个角色）。"""
     lit_auto_size_ratio_pct: int = 50
-    """auto 档灯边长相对主文字字号的百分比（默认 50%）；仅 auto 模式生效。"""
+    """auto/role 档灯边长相对主文字字号的百分比（默认 50%）；仅非 custom
+    模式生效。"""
     volume_appearance_mode: VolumeAppearanceMode = "auto"
     """音量柱外观联动：``auto`` 时整体高度/柱宽/描边宽按主文字字号推导，
     且柱体改用主文字的完整装饰管线——填充/渐变/描边/发光/阴影取**段首行
     第一个角色**的有效配色（无角色时为该行样式），整字放大唱字动画与文字
     同款并按 柱高/字号 同比缩放（见 ``signal._draw_volume_decorated_group``）；
+    ``role`` 大小推导同 auto，装饰管线改用 ``volume_role_name`` 指定来源
+    （扫字线「复用配色方案」同口径，见 :func:`appearance_role_source`）。
     ``custom`` 时全部使用下面的独立字段。推导在渲染期实时进行，改字号/
     配色/输出高度后音量柱自动跟随，工程里不落具体值。"""
+    volume_role_name: Optional[str] = None
+    """音量柱 ``role`` 外观档引用的来源名：语义同 ``lit_role_name``；仅
+    ``volume_appearance_mode == "role"`` 时生效。"""
     volume_auto_size_ratio_pct: int = 50
-    """auto 档整体高度相对主文字字号的百分比（默认 50%）；仅 auto 模式生效。"""
+    """auto/role 档整体高度相对主文字字号的百分比（默认 50%）；仅非
+    custom 模式生效。"""
     volume_auto_column_ratio_pct: int = 25
-    """auto 档柱宽相对整体高度的百分比（默认 25%，与 N3 默认 48:12 一致）；
-    描边上限等比例链随柱宽推导，仅 auto 模式生效。"""
+    """auto/role 档柱宽相对整体高度的百分比（默认 25%，与 N3 默认 48:12
+    一致）；描边上限等比例链随柱宽推导，仅非 custom 模式生效。"""
     # Keep the serialized/default discriminator for source compatibility with
     # direct Style(lit_enabled=True) callers; the new UI always writes a shape.
     lit_style: LitStyle = "circle"
@@ -1714,11 +1733,12 @@ def volume_auto_values(style: "Style") -> dict[str, object]:
 def resolve_volume_appearance(style: "Style") -> "Style":
     """Return the style with auto-mode volume values materialized.
 
-    仅在独立音量柱模块开启且模式为 ``auto`` 时替换字段；其余情况原样返回。
-    Python 绘制/布局（``signal.volume_style``）与 native IR 序列化
-    （``render_ir``）都必须经过本函数，两条后端才会拿到同一组数值。
+    仅在独立音量柱模块开启且模式为 ``auto`` / ``role`` 时替换字段（role 档
+    大小推导同 auto，装饰配色由绘制端按 ``volume_role_name`` 另行解析）；
+    其余情况原样返回。Python 绘制/布局（``signal.volume_style``）与 native
+    IR 序列化（``render_ir``）都必须经过本函数，两条后端才会拿到同一组数值。
     """
-    if not style.volume_enabled or style.volume_appearance_mode != "auto":
+    if not style.volume_enabled or style.volume_appearance_mode == "custom":
         return style
     return replace(style, **volume_auto_values(style))
 
@@ -1751,15 +1771,16 @@ def lit_auto_values(style: "Style") -> dict[str, object]:
 def resolve_lit_appearance(style: "Style") -> "Style":
     """Return the style with auto-mode lamp values materialized.
 
-    仅在形状指示灯模块开启、模式为 ``auto`` 且不是 legacy volume 口径时替换
-    字段；其余情况原样返回。Python 布局（``painter`` 的信号度量）、绘制
-    （``signal``）与 native IR 序列化（``render_ir``）都必须经过本函数，
-    两条后端才会拿到同一组数值。
+    仅在形状指示灯模块开启、模式为 ``auto`` / ``role`` 且不是 legacy volume
+    口径时替换字段（role 档大小推导同 auto，装饰配色由绘制端按
+    ``lit_role_name`` 另行解析）；其余情况原样返回。Python 布局
+    （``painter`` 的信号度量）、绘制（``signal``）与 native IR 序列化
+    （``render_ir``）都必须经过本函数，两条后端才会拿到同一组数值。
     """
     if (
         not style.lit_enabled
         or style.lit_style == "volume"
-        or style.lit_appearance_mode != "auto"
+        or style.lit_appearance_mode == "custom"
     ):
         return style
     return replace(style, **lit_auto_values(style))
@@ -2085,13 +2106,13 @@ def style_from_dict(payload: object) -> Style:
         elif key == "volume_appearance_mode":
             changes[key] = (
                 value
-                if value in {"custom", "auto"}
+                if value in {"custom", "auto", "role"}
                 else defaults.volume_appearance_mode
             )
         elif key == "lit_appearance_mode":
             changes[key] = (
                 value
-                if value in {"custom", "auto"}
+                if value in {"custom", "auto", "role"}
                 else defaults.lit_appearance_mode
             )
         elif key == "lit_transition_mode":
@@ -2202,6 +2223,9 @@ def style_from_dict(payload: object) -> Style:
                 else defaults.scanline_mode
             )
         elif key == "scanline_role_name":
+            parsed_role_name = str(value).strip() if value else ""
+            changes[key] = parsed_role_name or None
+        elif key in {"lit_role_name", "volume_role_name"}:
             parsed_role_name = str(value).strip() if value else ""
             changes[key] = parsed_role_name or None
         elif key == "section_head_anim":
@@ -3249,6 +3273,35 @@ def remap_scanline_role_reference(
     if target is None:
         return replace(style, scanline_mode="color", scanline_role_name=None)
     return replace(style, scanline_role_name=target)
+
+
+def remap_appearance_role_references(
+    style: "Style", mapping: dict[str, Optional[str]]
+) -> Optional["Style"]:
+    """Rename or clear the lit/volume appearance role references.
+
+    指示灯/音量柱 ``role`` 外观档的来源名（``lit_role_name`` /
+    ``volume_role_name``）与扫字线同一条改名/删除维护链。删除被引用角色
+    时外观模式回退 ``auto``（渲染端悬空回退本就落到 auto 口径——段首行
+    第一个角色），不留一个引用悬空的 role 档。Returns ``None`` when no
+    reference is touched, so callers can skip the style write.
+    """
+
+    changes: dict[str, object] = {}
+    mode_field_by_name = {"lit_role_name": "lit_appearance_mode", "volume_role_name": "volume_appearance_mode"}
+    for name_field, mode_field in mode_field_by_name.items():
+        name = getattr(style, name_field, None)
+        if name is None or name not in mapping:
+            continue
+        target = mapping.get(name)
+        if target is None:
+            changes[name_field] = None
+            changes[mode_field] = "auto"
+        else:
+            changes[name_field] = target
+    if not changes:
+        return None
+    return replace(style, **changes)
 
 
 def remap_title_char_role_labels(

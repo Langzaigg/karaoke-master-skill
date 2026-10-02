@@ -367,6 +367,7 @@ _LIT_FIELDS = {
     "lit_number",
     "lit_size",
     "lit_appearance_mode",
+    "lit_role_name",
     "lit_auto_size_ratio_pct",
     "lit_offset_x",
     "lit_offset_y",
@@ -389,6 +390,7 @@ _LIT_FIELDS = {
     "volume_waiting_time_ms",
     "volume_time_offset_ms",
     "volume_appearance_mode",
+    "volume_role_name",
     "volume_auto_size_ratio_pct",
     "volume_auto_column_ratio_pct",
     "volume_stroke_width",
@@ -1470,17 +1472,32 @@ class PropertyPanel(QWidget):
             self._refresh_scanline_role_combo()
 
     def _refresh_scanline_role_combo(self) -> None:
-        """按当前方案表重建扫字线来源下拉并回显所选条目。
+        """按当前方案表重建扫字线/指示灯/音量柱的「配色来源」下拉。
+
+        三个下拉同一套来源表与回显规则：见 :meth:`_refresh_role_source_combo`。
+        """
+        for attribute, field in (
+            ("_scanline_role_combo", "scanline_role_name"),
+            ("_lit_role_combo", "lit_role_name"),
+            ("_volume_role_combo", "volume_role_name"),
+        ):
+            if hasattr(self, attribute):
+                self._refresh_role_source_combo(
+                    getattr(self, attribute),
+                    str(getattr(self._style, field, None) or ""),
+                )
+
+    def _refresh_role_source_combo(
+        self, combo: _WheelFocusedComboBox, selected: str
+    ) -> None:
+        """按当前方案表重建一个「配色来源」下拉并回显所选条目。
 
         「全局默认」（主样式自身配色，保留键）与「标题」方案恒在列表前
         列：没建过任何角色的项目也能立刻选用，下拉永不为空。引用悬空
         （历史项目/手工 JSON）时保留幽灵条目展示原名，不静默改写样式
-        数据；渲染端按悬空回退单独颜色处理。
+        数据；渲染端按悬空回退处理（扫字线回单独颜色，指示灯/音量柱回
+        「自动配合字体」口径）。
         """
-        if not hasattr(self, "_scanline_role_combo"):
-            return
-        selected = str(getattr(self._style, "scanline_role_name", None) or "")
-        combo = self._scanline_role_combo
         combo.blockSignals(True)
         try:
             combo.clear()
@@ -4456,8 +4473,8 @@ class PropertyPanel(QWidget):
             self._lit_image_clear_btn,
         ):
             control.setEnabled(image_mode)
-        # auto 模式下大小/颜色由主文字推导：控件停用但回显推导值，让用户
-        # 看到「自动配合字体」实际产出的数字与颜色。
+        # auto/role 模式下大小/颜色由主文字推导：控件停用但回显推导值，让
+        # 用户看到「自动配合字体」实际产出的数字与颜色。
         lit_display_style = resolve_lit_appearance(self._style)
         lit_manual = self._style.lit_appearance_mode == "custom"
         self._lit_appearance_mode_combo.setCurrentIndex(
@@ -4468,6 +4485,15 @@ class PropertyPanel(QWidget):
                 ),
             )
         )
+        # 「复用配色方案」档才显示来源下拉（同扫字线的模式化显隐）。
+        lit_role = self._style.lit_appearance_mode == "role"
+        if hasattr(self, "_lit_role_combo"):
+            self._lit_role_combo.setVisible(lit_role)
+            if lit_role:
+                self._refresh_role_source_combo(
+                    self._lit_role_combo,
+                    str(self._style.lit_role_name or ""),
+                )
         self._lit_auto_size_ratio_spin.setValue(
             self._style.lit_auto_size_ratio_pct
         )
@@ -4512,10 +4538,18 @@ class PropertyPanel(QWidget):
                 ),
             )
         )
-        # auto 模式下大小/颜色由主文字推导：控件停用但回显推导值，让用户
-        # 看到「自动配合字体」实际产出的数字与颜色。
+        # auto/role 模式下大小/颜色由主文字推导：控件停用但回显推导值，让
+        # 用户看到「自动配合字体」实际产出的数字与颜色。
         volume_display_style = resolve_volume_appearance(self._style)
         volume_manual = self._style.volume_appearance_mode == "custom"
+        volume_role = self._style.volume_appearance_mode == "role"
+        if hasattr(self, "_volume_role_combo"):
+            self._volume_role_combo.setVisible(volume_role)
+            if volume_role:
+                self._refresh_role_source_combo(
+                    self._volume_role_combo,
+                    str(self._style.volume_role_name or ""),
+                )
         self._volume_auto_size_ratio_spin.setValue(
             self._style.volume_auto_size_ratio_pct
         )
@@ -4590,6 +4624,25 @@ class PropertyPanel(QWidget):
             changes["scanline_role_name"] = (
                 role_names[0] if role_names else SCANLINE_GLOBAL_ROLE_KEY
             )
+        # 指示灯/音量柱切到「复用配色方案」同理补默认来源（悬空时渲染端
+        # 回退 auto 口径，但 UI 不留空选择更直观）。
+        for mode_field, name_field in (
+            ("lit_appearance_mode", "lit_role_name"),
+            ("volume_appearance_mode", "volume_role_name"),
+        ):
+            if (
+                changes.get(mode_field) == "role"
+                and name_field not in changes
+                and not getattr(self._style, name_field, None)
+            ):
+                role_names = [
+                    name
+                    for name in self._role_controller.names
+                    if name not in {TITLE_SCHEME_NAME, SCANLINE_GLOBAL_ROLE_KEY}
+                ]
+                changes[name_field] = (
+                    role_names[0] if role_names else SCANLINE_GLOBAL_ROLE_KEY
+                )
         # 常规样式编辑不再属于「仅标题变化」，复位局部重排 scope。
         self._pending_style_relayout_scope = None
         result = self._style_controller.update(

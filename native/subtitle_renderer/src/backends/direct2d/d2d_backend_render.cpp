@@ -629,14 +629,17 @@ ProbeResult Direct2DGpuBackend::renderFrameInternal(
                 break;
             }
         }
-        // auto 档形状灯跟随行**入场**动画、退场不跟随（独立悬浮模块，
+        // auto/role 档形状灯跟随行**入场**动画、退场不跟随（独立悬浮模块，
         // 镜像 Painter resolve_signal_lit_groups 的 entry-only 取值）：行
         // 透明度归零时——入场淡变起点（入场分量也归零）正文与灯组一起
         // 跳过；退场淡变终点（入场分量=1）行继续执行，正文由 alpha=0 的
         // 行级图层/逐笔刷兜底保持不可见，auto 灯画在层外按自身窗口绘制。
+        // role 档（复用配色方案）与 auto 同走装饰管线，装饰源换成
+        // scene.litDecorStyle 指定方案（悬空回退 auto 口径）。
         const bool litAutoDecorated = line->style.litEnabled
             && line->style.litStyle != "volume"
-            && line->style.litAppearanceMode == "auto";
+            && (line->style.litAppearanceMode == "auto"
+                || line->style.litAppearanceMode == "role");
         if (animation.opacity <= 0.0f) {
             bool litAutoLampVisible = false;
             if (litAutoDecorated && lineEntryAnimationAt(*line).opacity > 0.0f) {
@@ -1636,10 +1639,12 @@ ProbeResult Direct2DGpuBackend::renderFrameInternal(
         const ShapeSignalGeometry shapeGeometry = shapeSignalGeometry(style);
         const bool independentVolume = style.volumeEnabled;
         const bool legacyVolume = style.litEnabled && style.litStyle == "volume";
-        // auto 外观模式：柱体走主文字装饰管线（渐变/描边/二重描边/发光/
-        // 阴影/整字放大），与 Painter 的 _draw_volume_decorated_group 同口径。
+        // auto/role 外观模式：柱体走主文字装饰管线（渐变/描边/二重描边/
+        // 发光/阴影/整字放大），与 Painter 的 _draw_volume_decorated_group
+        // 同口径；role 档装饰源换成 scene.volumeDecorStyle 指定方案。
         const bool volumeAutoDecorated = independentVolume
-            && style.volumeAppearanceMode == "auto";
+            && (style.volumeAppearanceMode == "auto"
+                || style.volumeAppearanceMode == "role");
         // 闪烁段把柱组（含发光合成）收进不透明图层、出层时整体乘 alpha
         // （镜像 Painter 的离屏合成，与行级 lineOpacityLayer 同一模式）：
         // 发光的多 pass 叠加（浓度语义）必须发生在乘 alpha 之前，否则
@@ -1652,17 +1657,24 @@ ProbeResult Direct2DGpuBackend::renderFrameInternal(
         const float flashBrushAlpha = volumeFlashLayerActive
             ? 1.0f
             : signalState.opacity;
-        // 装饰源样式：段首行第一个有几何字符的角色方案（Painter 取第一
-        // 个非空白字符的 role，两端一致；无角色回退行样式）。
+        // 装饰源样式（auto 档）：段首行第一个有几何字符的角色方案
+        // （Painter 取第一个非空白字符的 role，两端一致；无角色回退行样式）。
+        // role 档（复用配色方案）：装饰源换成 scene 级按名解析的固定方案
+        // （悬空 nullopt 时维持 auto 扫描，两端同一回退口径）。
         const TextStyle *volumeBarDecorStylePtr = &style;
-        for (const Impl::CachedChar &ch : line->chars) {
-            if ((ch.geometry != nullptr || ch.bitmapGuide.has_value())
-                && ch.styleIndex >= 0
-                && ch.styleIndex
-                    < static_cast<int>(scene.charStyles.size())) {
-                volumeBarDecorStylePtr = &scene.charStyles[
-                    static_cast<std::size_t>(ch.styleIndex)];
-                break;
+        if (style.volumeAppearanceMode == "role"
+            && scene.volumeDecorStyle.has_value()) {
+            volumeBarDecorStylePtr = &*scene.volumeDecorStyle;
+        } else {
+            for (const Impl::CachedChar &ch : line->chars) {
+                if ((ch.geometry != nullptr || ch.bitmapGuide.has_value())
+                    && ch.styleIndex >= 0
+                    && ch.styleIndex
+                        < static_cast<int>(scene.charStyles.size())) {
+                    volumeBarDecorStylePtr = &scene.charStyles[
+                        static_cast<std::size_t>(ch.styleIndex)];
+                    break;
+                }
             }
         }
         const TextStyle &barDecor = *volumeBarDecorStylePtr;
@@ -1677,17 +1689,24 @@ ProbeResult Direct2DGpuBackend::renderFrameInternal(
             std::max(barDecor.stroke2Width * volumeDecorScale, 0.0f),
             std::floor(signalGeometry.columnWidth * 0.5f)
         );
-        // auto 档形状灯装饰参数：与柱体共用装饰源 barDecor，缩放与上限
-        // （半个灯宽）口径镜像 Painter 的 _draw_lit_decorated_group。
-        const float litDecorScale = barDecor.fontSize > 0.0f
-            ? shapeGeometry.size / barDecor.fontSize
+        // auto/role 档形状灯装饰参数：auto 与柱体共用装饰源 barDecor；
+        // role 档可独立指定来源（scene.litDecorStyle，悬空时同样回落
+        // barDecor）。缩放与上限（半个灯宽）口径镜像 Painter 的
+        // _draw_lit_decorated_group。
+        const TextStyle &litDecor =
+            (style.litAppearanceMode == "role"
+                && scene.litDecorStyle.has_value())
+            ? *scene.litDecorStyle
+            : barDecor;
+        const float litDecorScale = litDecor.fontSize > 0.0f
+            ? shapeGeometry.size / litDecor.fontSize
             : 1.0f;
         const float litDecorStrokeWidth = std::min(
-            std::max(barDecor.strokeWidth * litDecorScale, 0.0f),
+            std::max(litDecor.strokeWidth * litDecorScale, 0.0f),
             std::floor(shapeGeometry.size * 0.5f)
         );
         const float litDecorStroke2Width = std::min(
-            std::max(barDecor.stroke2Width * litDecorScale, 0.0f),
+            std::max(litDecor.stroke2Width * litDecorScale, 0.0f),
             std::floor(shapeGeometry.size * 0.5f)
         );
         // 整字放大：与音量柱同 gate（utopia 走字 + zoomPulse 开启），
@@ -5257,7 +5276,7 @@ ProbeResult Direct2DGpuBackend::renderFrameInternal(
         if (litAutoDecorated
             && shapeState.visible
             && shapeState.activeIndex >= 0
-            && barDecor.decorationKind == "glow"
+            && litDecor.decorationKind == "glow"
             && style.litOpacity > 0.0f) {
             const float litGlowBase = litDecorStroke2Width > 0.0f
                 ? litDecorStrokeWidth + litDecorStroke2Width
@@ -5265,7 +5284,7 @@ ProbeResult Direct2DGpuBackend::renderFrameInternal(
             const D2D1_RECT_F litGroupRectForBrushes = litLampGroupRect();
             for (int index = 0; index <= shapeState.activeIndex; ++index) {
                 const int radius = static_cast<int>(std::lround(
-                    std::max(0.0f, barDecor.glowAfterRadius * litDecorScale)
+                    std::max(0.0f, litDecor.glowAfterRadius * litDecorScale)
                 ));
                 if (radius <= 0) {
                     continue;
@@ -5293,7 +5312,7 @@ ProbeResult Direct2DGpuBackend::renderFrameInternal(
                 layer.source = acquireGlowScratch(layerW, layerH);
                 layer.blur = acquireGlowEffect();
                 const int passes
-                    = std::clamp(barDecor.glowConcentrationLevel, 0, 2) + 1;
+                    = std::clamp(litDecor.glowConcentrationLevel, 0, 2) + 1;
                 for (int pass = 0; pass < passes; ++pass) {
                     layer.sigmas.push_back(radius - pass * radius / passes);
                 }
@@ -5306,9 +5325,9 @@ ProbeResult Direct2DGpuBackend::renderFrameInternal(
                 // 组级/逐灯透明度由合成期的图层承载（镜像 Painter 的整组
                 // 离屏合成），源烘焙恒满强度。
                 Microsoft::WRL::ComPtr<ID2D1Brush> decorBrush = paintBrush(
-                    barDecor.afterDecorPaint,
+                    litDecor.afterDecorPaint,
                     litGroupRectForBrushes,
-                    barDecor.afterDecor
+                    litDecor.afterDecor
                 );
                 strokeLitDecorShape(lampRect, decorBrush.Get(), glowPen);
                 checkHr(
@@ -7472,13 +7491,13 @@ ProbeResult Direct2DGpuBackend::renderFrameInternal(
                 } else {
                     // 阴影装饰：偏移整影（外圈描边宽 + 填充），镜像柱体
                     // drawColumn 的 shadow 分支与 drawShadowSilhouette。
-                    if (barDecor.decorationKind == "shadow"
-                        && (barDecor.shadowOffsetX != 0.0f
-                            || barDecor.shadowOffsetY != 0.0f)) {
+                    if (litDecor.decorationKind == "shadow"
+                        && (litDecor.shadowOffsetX != 0.0f
+                            || litDecor.shadowOffsetY != 0.0f)) {
                         const float shadowDx
-                            = barDecor.shadowOffsetX * litDecorScale;
+                            = litDecor.shadowOffsetX * litDecorScale;
                         const float shadowDy
-                            = barDecor.shadowOffsetY * litDecorScale;
+                            = litDecor.shadowOffsetY * litDecorScale;
                         if (shadowDx != 0.0f || shadowDy != 0.0f) {
                             const float shadowOuter
                                 = litDecorStroke2Width > 0.0f
@@ -7487,9 +7506,9 @@ ProbeResult Direct2DGpuBackend::renderFrameInternal(
                                     : litDecorStrokeWidth;
                             Microsoft::WRL::ComPtr<ID2D1Brush> decorBrush
                                 = paintBrush(
-                                    barDecor.afterDecorPaint,
+                                    litDecor.afterDecorPaint,
                                     litGroupRect,
-                                    barDecor.afterDecor
+                                    litDecor.afterDecor
                                 );
                             decorBrush->SetOpacity(itemOpacity);
                             const D2D1_RECT_F shadowRect = D2D1::RectF(
@@ -7507,12 +7526,12 @@ ProbeResult Direct2DGpuBackend::renderFrameInternal(
                         }
                     }
                     if (litDecorStroke2Width > 0.0f
-                        && barDecor.afterStroke2.alpha > 0) {
+                        && litDecor.afterStroke2.alpha > 0) {
                         Microsoft::WRL::ComPtr<ID2D1Brush> stroke2Brush
                             = paintBrush(
-                                barDecor.afterStroke2Paint,
+                                litDecor.afterStroke2Paint,
                                 litGroupRect,
-                                barDecor.afterStroke2
+                                litDecor.afterStroke2
                             );
                         stroke2Brush->SetOpacity(itemOpacity);
                         strokeLitDecorShape(
@@ -7522,12 +7541,12 @@ ProbeResult Direct2DGpuBackend::renderFrameInternal(
                         );
                     }
                     if (litDecorStrokeWidth > 0.0f
-                        && barDecor.afterStroke.alpha > 0) {
+                        && litDecor.afterStroke.alpha > 0) {
                         Microsoft::WRL::ComPtr<ID2D1Brush> strokeBrush
                             = paintBrush(
-                                barDecor.afterStrokePaint,
+                                litDecor.afterStrokePaint,
                                 litGroupRect,
-                                barDecor.afterStroke
+                                litDecor.afterStroke
                             );
                         strokeBrush->SetOpacity(itemOpacity);
                         strokeLitDecorShape(
@@ -7535,7 +7554,7 @@ ProbeResult Direct2DGpuBackend::renderFrameInternal(
                         );
                     }
                     Microsoft::WRL::ComPtr<ID2D1Brush> fillBrush = paintBrush(
-                        barDecor.afterFillPaint, litGroupRect, barDecor.afterFill
+                        litDecor.afterFillPaint, litGroupRect, litDecor.afterFill
                     );
                     fillBrush->SetOpacity(itemOpacity);
                     fillLitDecorShape(rect, fillBrush.Get());

@@ -60,6 +60,7 @@ from krok_helper.subtitle_render.engine.render.effects.raster import (
     paint_text_layer_stack,
 )
 from krok_helper.subtitle_render.engine.style.style_semantics import (
+    appearance_role_source,
     effective_karaoke_colors,
     style_for_role,
 )
@@ -94,7 +95,8 @@ class SignalLitGroup:
     # 交错节奏地入场/退场；None = 无激活的逐字动画（纯行级动画路径）。
     bar_animations: tuple[BarAnimationState, ...] | None = None
     # auto 档的装饰源样式：段首行第一个角色（无角色时为该行样式）的有效
-    # 配色。几何/尺寸仍来自全局投影样式；None = 未解析（用组样式兜底）。
+    # 配色；role 档换成按名解析的固定方案。几何/尺寸仍来自全局投影样式；
+    # None = 未解析（用组样式兜底）。
     bar_style: Style | None = None
 
 
@@ -829,16 +831,18 @@ def _paint_shape_signal_group(
 
 
 def _lit_auto_decorated(style: Style) -> bool:
-    """形状指示灯 auto 外观：矢量灯走主文字装饰管线。
+    """形状指示灯 auto/role 外观：矢量灯走主文字装饰管线。
 
     与 ``_draw_volume_lit_group`` 的 auto 分支闸门同理：legacy volume 兼容
     路径（lit_style="volume"）不经 resolve_lit_appearance 物化，这里若只看
     模式字段会让 Painter 走推导、native 读物化前的原始值，两后端岔开。
+    ``role`` 档（复用配色方案）与 auto 同走装饰管线，只是装饰源换成
+    ``lit_role_name`` 指定方案（见 ``_signal_decor_source``）。
     """
     return (
         style.lit_enabled
         and style.lit_style != "volume"
-        and style.lit_appearance_mode == "auto"
+        and style.lit_appearance_mode in {"auto", "role"}
     )
 
 
@@ -990,10 +994,11 @@ def _draw_lit_decorated_group(
     layer: SignalLitsLayer,
     group: SignalLitGroup,
 ) -> None:
-    """auto 档形状灯走主文字装饰管线。
+    """auto/role 档形状灯走主文字装饰管线。
 
     装饰源是段首行第一个角色的有效样式（``group.bar_style``，无角色时
-    为该行样式）：指示灯不区分走字前后、直接淡化消失，全程取其配色矩阵
+    为该行样式）；role 档换成 ``lit_role_name`` 按名解析的固定方案：指示灯
+    不区分走字前后、直接淡化消失，全程取其配色矩阵
     的 **after（走字后）** 状态；填充（含渐变/图片填充）跨度为灯组自身
     外接框，描边/二重描边宽度、发光半径与阴影偏移按 灯尺寸/该角色字号
     同比缩放（上限半个灯宽）。「整字放大」唱字动画开启时，正在熄灭的灯
@@ -1270,10 +1275,10 @@ def _draw_volume_lit_group(
     active_index = group.active_index if group.active_index is not None else -1
     bar_animations = group.bar_animations
 
-    # auto 装饰管线只属于独立音量柱模块：旧版 lit_style="volume" 兼容路径
-    # 不经 resolve_volume_appearance 物化（render_ir 同门），这里若只看
-    # 模式字段会让 Painter 走推导、native 读物化前的原始值，两后端岔开。
-    if style.volume_enabled and style.volume_appearance_mode == "auto":
+    # auto/role 装饰管线只属于独立音量柱模块：旧版 lit_style="volume"
+    # 兼容路径不经 resolve_volume_appearance 物化（render_ir 同门），这里若
+    # 只看模式字段会让 Painter 走推导、native 读物化前的原始值，两后端岔开。
+    if style.volume_enabled and style.volume_appearance_mode in {"auto", "role"}:
         _draw_volume_decorated_group(
             painter, group, style, geometry, rects, active_index, bar_animations
         )
@@ -1360,10 +1365,11 @@ def _draw_volume_decorated_group(
     active_index: int,
     bar_animations: tuple[BarAnimationState, ...] | None,
 ) -> None:
-    """auto 档柱体走主文字装饰管线。
+    """auto/role 档柱体走主文字装饰管线。
 
     装饰源是段首行第一个角色的有效样式（``group.bar_style``，无角色时
-    为该行样式）：填充（含渐变/图片填充）取其配色矩阵的 before/after
+    为该行样式）；role 档换成 ``volume_role_name`` 按名解析的固定方案：
+    填充（含渐变/图片填充）取其配色矩阵的 before/after
     状态，渐变跨度为柱组自身外接框；描边/二重描边宽度、发光/阴影半径与
     偏移按 柱高/该角色字号 同比缩放（描边几何预留仍来自全局解析，柱距
     口径不受角色差异影响）；「整字放大」唱字动画开启时，倒计时扫到的
@@ -1788,9 +1794,13 @@ def resolve_signal_lit_groups(
 
         elapsed = max(t_ms - active_start, 0)
         bar_animations = None
-        # 装饰源样式：段首行第一个非空白字符的角色方案叠加进行样式
-        # （native 端取第一个有几何字符的 styleIndex，两端口径一致）。
+        # 装饰源样式（auto 档）：段首行第一个非空白字符的角色方案叠加进行
+        # 样式（native 端取第一个有几何字符的 styleIndex，两端口径一致）。
         # 音量柱 auto 装饰与形状灯 auto 装饰共用该源。
+        # role 档（复用配色方案）：装饰源换成按名解析的固定方案
+        # （``__global__``/「标题」/角色方案，叠加到全局样式），不随所在行
+        # 变化；名字悬空回退 auto 口径（native 端 scene 级 decor style
+        # 同一悬空判定，两端口径一致）。
         first_role = next(
             (
                 char.role_label
@@ -1799,7 +1809,23 @@ def resolve_signal_lit_groups(
             ),
             None,
         )
-        bar_style = style_for_role(line_style, first_role)
+        if style.lit_style == "volume":
+            role_source = (
+                appearance_role_source(style, style.volume_role_name)
+                if style.volume_appearance_mode == "role"
+                else None
+            )
+        else:
+            role_source = (
+                appearance_role_source(style, style.lit_role_name)
+                if style.lit_appearance_mode == "role"
+                else None
+            )
+        bar_style = (
+            role_source
+            if role_source is not None
+            else style_for_role(line_style, first_role)
+        )
         if style.lit_style == "volume":
             elapsed = min(elapsed, max(active_duration - 1, 0))
             active_index, phase, opacity = volume_signal_state(

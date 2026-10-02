@@ -927,6 +927,48 @@ def test_remap_scanline_role_reference_follows_rename_and_delete() -> None:
     assert remap_scanline_role_reference(dangling, {"锋面": None}) is None
 
 
+def test_remap_appearance_role_references_follow_rename_and_delete() -> None:
+    from krok_helper.subtitle_render.domain.models import remap_appearance_role_references
+
+    style = Style(
+        volume_appearance_mode="role",
+        volume_role_name="锋面",
+        lit_appearance_mode="role",
+        lit_role_name="标题",
+    )
+
+    # 未引用被改名的角色：不动；「标题」不在映射里也不动。
+    assert remap_appearance_role_references(style, {"别人": "新名"}) is None
+
+    # 改名：只改音量柱引用的名字，指示灯引用与模式保持 role。
+    renamed = remap_appearance_role_references(style, {"锋面": "新锋面"})
+    assert renamed is not None
+    assert renamed.volume_appearance_mode == "role"
+    assert renamed.volume_role_name == "新锋面"
+    assert renamed.lit_appearance_mode == "role"
+    assert renamed.lit_role_name == "标题"
+
+    # 删除：名字与模式一起回退 auto（渲染端悬空回退本就落到 auto 口径），
+    # 不留悬空 role 档。
+    deleted = remap_appearance_role_references(style, {"锋面": None})
+    assert deleted is not None
+    assert deleted.volume_appearance_mode == "auto"
+    assert deleted.volume_role_name is None
+
+    # 两字段独立改写：同一次映射同时改名 + 删除互不影响。
+    both = remap_appearance_role_references(
+        style, {"锋面": "新锋面", "标题": None}
+    )
+    assert both is not None
+    assert both.volume_role_name == "新锋面"
+    assert both.lit_appearance_mode == "auto"
+    assert both.lit_role_name is None
+
+    # 名字为空（历史悬空）时删除映射不动。
+    dangling = Style(volume_appearance_mode="role", volume_role_name=None)
+    assert remap_appearance_role_references(dangling, {"锋面": None}) is None
+
+
 def test_gpu_scanline_role_mode_uses_role_fill(monkeypatch) -> None:
     """GPU 口径：role 模式用角色渐变填充画锋面带，悬空回退单独颜色。"""
 

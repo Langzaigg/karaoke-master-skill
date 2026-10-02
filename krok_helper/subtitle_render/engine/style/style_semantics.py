@@ -12,6 +12,7 @@ from krok_helper.subtitle_render.domain.paint import (
 from krok_helper.subtitle_render.domain.models import (
     N3_FONT_INHERITANCE_FIELDS,
     RUBY_DECORATION_OVERRIDE_FIELDS,
+    SCANLINE_GLOBAL_ROLE_KEY,
     Style,
     SubtitleStyleScheme,
 )
@@ -132,6 +133,27 @@ def style_for_role(style: Style, role_label: str | None) -> Style:
     if not changes:
         return style
     return replace(style, **changes)
+
+
+def appearance_role_source(style: Style, role_name: str | None) -> Style | None:
+    """Resolve the ``role``-appearance decoration source (global merge).
+
+    与扫字线 ``scanline_role_fill`` 同一套来源口径：保留键
+    ``__global__`` 取主样式自身（返回原 style），其余名字必须是
+    ``custom_style_schemes`` 的键，返回方案叠加到全局样式后的完整 Style
+    （指示灯/音量柱装饰管线消费它：配色矩阵、描边/二重描边宽、发光/
+    阴影、整字放大与缩放基准字号）。名字悬空（历史项目/手工 JSON/空串）
+    返回 ``None``，调用方回退 auto 档口径（段首行第一个角色）。
+    """
+
+    name = str(role_name or "").strip()
+    if not name:
+        return None
+    if name == SCANLINE_GLOBAL_ROLE_KEY:
+        return style
+    if name not in style.custom_style_schemes:
+        return None
+    return style_for_role(style, name)
 
 
 def solid_fill(color: str) -> PaintFill:

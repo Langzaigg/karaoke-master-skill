@@ -2670,6 +2670,116 @@ def test_volume_auto_appearance_mode_roundtrips_through_payload():
     )
 
 
+def test_lit_volume_role_appearance_mode_panel_flow(qapp):
+    # role 档（复用配色方案）：尺寸推导与控件启停同 auto；「配色来源」
+    # 下拉仅 role 档显示，切入时无引用自动补第一个角色；换来源写模型；
+    # 角色注册表变化后下拉重建并保留所选；切回 auto 下拉隐藏。
+    panel = PropertyPanel()
+    panel.set_roles(["主唱", "和声"])
+    panel.set_style(
+        Style(
+            volume_enabled=True,
+            volume_appearance_mode="auto",
+            lit_enabled=True,
+            lit_style="circle",
+            custom_style_schemes={
+                "主唱": SubtitleStyleScheme(),
+                "和声": SubtitleStyleScheme(),
+            },
+        )
+    )
+    assert panel._volume_role_combo.isHidden()
+    assert panel._lit_role_combo.isHidden()
+
+    panel._volume_appearance_mode_combo.setCurrentIndex(
+        panel._volume_appearance_mode_combo.findData("role")
+    )
+    assert panel._style.volume_appearance_mode == "role"
+    assert panel._style.volume_role_name == "主唱"
+    assert not panel._volume_role_combo.isHidden()
+    assert [
+        panel._volume_role_combo.itemData(index)
+        for index in range(panel._volume_role_combo.count())
+    ] == ["__global__", "标题", "主唱", "和声"]
+    # 尺寸控件启停同 auto：推导值回显、相对字号可调、手动控件停用。
+    assert not panel._volume_size_spin.isEnabled()
+    assert panel._volume_auto_size_ratio_spin.isEnabled()
+
+    panel._lit_appearance_mode_combo.setCurrentIndex(
+        panel._lit_appearance_mode_combo.findData("role")
+    )
+    assert panel._style.lit_role_name == "主唱"
+    assert not panel._lit_role_combo.isHidden()
+    assert not panel._lit_size_spin.isEnabled()
+
+    # 换来源：模型跟随。
+    panel._volume_role_combo.setCurrentIndex(
+        panel._volume_role_combo.findData("和声")
+    )
+    assert panel._style.volume_role_name == "和声"
+    panel._lit_role_combo.setCurrentIndex(
+        panel._lit_role_combo.findData("__global__")
+    )
+    assert panel._style.lit_role_name == "__global__"
+
+    # 角色注册表变化：下拉重建并保留所选。
+    panel.set_roles(["主唱", "和声", "独唱"])
+    assert panel._volume_role_combo.currentData() == "和声"
+    assert [
+        panel._volume_role_combo.itemData(index)
+        for index in range(panel._volume_role_combo.count())
+    ] == ["__global__", "标题", "主唱", "和声", "独唱"]
+
+    # 引用悬空的历史样式：幽灵条目展示原名，不静默改数据。
+    panel.set_style(
+        Style(
+            volume_enabled=True,
+            volume_appearance_mode="role",
+            volume_role_name="幽灵",
+        )
+    )
+    assert panel._volume_role_combo.currentData() == "幽灵"
+
+    # 切回 auto：下拉隐藏、尺寸推导恢复。
+    panel._volume_appearance_mode_combo.setCurrentIndex(
+        panel._volume_appearance_mode_combo.findData("auto")
+    )
+    assert panel._volume_role_combo.isHidden()
+
+    # 没有任何角色的项目：切入 role 自动落「全局默认」。
+    panel.set_roles([])
+    panel.set_style(Style(volume_enabled=True, volume_appearance_mode="auto"))
+    panel._volume_appearance_mode_combo.setCurrentIndex(
+        panel._volume_appearance_mode_combo.findData("role")
+    )
+    assert panel._style.volume_role_name == "__global__"
+
+
+def test_lit_volume_role_name_roundtrips_through_payload():
+    style = Style(
+        volume_appearance_mode="role",
+        volume_role_name="青",
+        lit_appearance_mode="role",
+        lit_role_name="__global__",
+    )
+
+    payload = style_to_dict(style)
+    assert payload["volume_role_name"] == "青"
+    assert payload["lit_role_name"] == "__global__"
+    restored = style_from_dict(payload)
+    assert restored.volume_role_name == "青"
+    assert restored.lit_role_name == "__global__"
+    # 旧载荷缺字段 → None；空白串归一 None；未知模式回退出厂默认。
+    assert style_from_dict({}).volume_role_name is None
+    assert style_from_dict({}).lit_role_name is None
+    assert style_from_dict({"volume_role_name": "  "}).volume_role_name is None
+    assert style_from_dict({"lit_appearance_mode": "bogus"}).lit_appearance_mode == "auto"
+    assert (
+        style_from_dict({"volume_appearance_mode": "bogus"}).volume_appearance_mode
+        == "auto"
+    )
+
+
 def test_lit_auto_appearance_disables_and_displays_derived_controls(qapp):
     panel = PropertyPanel()
     panel.set_style(

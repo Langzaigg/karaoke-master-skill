@@ -231,12 +231,14 @@ def test_effects_lit_builder_preserves_groups_ranges_and_initial_state(qapp) -> 
     assert host._lit_transition_angle_spin.minimum() == -360
     assert host._lit_transition_distance_spin.maximum() == 800
     assert host._lit_stroke_btn.objectName() == "lit_stroke_color"
-    # 外观模式（自动配合字体/自定义）与 auto 专属「相对字号」比例。
+    # 外观模式（自动配合字体/复用配色方案/自定义）与 auto 专属「相对字号」
+    # 比例；「配色来源」下拉常驻但默认隐藏（role 档才显示）。
     appearance_data = [
         host._lit_appearance_mode_combo.itemData(index)
         for index in range(host._lit_appearance_mode_combo.count())
     ]
-    assert appearance_data == ["auto", "custom"]
+    assert appearance_data == ["auto", "role", "custom"]
+    assert host._lit_role_combo.isHidden()
     assert host._lit_auto_size_ratio_spin.minimum() == 5
     assert host._lit_auto_size_ratio_spin.maximum() == 300
 
@@ -250,6 +252,38 @@ def test_effects_volume_builder_is_independent_and_compact(qapp) -> None:
     assert list(host._volume_group_grids) == ["时序", "布局", "动画", "外观"]
     assert host._volume_column_count_spin.maximum() == 16
     assert host._volume_fill_btn.objectName() == "volume_fill_color"
+    # 外观模式三档与 role 档专属的「配色来源」下拉（默认隐藏）。
+    volume_appearance_data = [
+        host._volume_appearance_mode_combo.itemData(index)
+        for index in range(host._volume_appearance_mode_combo.count())
+    ]
+    assert volume_appearance_data == ["auto", "role", "custom"]
+    assert host._volume_role_combo.isHidden()
+
+
+def test_effects_role_source_combos_route_to_style_fields(qapp) -> None:
+    host = _Host()
+    builder = EffectsPropertyPageBuilder(host)
+    builder.make_volume_section()
+    builder.make_lit_section()
+
+    # 下拉条目由宿主按方案表重建（_refresh_role_source_combo，重建期间
+    # blockSignals）；这里同样屏蔽填充信号，builder 契约只验证字段路由。
+    host._volume_role_combo.blockSignals(True)
+    host._lit_role_combo.blockSignals(True)
+    host._volume_role_combo.addItem("全局默认", "__global__")
+    host._volume_role_combo.addItem("青", "青")
+    host._lit_role_combo.addItem("全局默认", "__global__")
+    host._lit_role_combo.addItem("标题", "标题")
+    host._volume_role_combo.blockSignals(False)
+    host._lit_role_combo.blockSignals(False)
+    host._volume_role_combo.setCurrentIndex(1)
+    host._lit_role_combo.setCurrentIndex(1)
+
+    assert host.updates == [
+        {"volume_role_name": "青"},
+        {"lit_role_name": "标题"},
+    ]
 
 
 def test_effects_lit_builder_routes_transformed_values(qapp) -> None:

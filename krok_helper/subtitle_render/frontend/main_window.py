@@ -323,6 +323,7 @@ from krok_helper.subtitle_render.domain.models import (
     migrate_spacing_bindings_to_used_layouts,
     migrate_title_guide_symbols,
     normalize_title_char_role_labels,
+    remap_appearance_role_references,
     remap_scanline_role_reference,
     remap_title_char_role_labels,
     rescale_font_sizes,
@@ -4384,6 +4385,15 @@ class SubtitleRenderWindow(QWidget):
                 # 扫字线「复用角色配色」按名字引用角色：改名连带改写，删除
                 # 连模式一起回退「单独颜色」（见 remap_scanline_role_reference）。
                 style = scanline_style
+                self._style = style
+                role_remap_applied = True
+            appearance_style = remap_appearance_role_references(
+                style, role_remap
+            )
+            if appearance_style is not None:
+                # 指示灯/音量柱「复用配色方案」同一条维护链：改名连带改写，
+                # 删除连模式一起回退「自动配合字体」。
+                style = appearance_style
                 self._style = style
                 role_remap_applied = True
             if not role_remap_applied:
