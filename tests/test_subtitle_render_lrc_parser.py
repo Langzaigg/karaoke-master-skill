@@ -399,6 +399,44 @@ def test_ruby_mora_timestamps_backfill_leader_checkpoint_ms():
     ]
 
 
+def test_word_ruby_part_boundary_at_block_end_keeps_follower_walk():
+    """回归：词级 @Ruby 的段边界与正文时间戳同值时，共享块后随字不得零时长。
+
+    ``[00:26:21]セン[00:26:54]セ...`` + ``@Ruby1=センセーション,Sen[00:00:33]s[00:00:51]a[00:00:71]tion``：
+    正文时间戳本就从 mora 边界导出，回填出的 leader checkpoint 全部被钳到块尾
+    26.54s。修复前切点保底把「checkpoint == 块尾」当成 leader 唱满整块的信号，
+    セ 独占共享块、ン 拿到 (26540, 26540) 零时长——走字直接跳过 ン（2026-10
+    修复，同型的 ローテーション/ロー 亦然）。修复后 セン 与其他自动填充块一样
+    按字宽顺序走字。
+    """
+
+    from krok_helper.subtitle_render.engine.timing.timeline import compute_char_intervals
+
+    text = (
+        "[00:26:21]セン[00:26:54]セ[00:26:72]ー[00:26:92]ション[00:27:12]\n"
+        "\n"
+        "@Ruby1=センセーション,Sen[00:00:33]s[00:00:51]a[00:00:71]tion\n"
+    )
+    track = parse_nicokara_lrc(text)
+    line = track.lines[0]
+    assert "".join(c.text for c in line.chars) == "センセーション"
+    # 回填保持原样：leader 带词级 checkpoint（越界值被钳到块尾），由重切端
+    # 排除在保底候选之外。
+    assert line.chars[0].checkpoint_ms == [26_210, 26_540, 26_540, 26_540]
+    assert line.chars[1].text == "ン"
+
+    intervals = compute_char_intervals(line, [1] * len(line.chars))
+    # セン 共享块按字宽各分一半：ン 有完整的后半窗口（修复前为零时长）。
+    assert intervals[0] == (26_210, 26_375)
+    assert intervals[1] == (26_375, 26_540)
+    # 整行不存在零时长的可见字符（空格等无墨水字符除外）。
+    assert all(
+        end > start
+        for ch, (start, end) in zip(line.chars, intervals)
+        if ch.text.strip()
+    )
+
+
 def test_ruby_entry_without_position_resolves_to_its_occurrence():
     """A position-less entry is still pinned to the character it landed on.
 

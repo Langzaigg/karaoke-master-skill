@@ -806,7 +806,10 @@ def compute_char_intervals(
     末段」与后随字符之间按**墨水宽度**分摊（``ink_widths`` 缺省时回退布局宽度）：
     末段假名先走、唱完后随字符接棒到块尾，避免末段假名被钳成零时长、或与后随
     字符同时起笔，也避免全角标点（advance=1em 但墨水极窄）按布局宽度把末段
-    假名挤压到比标点还短。
+    假名挤压到比标点还短。保底候选只取**严格落在块内**的 checkpoint：恰好落在
+    块尾的 checkpoint 就是块边界本身（词级 ``@Ruby`` 的段边界常与正文下一个
+    显式时间戳同源同值，如 ``セン``/``ロー`` 共享块），不携带块内分时信息，
+    不得据此让 leader 独占整块、把后随字符压成零时长（走字跳过）。
     元数据不完整、区间无效或总宽度为 0 时保留兼容的 ``start_ms`` 区间。
 
     **区间可以重叠。** 源里显式写了释放点（``pause_release_ms``）时就以它为准，
@@ -915,6 +918,12 @@ def compute_char_intervals(
         # 后随字符共赏 [last_cp, span_end]），后随字符从 last_cp 起按宽度
         # 加权分剩余时长。否则 ``effective_ruby_for_target`` 会把 ruby 钳到
         # leader 区间，最后一个假名被压成零时长——扫光瞬跳到后随字符。
+        # 候选必须是**块内** checkpoint（严格小于 span_end）：等于块尾的
+        # checkpoint 是块边界本身（词级 @Ruby 段边界与正文下一显式时间戳
+        # 同源同值），不携带块内分时信息；把它当保底会让 leader 独占整块、
+        # 后随字符全拿 (span_end, span_end) 零时长——走字直接跳过后随字符
+        # （2026-10 修复：`センセーション` 的 `セン`、`ローテーション` 的
+        # `ロー` 第二字被跳过即此因）。
         leader_cut = int(span_start + duration * weights[0] / total_width)
         leader_last_cp: Optional[int] = None
         checkpoints = first.checkpoint_ms
@@ -922,7 +931,7 @@ def compute_char_intervals(
             candidates = [
                 int(cp)
                 for cp in checkpoints
-                if leader_cut < cp <= span_end
+                if leader_cut < cp < span_end
             ]
             if candidates:
                 leader_last_cp = max(candidates)

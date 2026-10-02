@@ -109,6 +109,81 @@ def test_compute_char_intervals_weights_shared_lrc_span_like_sug():
     assert compute_char_intervals(line) == [(1000, 1500), (1500, 2000)]
 
 
+def test_compute_char_intervals_checkpoint_at_span_end_keeps_auto_fill_split():
+    """回归：末 checkpoint 恰好等于块尾时不得让 leader 独占整块。
+
+    词级 ``@Ruby``（如 ``センセーション,Sen[..]s[..]a[..]tion``）的段边界与
+    正文下一显式时间戳同源同值，回填出的 leader checkpoint 全部被钳到块尾。
+    修复前保底分支把它当成「leader 唱满整块」的信号，后随字符拿到
+    ``(span_end, span_end)`` 零时长——走字直接跳过 セン 的 ン（2026-10 修复，
+    同型的 ローテーション/ロー 亦然）。块尾 checkpoint 就是块边界本身，不携带
+    块内分时信息：回退为与普通自动填充块一致的字宽加权分时。
+    """
+    line = TimingLine(
+        chars=[
+            TimingChar(
+                text="セ",
+                start_ms=26_210,
+                checkpoint_ms=[26_210, 26_540, 26_540, 26_540],
+                source_span_start_ms=26_210,
+                source_span_end_ms=26_540,
+                source_span_index=0,
+                source_span_count=2,
+            ),
+            TimingChar(
+                text="ン",
+                start_ms=26_375,
+                source_span_start_ms=26_210,
+                source_span_end_ms=26_540,
+                source_span_index=1,
+                source_span_count=2,
+            ),
+            TimingChar(text="セ", start_ms=26_540),
+        ],
+        end_ms=26_720,
+    )
+
+    # 等宽下 セ/ン 各分一半、顺序推进；修复前 ン 是 (26_540, 26_540) 零时长。
+    assert compute_char_intervals(line, [1, 1, 1])[:2] == [
+        (26_210, 26_375),
+        (26_375, 26_540),
+    ]
+
+
+def test_compute_char_intervals_interior_checkpoint_wins_over_span_end():
+    """块内 checkpoint 仍触发保底分摊；块尾的同值 checkpoint 不参与候选。"""
+    line = TimingLine(
+        chars=[
+            TimingChar(
+                text="今",
+                start_ms=10_000,
+                checkpoint_ms=[10_000, 10_600, 11_000],
+                source_span_start_ms=10_000,
+                source_span_end_ms=11_000,
+                source_span_index=0,
+                source_span_count=2,
+            ),
+            TimingChar(
+                text="、",
+                start_ms=10_500,
+                source_span_start_ms=10_000,
+                source_span_end_ms=11_000,
+                source_span_index=1,
+                source_span_count=2,
+            ),
+        ],
+        end_ms=11_400,
+    )
+
+    # 等宽切点 10.5s：块内候选 10.6s 生效，[10.6, 11.0] 在「今末段 : 顿号」
+    # 间分摊（anchor_count=3 → 今唱到 10.7s）；块尾候选 11.0s 被排除——修复前
+    # 它让 leader 独占整块、顿号拿到 (11_000, 11_000) 零时长。
+    assert compute_char_intervals(line, [1, 1]) == [
+        (10_000, 10_700),
+        (10_700, 11_000),
+    ]
+
+
 def test_compute_char_intervals_space_consumes_no_wipe_time():
     """回归：共享时间块里的无节奏点空格不得占用走字时长。
 

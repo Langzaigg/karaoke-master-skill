@@ -1142,8 +1142,11 @@ def _backfill_leader_checkpoint_ms(
     LRC 正文只保留每字第一个时间戳；leader 打到 mora 级的额外 checkpoint 只存
     在于读音串。这里把 leader 的全部 checkpoint 回填到 ``TimingChar``，并把
     「leader + 右侧无独立时间戳后随」标成共享时间块——共享块重切时最后一个
-    checkpoint 给切点保底（见 :func:`compute_char_intervals`），否则末段假名
-    会被钳成零时长（扫光瞬跳），后随字符也从 codepoint 等分点提前起笔。
+    **块内** checkpoint 给切点保底（见 :func:`compute_char_intervals`），否则
+    末段假名会被钳成零时长（扫光瞬跳），后随字符也从 codepoint 等分点提前起笔。
+    注意词级 ruby（如 ``センセーション,Sen[..]s[..]a[..]tion``）的段边界常与
+    正文下一显式时间戳同源同值，回填出的末 checkpoint 会等于块尾；这类
+    checkpoint 不携带块内分时信息，由重切端排除在保底候选之外。
     """
 
     for ruby in rubies:
