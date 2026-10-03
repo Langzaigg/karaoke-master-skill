@@ -116,7 +116,7 @@ def _base_style(**changes: object) -> Style:
         line_tail_ms=0,
         entry_anim="none",
         exit_anim="none",
-        title_overlay=None,
+        title_overlays=[],
         custom_style_schemes={},
     )
     return replace(style, **changes)
@@ -311,7 +311,7 @@ def _heavy_scenario(texture_path: Path) -> CorpusScenario:
         dual_line_layout=False,
         line_horizontal_layout="center",
         line_y_position="bottom",
-        title_overlay=title,
+        title_overlays=[title],
         custom_style_schemes={
             "gradient": scheme(gradient, "#FF40A0", 88),
             "image": scheme(image_fill, "#3070FF", 76),
@@ -359,7 +359,7 @@ def _real_dark_spiral_scenario() -> CorpusScenario | None:
         ruby_font_family="Meiryo",
         ruby_font_family_latin="Meiryo",
         ruby_font_follow_main=False,
-        title_overlay=None,
+        title_overlays=[],
         custom_style_schemes={},
         singer_style_overrides={},
         dual_line_layout=False,
