@@ -17,9 +17,10 @@ from __future__ import annotations
 import subprocess
 
 from datetime import datetime
-import tempfile
 from pathlib import Path
 from typing import Protocol, runtime_checkable
+
+from krok_helper.app_paths import temp_dir
 
 from PyQt6.QtCore import Qt, QUrl, pyqtSignal
 from PyQt6.QtWidgets import (
@@ -596,6 +597,32 @@ class _ClipRow(QFrame):
         super().mousePressEvent(event)
 
 
+#: 整体预览临时子目录（%TEMP%\LinKLyrics\merge-preview，统一临时根见
+#: :func:`krok_helper.app_paths.temp_root`）；目录内任何时刻最多保留一个在用的预览 wav。
+_PREVIEW_DIR_NAME = "merge-preview"
+
+
+def _preview_dir() -> Path:
+    return temp_dir(_PREVIEW_DIR_NAME)
+
+
+def purge_stale_preview_files() -> None:
+    """清扫预览临时目录里的陈旧 wav（崩溃/强退残留、被播放器占用后遗留的旧名）。
+
+    删除失败（如文件仍被播放进程占用）时静默跳过，下次页面构造或预览渲染
+    时再试，保证目录内不会累积无用文件。
+    """
+    try:
+        candidates = list(_preview_dir().glob("preview*.wav"))
+    except OSError:
+        return
+    for path in candidates:
+        try:
+            path.unlink()
+        except OSError:
+            pass
+
+
 class MergePage(QWidget):
     """音频合成页。"""
 
@@ -634,6 +661,8 @@ class MergePage(QWidget):
         self._pending_seek_ms = 0
         #: 合成预览是否需要重渲染（顺序/裁剪/淡化参数任一变化即置脏）。
         self._preview_dirty = True
+        # 上次会话崩溃/强退可能留下整体预览临时文件，构造时顺手清掉。
+        purge_stale_preview_files()
 
         self._build_ui()
         self._restore_settings()
@@ -1403,9 +1432,10 @@ class MergePage(QWidget):
             show_fluent_error(self.window(), str(exc))
             return
         if preview:
-            output_path = unique_output_path(
-                Path(tempfile.gettempdir()) / "krok_merge_preview", "preview.wav"
-            )
+            # 先清旧预览再取名：正常情况下目录里始终只有 preview.wav 一个文件，
+            # 不会随历次渲染递增出 preview (2).wav、preview (3).wav……
+            self._cleanup_preview()
+            output_path = unique_output_path(_preview_dir(), "preview.wav")
         else:
             output_path = self._resolve_output_path()
         joint_fade = self._fade_row.value()
@@ -1415,7 +1445,6 @@ class MergePage(QWidget):
         splice_mode = self.splice_mode()
         self._cancel_requested = False
         if preview:
-            self._cleanup_preview()
             self._preview_path = output_path
             self._set_busy(True, "正在渲染整体预览…")
         else:
@@ -1537,6 +1566,8 @@ class MergePage(QWidget):
             except OSError:
                 pass
             self._preview_path = None
+        # 当前文件之外可能还有删失败的残留（如播放器曾占用），一并尝试清掉。
+        purge_stale_preview_files()
 
     # ── 试听播放 ───────────────────────────────────────────────
 

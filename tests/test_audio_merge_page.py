@@ -567,3 +567,58 @@ class TestArrangementView:
         self._send(view, QEvent.Type.MouseButtonRelease, 141.0, 120.0)
         assert emitted and emitted[0] is view._clips[0]
         assert view.selected_clip() is view._clips[0]
+
+
+class TestPreviewTempCleanup:
+    """整体预览临时目录的自行清扫：目录内任何时刻最多保留一个在用的 wav。"""
+
+    def test_init_purges_stale_previews(self, tmp_path, monkeypatch) -> None:
+        monkeypatch.setenv("KARAOKE_STUDIO_TEMP_DIR", str(tmp_path))
+        stale_dir = tmp_path / "merge-preview"  # 统一根 %TEMP%\LinKLyrics 下的子目录
+        stale_dir.mkdir()
+        (stale_dir / "preview.wav").write_bytes(b"RIFF")
+        (stale_dir / "preview (2).wav").write_bytes(b"RIFF")
+        (stale_dir / "unrelated.txt").write_bytes(b"keep")
+
+        settings = AppSettings()
+        widget = MergePage(_FakeHost(settings), settings, lambda: None)
+        widget.close()
+
+        assert list(stale_dir.glob("preview*.wav")) == []
+        assert (stale_dir / "unrelated.txt").is_file()
+
+    def test_preview_render_reuses_single_name_and_purges(
+        self, page: MergePage, tmp_path, monkeypatch
+    ) -> None:
+        monkeypatch.setenv("KARAOKE_STUDIO_TEMP_DIR", str(tmp_path))
+        stale_dir = tmp_path / "merge-preview"
+        stale_dir.mkdir()
+        (stale_dir / "preview.wav").write_bytes(b"RIFF")  # 上次崩溃残留
+        (stale_dir / "preview (3).wav").write_bytes(b"RIFF")
+
+        monkeypatch.setattr(merge_page_module, "analyze_clip", lambda *a, **k: _analysis())
+        page._on_files_dropped([str(_fake_wav(tmp_path, "a.wav"))])
+        _wait_for_idle(page)
+
+        def _fake_run_merge(clips, output_path, ffmpeg_dir, logger, **kwargs):
+            output_path.parent.mkdir(parents=True, exist_ok=True)
+            output_path.write_bytes(b"merged")
+            return output_path
+
+        monkeypatch.setattr(merge_page_module, "run_merge", _fake_run_merge)
+        started: list = []
+        monkeypatch.setattr(page, "_start_playback_at_playhead", lambda: started.append(True))
+
+        page._on_play_clicked()  # 预览脏 → 触发整体预览渲染
+        _wait_for_idle(page)
+        assert started == [True]  # 渲染完成自动起播
+        assert page._preview_dirty is False
+        assert sorted(p.name for p in stale_dir.glob("preview*.wav")) == ["preview.wav"]
+        assert page._preview_path == stale_dir / "preview.wav"
+
+        # 再次置脏重渲染：旧文件先删再取名，不递增成 preview (2).wav。
+        page._mark_preview_dirty()
+        page._on_play_clicked()
+        _wait_for_idle(page)
+        assert sorted(p.name for p in stale_dir.glob("preview*.wav")) == ["preview.wav"]
+        assert page._preview_path == stale_dir / "preview.wav"

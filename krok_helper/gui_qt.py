@@ -373,6 +373,20 @@ class KrokHelperQtApp(QMainWindow):
             self.settings.lyrics_timing_migrated_v1 != lyrics_timing_migrated
         ):
             save_app_settings(self.settings)
+        # 软件构造期间统一清一遍预览临时目录（音频合成整体预览 + 字幕视频
+        # 代理缓存），不等用户用到对应功能才清；删不掉的文件下次启动再试。
+        # 同时回收历史上散落在 %TEMP% 顶层的旧缓存目录（krok_merge_preview /
+        # KaraokeStudioPreviewCache），全部收敛到 LinKLyrics 统一根下。
+        self._report_startup(35, "正在清理预览临时文件")
+        from krok_helper.app_paths import purge_legacy_temp_dirs
+        from krok_helper.audio_processing.merge.page import purge_stale_preview_files
+        from krok_helper.subtitle_render.frontend.preview.preview_media import (
+            purge_preview_cache,
+        )
+
+        purge_stale_preview_files()
+        purge_preview_cache()
+        purge_legacy_temp_dirs()
         self._update_checker: UpdateChecker | None = None
         self._update_launch_worker = None
         self._update_progress_win = None

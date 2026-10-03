@@ -14,6 +14,8 @@
 from __future__ import annotations
 
 import os
+import shutil
+import tempfile
 from pathlib import Path
 
 from krok_helper.config import APP_NAME
@@ -355,3 +357,53 @@ def migrate_app_data_dir() -> Path | None:
         return old_dir
 
     return None
+
+
+# ── 临时目录原语 ─────────────────────────────────────────────────────────────
+# %TEMP% 下所有临时产物统一收敛到 ``%TEMP%/LinKLyrics/`` 一个根（面包屑/日志兜底
+# 早已在这下面），模块各自再建子目录——不要再往 %TEMP% 顶层撒新根。
+# 大缓存放 APPDATA 不合适（漫游/备份污染），Temp 的「系统可随时回收」语义对可再生
+# 的缓存恰好正确。
+
+#: %TEMP% 下的应用统一根目录名。
+TEMP_ROOT_NAME = "LinKLyrics"
+
+#: 临时根目录环境变量覆盖（测试与排障用）。
+TEMP_DIR_ENV = "KARAOKE_STUDIO_TEMP_DIR"
+
+#: 历史上散落在 %TEMP% 顶层的模块自建缓存目录；启动时整体回收。
+#: 注意 ``KaraokeStudioUpdater`` **不在**其中——它的路径写在用户支持文档里
+#: （updater.log 位置），保持不动。
+_LEGACY_TEMP_DIR_NAMES = ("krok_merge_preview", "KaraokeStudioPreviewCache")
+
+
+def temp_root() -> Path:
+    """%TEMP% 下的应用统一根目录（可用 :data:`TEMP_DIR_ENV` 覆盖）。"""
+    override = os.getenv(TEMP_DIR_ENV)
+    if override:
+        return Path(override).expanduser()
+    return Path(tempfile.gettempdir()) / TEMP_ROOT_NAME
+
+
+def temp_dir(name: str) -> Path:
+    """统一根下的某个模块子目录（如 ``merge-preview`` / ``preview-cache``）。"""
+    return temp_root() / name
+
+
+def purge_legacy_temp_dirs(base: Path | None = None) -> list[Path]:
+    """回收旧的散落临时目录（整个目录删除，尽力而为）。
+
+    旧目录在 %TEMP% 顶层，不受 :data:`TEMP_DIR_ENV` 覆盖影响；``base`` 仅供
+    测试注入。目录里正被占用的文件（双开实例的播放器/ffmpeg 句柄）删除会
+    失败，``ignore_errors`` 静默跳过、留下残余，下次启动再试。返回实际删掉的目录。
+    """
+    top = Path(tempfile.gettempdir()) if base is None else base
+    removed: list[Path] = []
+    for name in _LEGACY_TEMP_DIR_NAMES:
+        path = top / name
+        if not path.is_dir():
+            continue
+        shutil.rmtree(path, ignore_errors=True)
+        if not path.exists():
+            removed.append(path)
+    return removed

@@ -306,3 +306,42 @@ def test_legacy_paths_are_offered_when_no_override_is_set(
     paths = app_paths.get_legacy_settings_paths()
 
     assert [p.parent.name for p in paths] == list(LEGACY_APP_NAMES)
+
+
+# ── 临时目录原语 ────────────────────────────────────────────────────────────
+
+def test_temp_root_honors_env_override(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv(app_paths.TEMP_DIR_ENV, str(tmp_path / "root"))
+
+    assert app_paths.temp_root() == tmp_path / "root"
+    assert app_paths.temp_dir("merge-preview") == tmp_path / "root" / "merge-preview"
+
+
+def test_purge_legacy_temp_dirs_recycles_scattered_roots(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """旧版散落在 %TEMP% 顶层的两个缓存目录被整体回收。"""
+
+    merge = tmp_path / "krok_merge_preview"
+    merge.mkdir()
+    (merge / "preview.wav").write_bytes(b"RIFF")
+    cache = tmp_path / "KaraokeStudioPreviewCache"
+    cache.mkdir()
+    (cache / "sub").mkdir()
+    (cache / "sub" / "x.abc.tmp.mp4").write_bytes(b"half")
+    updater = tmp_path / "KaraokeStudioUpdater"  # 支持文档记载的路径，不动
+    updater.mkdir()
+    (updater / "updater.log").write_bytes(b"log")
+
+    removed = app_paths.purge_legacy_temp_dirs(base=tmp_path)
+
+    assert not merge.exists()
+    assert not cache.exists()
+    assert sorted(removed) == [cache, merge]
+    assert (updater / "updater.log").is_file()
+
+
+def test_purge_legacy_temp_dirs_tolerates_missing_dirs(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    assert app_paths.purge_legacy_temp_dirs(base=tmp_path / "no-such-dir") == []

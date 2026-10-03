@@ -11,17 +11,18 @@ from __future__ import annotations
 
 import hashlib
 import subprocess
-import tempfile
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
 
+from krok_helper.app_paths import temp_dir
 from krok_helper.ffmpeg import _build_subprocess_kwargs, find_tool
 from krok_helper.settings import load_app_settings
 
 
 _VIDEO_CONTAINER_SUFFIXES = {".mp4", ".m4v", ".mov", ".mkv", ".webm", ".avi", ".flv"}
-_PREVIEW_CACHE_DIR = "KaraokeStudioPreviewCache"
+#: 代理缓存子目录（%TEMP%\LinKLyrics\preview-cache，统一临时根见 app_paths）。
+_PREVIEW_CACHE_DIR_NAME = "preview-cache"
 _VIDEO_PROXY_MAX_HEIGHT = {"low": 540, "medium": 1080}
 _VIDEO_PROXY_PROFILE_VERSION = 2
 
@@ -34,6 +35,31 @@ class QtPlaybackPreparation:
     target: Path
     temporary: Path
     command: tuple[str, ...]
+
+
+def _preview_cache_dir() -> Path:
+    return temp_dir(_PREVIEW_CACHE_DIR_NAME)
+
+
+def purge_preview_cache(keep: tuple[Path, ...] | set[Path] = ()) -> None:
+    """清扫视频代理缓存目录：删除所有代理（含 ``*.tmp.mp4`` 半成品）。
+
+    ``keep`` 里的路径豁免——用于「加载新素材」场景下保留**同一源文件**全部画质
+    的代理（画质来回切换不重转）。代理可再生——删了下次预览按源文件重新转码一次
+    即可，所以不做保留期。正被本进程或另一实例的播放器 / ffmpeg 占用的文件在
+    Windows 上删除会失败，静默跳过——这就是双开 Lin-K 时互不误删的天然豁免。
+    非 ``.mp4`` 条目不动。
+    """
+    try:
+        entries = list(_preview_cache_dir().iterdir())
+    except OSError:
+        return
+    for entry in entries:
+        try:
+            if entry.is_file() and entry.suffix == ".mp4" and entry not in keep:
+                entry.unlink()
+        except OSError:
+            continue
 
 
 def qt_playback_source(path: Path, preview_quality: object = "high") -> Path:
@@ -95,6 +121,15 @@ def qt_playback_preparation(
         return None
     quality = normalize_preview_media_quality(preview_quality)
     target = _playback_target_for(path, quality)
+    # 走到这里说明该画质缓存未命中 = 加载了新/变动的素材（或切换画质）：建新
+    # 代理前先清掉**其它源文件**的旧代理；同一源文件全部画质的代理豁免，
+    # 画质来回切换不必重转。正被占用的文件删除失败自然跳过。
+    purge_preview_cache(
+        keep={
+            _playback_target_for(path, proxy_quality)
+            for proxy_quality in ("low", "medium", "high")
+        }
+    )
     temporary = target.with_name(
         f"{target.stem}.{uuid.uuid4().hex}.tmp{target.suffix}"
     )
@@ -232,8 +267,7 @@ def _proxy_path_for(path: Path) -> Path:
     stat = path.stat()
     key = f"{path.resolve()}|{stat.st_size}|{stat.st_mtime_ns}".encode("utf-8", "surrogatepass")
     digest = hashlib.sha256(key).hexdigest()[:24]
-    cache_dir = Path(tempfile.gettempdir()) / _PREVIEW_CACHE_DIR
-    return cache_dir / f"{path.stem}-{digest}.mp4"
+    return _preview_cache_dir() / f"{path.stem}-{digest}.mp4"
 
 
 def _scaled_proxy_path_for(path: Path, quality: str) -> Path:
@@ -244,8 +278,7 @@ def _scaled_proxy_path_for(path: Path, quality: str) -> Path:
         f"scaled-v{_VIDEO_PROXY_PROFILE_VERSION}|{max_height}p"
     ).encode("utf-8", "surrogatepass")
     digest = hashlib.sha256(key).hexdigest()[:24]
-    cache_dir = Path(tempfile.gettempdir()) / _PREVIEW_CACHE_DIR
-    return cache_dir / f"{path.stem}-{digest}-{max_height}p.mp4"
+    return _preview_cache_dir() / f"{path.stem}-{digest}-{max_height}p.mp4"
 
 
 def _playback_target_for(path: Path, preview_quality: object) -> Path:
