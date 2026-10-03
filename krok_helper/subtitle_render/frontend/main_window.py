@@ -4547,7 +4547,9 @@ class SubtitleRenderWindow(QWidget):
         self._refresh_source_ui()
         if self._title_source_active:
             self._refresh_lyrics_panel_source()
-        self._refresh_tracks_view_windows()
+        # 轨道把手窗口重算挪后台：撤销/重做是高频交互，冷缓存时整轨排版
+        # ~180ms 全在界面线程（把手本来就是晚到几百毫秒也无感的展示件）。
+        self._refresh_tracks_view_windows_async()
         self._margin_check_timer.start()
         self._schedule_persisted_state_save()
         self._mark_project_dirty()
@@ -5474,7 +5476,8 @@ class SubtitleRenderWindow(QWidget):
         if self._timing_track is not None:
             self._preview_panel.set_track(self._timing_track)
         self._sync_extra_tracks_to_preview()
-        self._refresh_tracks_view_windows()
+        # 窗口重算与撤销/重做同口径：后台线程，代号守卫丢弃过期结果。
+        self._refresh_tracks_view_windows_async()
         self._refresh_transport_duration()
         self._margin_check_timer.start()
         self._mark_project_dirty()
