@@ -40,7 +40,10 @@ from krok_helper.subtitle_render.engine.style.style_semantics import (
     style_for_role,
 )
 
-RENDER_IR_SCHEMA = 2
+# Schema 3：发射边界去重表（fx_color_table / fx_paint_table / line_layout_table）、
+# 字符缺省字段省发、导唱符轮廓坐标 2 位小数、可选 vector_glyphs_hash 门
+# （哈希相符时省发轮廓表，sidecar 解析前注回）。
+RENDER_IR_SCHEMA = 3
 
 
 class VectorGlyphTable:

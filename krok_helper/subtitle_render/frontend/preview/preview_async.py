@@ -1011,15 +1011,16 @@ class GpuAsyncSubtitleRenderer(QObject):
                         style_patched = False
                         if (
                             relayout_scope == "paint"
-                            # 差分重放默认关闭：简单工程上与全量重配逐字节等价
-                            # （test_subtitle_render_gpu_style_patch 金标准），但
-                            # glow+粒子+角色的重工程上「重配后首帧」存在与全量
-                            # 重配自身噪声同性质、幅度约 3~4 倍的亮度级漂移
-                            # （mean≈7/255），根因待查（realization/场景重建的
-                            # 首帧行为）。合入主干后用 GPU-Painter corpus 对照
-                            # 补测，达标再默认启用。
+                            # 差分重放（2026-10-03 起默认启用）：闸门 key 相等
+                            # ⇔ 轨道/布局签名/画面全部没变，sidecar 只重放
+                            # style/titles/fx_sprites/行级样式段。现象B 根因
+                            # （差分合并未清旧行级 bursts，逐次翻倍）已修复；
+                            # 全特效真实工程上 patch 与全量重配的帧逐字节
+                            # 一致（含表化载荷）。任何失败仍回落全量重配，
+                            # 语义不变；KROK_SUBTITLE_GPU_STYLE_PATCH=0 可
+                            # 强制关闭用于对照。
                             and _env_enabled(
-                                "KROK_SUBTITLE_GPU_STYLE_PATCH", "0"
+                                "KROK_SUBTITLE_GPU_STYLE_PATCH", "1"
                             )
                             and self._style_patch_key is not None
                             and self._style_patch_key == current_patch_key

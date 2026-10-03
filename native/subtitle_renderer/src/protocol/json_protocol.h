@@ -7,9 +7,12 @@
 
 namespace krok::subtitle::native::protocol {
 
-// Schema 2 adds the root ``vector_glyphs`` outline table; characters reference
-// entries through ``vector_glyph_id`` instead of embedding a full outline copy.
-inline constexpr int kRenderIrSchema = 2;
+// Schema 3 adds boundary dedup tables: ``fx_color_table``/``fx_paint_table``
+// (burst colors & paint specs referenced by id), ``line_layout_table``
+// (per-line layout snapshots), omit-default char fields, rounded glyph path
+// coordinates, and the optional ``vector_glyphs_hash`` gate (table omitted
+// when the content digest matches the sidecar's retained copy).
+inline constexpr int kRenderIrSchema = 3;
 
 enum class Command {
     BackendInfo,
