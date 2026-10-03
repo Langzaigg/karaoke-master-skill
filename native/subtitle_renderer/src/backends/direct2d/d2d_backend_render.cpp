@@ -4273,6 +4273,9 @@ ProbeResult Direct2DGpuBackend::renderFrameInternal(
             bool hasTransform = false;
             D2D1_RECT_F sourceRect{};
             D2D1_RECT_F effectRect{};
+            // 稳态模糊缓存命中：blurred 持有展平后的多 pass 光晕位图，
+            // source/blur/sigmas 全部为空，合成走单次 DrawBitmap。
+            ID2D1Bitmap1 *cached = nullptr;
         };
         std::vector<InlineGlowLayer> inlineGlowLayers;
         // Grouped layers (charOnly < 0) collect every character whose
@@ -4336,6 +4339,67 @@ ProbeResult Direct2DGpuBackend::renderFrameInternal(
                 return;
             }
             InlineGlowLayer layer;
+            // ---- 稳态模糊缓存（KROK_SUBTITLE_GPU_GLOW_CACHE=0 关闭）----
+            // 只缓存编组层（charOnly<0）；逐字层属于正在动画的字（Wiping
+            // 裁剪前沿逐帧移动）。签名覆盖该样式的【全部】字（含离开编组
+            // 的），否则成员变化不会失效。变换在合成期施加，源与模糊结果
+            // 跟变换无关，utopia 编组层同样可命中。
+            bool cacheable = impl_->glowBlurCacheEnabled && charOnly < 0;
+            std::uint64_t signature = 0;
+            if (cacheable) {
+                const auto mixValue = [&signature](std::uint64_t value) {
+                    signature = signature * 0x9E3779B97F4A7C15ULL ^ value;
+                };
+                const auto mixFloat = [&mixValue](float value) {
+                    std::uint32_t bits = 0;
+                    std::memcpy(&bits, &value, sizeof(bits));
+                    mixValue(bits);
+                };
+                mixFloat(globalOpacity);
+                for (std::size_t charIndex = 0;
+                     charIndex < line->chars.size();
+                     ++charIndex) {
+                    const Impl::CachedChar &ch = line->chars[charIndex];
+                    if (ch.styleIndex != styleIndex) {
+                        continue;
+                    }
+                    const bool grouped = charUsesGroupedGlowAt(charIndex);
+                    const N3WipePhase phase = wipePhaseAt(line->chars, charIndex);
+                    mixValue(charIndex);
+                    mixValue(grouped ? 1u : 0u);
+                    if (!grouped) {
+                        continue;
+                    }
+                    mixValue(static_cast<std::uint64_t>(phase));
+                    if (phase == N3WipePhase::Wiping) {
+                        cacheable = false;
+                        break;
+                    }
+                    mixFloat(characterOpacityAt(charIndex));
+                }
+            }
+            const int cachePasses = std::clamp(
+                charStyle.glowConcentrationLevel, 0, 2
+            ) + 1;
+            const bool cacheHitEnabled = impl_->glowBlurCacheMode != 2;
+            if (cacheable && cacheHitEnabled) {
+                for (Impl::GlowBlurCacheEntry &entry : impl_->glowBlurCache) {
+                    if (entry.line == line
+                        && entry.styleIndex == styleIndex
+                        && entry.after == after
+                        && entry.contentSignature == signature
+                        && entry.radius == radius
+                        && entry.passes == cachePasses
+                        && entry.blurred != nullptr) {
+                        entry.lastUsed = ++impl_->glowBlurCacheSerial;
+                        ++impl_->glowBlurCacheHits;
+                        layer.cached = entry.blurred.Get();
+                        layer.sourceRect = entry.sourceRect;
+                        inlineGlowLayers.push_back(std::move(layer));
+                        return;
+                    }
+                }
+            }
             if ((spinDirection != 0 || dripDirection != 0 || useUtopiaTransition)
                 && charOnly >= 0) {
                 const CharacterAnimationState animationState = characterAnimationAt(
@@ -4556,6 +4620,82 @@ ProbeResult Direct2DGpuBackend::renderFrameInternal(
             const int passes = std::clamp(charStyle.glowConcentrationLevel, 0, 2) + 1;
             for (int index = 0; index < passes; ++index) {
                 layer.sigmas.push_back(radius - index * radius / passes);
+            }
+            if (cacheable && impl_->glowBlurCacheMode != 3) {
+                // 烘焙：把多 pass blur 展平进 sourceRect 尺寸的缓存位图，
+                // 下一帧同签名直接 DrawBitmap。与合成路径逐 pass DrawImage
+                // 的串行 SourceOver 等价（同样从透明底开始）。
+                const float rectW = layer.sourceRect.right - layer.sourceRect.left;
+                const float rectH = layer.sourceRect.bottom - layer.sourceRect.top;
+                if (rectW >= 1.0f && rectH >= 1.0f
+                    && rectW <= 8192.0f && rectH <= 8192.0f) {
+                    Microsoft::WRL::ComPtr<ID2D1Bitmap1> cacheBitmap;
+                    if (SUCCEEDED(context->CreateBitmap(
+                            D2D1::SizeU(
+                                static_cast<UINT32>(std::ceil(rectW)),
+                                static_cast<UINT32>(std::ceil(rectH))
+                            ),
+                            nullptr,
+                            0,
+                            &bitmapProperties,
+                            cacheBitmap.ReleaseAndGetAddressOf()
+                        ))) {
+                        Microsoft::WRL::ComPtr<ID2D1Image> previousTarget;
+                        context->GetTarget(&previousTarget);
+                        D2D1_MATRIX_3X2_F previousTransform{};
+                        context->GetTransform(&previousTransform);
+                        context->SetTarget(cacheBitmap.Get());
+                        context->SetTransform(D2D1::Matrix3x2F::Identity());
+                        context->BeginDraw();
+                        context->Clear(D2D1::ColorF(0.0f, 0.0f));
+                        for (int sigma : layer.sigmas) {
+                            checkHr(
+                                layer.blur->SetValue(
+                                    D2D1_GAUSSIANBLUR_PROP_STANDARD_DEVIATION,
+                                    static_cast<float>(sigma)
+                                ),
+                                "ID2D1Effect::SetValue(glow cache StandardDeviation)",
+                                device_
+                            );
+                            context->DrawImage(
+                                layer.blur,
+                                D2D1::Point2F(0.0f, 0.0f),
+                                layer.effectRect
+                            );
+                        }
+                        checkHr(
+                            context->EndDraw(),
+                            "ID2D1DeviceContext::EndDraw(glow cache bake)",
+                            device_
+                        );
+                        context->SetTarget(previousTarget.Get());
+                        context->SetTransform(previousTransform);
+                        Impl::GlowBlurCacheEntry entry;
+                        entry.line = line;
+                        entry.styleIndex = styleIndex;
+                        entry.after = after;
+                        entry.contentSignature = signature;
+                        entry.radius = radius;
+                        entry.passes = passes;
+                        entry.sourceRect = layer.sourceRect;
+                        entry.blurred = std::move(cacheBitmap);
+                        entry.lastUsed = ++impl_->glowBlurCacheSerial;
+                        if (impl_->glowBlurCache.size()
+                            >= Impl::glowBlurCacheCapacity) {
+                            auto victim = std::min_element(
+                                impl_->glowBlurCache.begin(),
+                                impl_->glowBlurCache.end(),
+                                [](const Impl::GlowBlurCacheEntry &a,
+                                   const Impl::GlowBlurCacheEntry &b) {
+                                    return a.lastUsed < b.lastUsed;
+                                }
+                            );
+                            *victim = std::move(entry);
+                        } else {
+                            impl_->glowBlurCache.push_back(std::move(entry));
+                        }
+                    }
+                }
             }
             inlineGlowLayers.push_back(std::move(layer));
         };
@@ -5994,6 +6134,15 @@ ProbeResult Direct2DGpuBackend::renderFrameInternal(
                 layer.sourceRect.left + dx, layer.sourceRect.top + dy,
                 layer.sourceRect.right + dx, layer.sourceRect.bottom + dy
             );
+            if (layer.cached != nullptr) {
+                context->DrawBitmap(
+                    layer.cached,
+                    imageRect,
+                    1.0f,
+                    D2D1_INTERPOLATION_MODE_LINEAR
+                );
+                continue;
+            }
             for (int sigma : layer.sigmas) {
                 checkHr(
                     layer.blur->SetValue(
@@ -7959,7 +8108,9 @@ ProbeResult Direct2DGpuBackend::renderFrameInternal(
             layer.blur->SetInput(0, nullptr);
         }
         for (InlineGlowLayer &layer : inlineGlowLayers) {
-            layer.blur->SetInput(0, nullptr);
+            if (layer.blur != nullptr) {
+                layer.blur->SetInput(0, nullptr);
+            }
         }
         // This line's composite is flushed; scratches can serve the next line.
         // Bursts (e.g. whole-line utopia outros) may allocate past the cap;

@@ -281,6 +281,40 @@ struct Direct2DGpuBackend::Impl {
         UINT32 height = 0;
     };
 
+    // 稳态 glow 层的「模糊结果」缓存（2026-10 预览帧率优化）。稳态行
+    // （无 Wiping 字、无入退场淡变、无逐字动画）每帧的 glow 源重绘与
+    // 高斯模糊效果执行和上一帧逐位相同：utopia/缩放变换在合成阶段施加，
+    // 源与模糊结果跟变换无关。命中时跳过源绘制与 blur 效果图，直接
+    // DrawBitmap 展平结果（与逐 pass DrawImage 的 SourceOver 串行合成
+    // 等价）。条目随 configure 整体失效（lines 向量清空重建，行指针
+    // 即行身份）；LRU 上限防止显存膨胀。
+    struct GlowBlurCacheEntry {
+        const CachedLine *line = nullptr;
+        int styleIndex = -1;
+        bool after = false;
+        std::uint64_t contentSignature = 0;
+        float radius = 0.0f;
+        int passes = 0;
+        D2D1_RECT_F sourceRect{};
+        Microsoft::WRL::ComPtr<ID2D1Bitmap1> blurred;
+        std::uint64_t lastUsed = 0;
+    };
+    std::vector<GlowBlurCacheEntry> glowBlurCache;
+    std::uint64_t glowBlurCacheSerial = 0;
+    std::uint64_t glowBlurCacheHits = 0;
+    std::uint64_t glowBlurCacheMisses = 0;
+    static constexpr std::size_t glowBlurCacheCapacity = 8;
+    // 命中路径暂未达逐位一致（见提交说明：烘焙侧 0 差异、命中侧高 alpha
+    // 区域有差异，根因待查），默认关闭；KROK_SUBTITLE_GPU_GLOW_CACHE=1
+    // 可显式开启供继续调试。
+    bool glowBlurCacheEnabled = direct2d::environmentFlagEnabled(
+        "KROK_SUBTITLE_GPU_GLOW_CACHE",
+        false
+    );
+    // 诊断模式：2 = 只烘焙不命中（隔离烘焙副作用）；3 = 只命中不烘焙
+    // （仅供已填充的缓存，诊断用）。默认 1 = 完整缓存。
+    int glowBlurCacheMode = 1;
+
     RenderScene scene;
     std::vector<CachedLine> lines;
     std::vector<CachedImage> images;

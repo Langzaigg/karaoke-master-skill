@@ -142,6 +142,8 @@ void Direct2DGpuBackend::configure(const RenderScene &scene) {
         // every positioned geometry/realization alive; alpha/mode/image/stop
         // topology remains part of the comparison and falls back to rebuild.
         impl_->scene = scene;
+        // 仅改色也会换掉 glow 画笔颜色：稳态模糊缓存条目按旧色烘焙，作废。
+        impl_->glowBlurCache.clear();
         for (std::size_t index = 0; index < impl_->lines.size(); ++index) {
             impl_->lines[index].style = index < scene.lineStyles.size()
                 ? scene.lineStyles[index]
@@ -213,6 +215,13 @@ void Direct2DGpuBackend::configure(const RenderScene &scene) {
         impl_->frameSurfaceHeight = scene.height;
     }
     impl_->scene = scene;
+    // 稳态 glow 模糊缓存随场景整体失效：行向量即将清空重建，缓存条目
+    // 持有的行指针全部悬空。
+    impl_->glowBlurCache.clear();
+    impl_->glowBlurCacheSerial = 0;
+    impl_->glowBlurCacheMode = direct2d::environmentSize(
+        "KROK_SUBTITLE_GPU_GLOW_CACHE_MODE", 1, 1, 3
+    );
     impl_->diagnostics.glyphGeometryCacheHits = 0;
     impl_->diagnostics.glyphGeometryCacheMisses = 0;
     impl_->diagnostics.glyphGeometryCacheSize = 0;
