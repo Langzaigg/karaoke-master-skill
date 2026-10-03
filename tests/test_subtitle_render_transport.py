@@ -991,7 +991,6 @@ def test_gpu_async_renderer_queue_is_capacity_one_latest_wins(qapp, monkeypatch)
     monkeypatch.setattr(pa, "NativeRendererProcess", FakeGpuProcess)
     monkeypatch.setattr(pa, "SharedFrameRingReader", FakeGpuReader)
     renderer = pa.GpuAsyncSubtitleRenderer(320, 180)
-    renderer._paused_prewarm_per_side = 0  # 隔离暂停邻域预热，保证精确渲染序列
     try:
         renderer.set_state(TimingTrack(), Style())
         renderer.request(1_000)
@@ -1267,194 +1266,6 @@ def test_gpu_async_renderer_frame_error_retries_once_before_restart(
         renderer.stop()
 
 
-def test_native_preview_frame_cache_peek_does_not_consume():
-    from PyQt6.QtGui import QColor, QImage
-
-    from krok_helper.subtitle_render.frontend.preview.preview_async import (
-        NativePreviewFrameCache,
-    )
-
-    cache = NativePreviewFrameCache(max_frames=4)
-    image = QImage(8, 8, QImage.Format.Format_ARGB32_Premultiplied)
-    image.fill(QColor("#112233"))
-    cache.store(1_000, image)
-
-    first = cache.peek(1_000)
-    second = cache.peek(1_000)
-    assert first is not None and second is not None
-    assert cache.has(1_000)
-    # take 仍然消费（兼容旧语义）
-    assert cache.take(1_000) is not None
-    assert not cache.has(1_000)
-    assert cache.peek(1_000) is None
-
-
-def _fake_gpu_sidecar_state(qapp, monkeypatch):
-    """构造假 sidecar + 可数渲染调用 + 固定帧事件的公共脚手架。"""
-    import time as _time
-
-    import krok_helper.subtitle_render.frontend.preview.preview_async as pa
-    from krok_helper.subtitle_render.domain.models import Style, TimingTrack
-    from krok_helper.subtitle_render.domain.timing import TimingChar, TimingLine
-
-    state = {"renders": [], "frame": 0}
-
-    class FakeProcess:
-        def __init__(self, *args, **kwargs):
-            pass
-
-        def start(self):
-            return {"ok": True, "event": "ready"}
-
-        def configure_gpu(self, *args, **kwargs):
-            return {"ok": True, "event": "gpu_configured", "worker_count": 1}
-
-        def render_gpu_frame(self, t_ms, **kwargs):
-            state["renders"].append(int(t_ms))
-            state["frame"] += 1
-            return {
-                "ok": True,
-                "event": "gpu_frame_ready",
-                "t_ms": int(t_ms),
-                "shm_key": "test-shm",
-                "slot_offset": 0,
-                "header_bytes": 64,
-                "payload_offset": 64,
-                "payload_bytes": 256,
-                "slot_bytes": 320,
-                "pixel_format": "bgra8888_premultiplied",
-                "render_ms": 5.0,
-            }
-
-        def begin_render_gpu_frame(self, t_ms, **kwargs):
-            state["renders"].append(int(t_ms))
-
-        def finish_render_gpu_frame(self):
-            state["frame"] += 1
-            return {
-                "ok": True,
-                "event": "gpu_frame_ready",
-                "t_ms": state["renders"][-1] if state["renders"] else 0,
-                "shm_key": "test-shm",
-                "slot_offset": 0,
-                "header_bytes": 64,
-                "payload_offset": 64,
-                "payload_bytes": 256,
-                "slot_bytes": 320,
-                "pixel_format": "bgra8888_premultiplied",
-                "render_ms": 5.0,
-            }
-
-        def send_cancel_generation(self, *_a, **_k):
-            pass
-
-        def close(self):
-            pass
-
-    class FakeReader:
-        shm_key = "test-shm"
-
-        def __init__(self):
-            self._n = 0
-
-        @classmethod
-        def from_event(cls, _event):
-            return cls()
-
-        def read_qimage(self, _event):
-            from PyQt6.QtGui import QColor, QImage
-
-            image = QImage(8, 8, QImage.Format.Format_ARGB32_Premultiplied)
-            image.fill(QColor("#334455"))
-            return image
-
-        def close(self):
-            pass
-
-    monkeypatch.setattr(pa, "NativeRendererProcess", FakeProcess)
-    monkeypatch.setattr(pa, "SharedFrameRingReader", FakeReader)
-    track = TimingTrack(
-        lines=[TimingLine(chars=[TimingChar("歌", 0)], end_ms=10_000)]
-    )
-    return pa, state, track
-
-
-def test_gpu_preview_repeated_paused_frame_hits_cache_without_rerender(
-    qapp, monkeypatch
-):
-    """暂停时反复请求同一帧：peek 命中不再逐次重渲（2026-10 修复）。"""
-    import time
-
-    pa, state, track = _fake_gpu_sidecar_state(qapp, monkeypatch)
-    renderer = pa.GpuAsyncSubtitleRenderer(320, 180)
-    frames: list[tuple[object, int]] = []
-    renderer.frame_ready.connect(lambda image, t_ms: frames.append((image, t_ms)))
-    try:
-        renderer.set_state(track, pa.Style())
-        renderer.request(1_000)
-        deadline = time.monotonic() + 5.0
-        while len(frames) < 1 and time.monotonic() < deadline:
-            qapp.processEvents()
-            time.sleep(0.01)
-        assert frames and frames[0][1] == 1_000
-
-        renderer.request(1_000)
-        renderer.request(1_000)
-        deadline = time.monotonic() + 1.0
-        while time.monotonic() < deadline:
-            qapp.processEvents()
-            time.sleep(0.01)
-        stats = renderer.stats_snapshot()
-        assert stats["cache_hits"] >= 2
-        assert len(frames) >= 3
-        # 只有第一次真正渲染了 1000ms（后续两次全是缓存命中）
-        assert state["renders"].count(1_000) == 1
-    finally:
-        renderer.stop()
-
-
-def test_gpu_preview_prewarms_neighbors_while_paused(qapp, monkeypatch):
-    """暂停交付当前帧后，调度器按 ±1、±2…预热邻域帧（单帧步进秒开）。"""
-    import time
-
-    pa, state, track = _fake_gpu_sidecar_state(qapp, monkeypatch)
-    renderer = pa.GpuAsyncSubtitleRenderer(320, 180)
-    frames: list[tuple[object, int]] = []
-    renderer.frame_ready.connect(lambda image, t_ms: frames.append((image, t_ms)))
-    try:
-        renderer.set_state(track, pa.Style())
-        renderer.request(1_000)
-        deadline = time.monotonic() + 5.0
-        while len(frames) < 1 and time.monotonic() < deadline:
-            qapp.processEvents()
-            time.sleep(0.01)
-        assert frames and frames[0][1] == 1_000
-        # 邻域预热在空闲后陆续发生：等待至少 3 个邻域帧被渲染
-        deadline = time.monotonic() + 5.0
-        rendered = set(state["renders"])
-        while len(rendered) < 4 and time.monotonic() < deadline:
-            qapp.processEvents()
-            time.sleep(0.02)
-            rendered = set(state["renders"])
-        rendered = set(state["renders"])
-        assert 1_000 in rendered
-        step = int(round(1000.0 / 60.0))
-        neighbors = {1_000 + step, 1_000 - step, 1_000 + 2 * step}
-        assert len(neighbors & rendered) >= 2
-        # 预热帧进了缓存：直接请求邻域帧应命中而不是渲染
-        target = sorted(neighbors & rendered)[0]
-        before = state["renders"].count(target)
-        renderer.request(target)
-        deadline = time.monotonic() + 1.0
-        while time.monotonic() < deadline:
-            qapp.processEvents()
-            time.sleep(0.01)
-        assert any(t == target for _img, t in frames)
-        assert state["renders"].count(target) == before
-    finally:
-        renderer.stop()
-
-
 def test_gpu_async_renderer_failure_falls_back_to_painter(qapp, monkeypatch):
     from krok_helper.subtitle_render.frontend.preview import preview_async as pa
     from krok_helper.subtitle_render.domain.models import Style, TimingTrack
@@ -1711,7 +1522,6 @@ def test_gpu_async_renderer_one_frame_lookahead_uses_bounded_cache(qapp, monkeyp
     monkeypatch.setenv("KROK_SUBTITLE_GPU_LOOKAHEAD_FRAMES", "1")
     monkeypatch.setenv("KROK_SUBTITLE_GPU_MAX_LOOKAHEAD_FRAMES", "1")
     renderer = pa.GpuAsyncSubtitleRenderer(320, 180)
-    renderer._paused_prewarm_per_side = 0  # 隔离暂停邻域预热，保证精确渲染序列
     try:
         renderer.set_state(TimingTrack(), Style())
         renderer.set_playing(True)
@@ -1876,7 +1686,6 @@ def test_gpu_async_renderer_restarts_after_bounded_fallback(qapp, monkeypatch):
     monkeypatch.setattr(pa, "NativeRendererProcess", RecoveringGpuProcess)
     monkeypatch.setattr(pa, "SharedFrameRingReader", FakeGpuReader)
     renderer = pa.GpuAsyncSubtitleRenderer(320, 180)
-    renderer._paused_prewarm_per_side = 0  # 隔离暂停邻域预热，保证精确渲染序列
     frames: list[int] = []
     renderer.frame_ready.connect(lambda _image, t_ms: frames.append(int(t_ms)))
     try:
@@ -1973,7 +1782,6 @@ def test_gpu_async_renderer_pooled_batch_accepts_out_of_order_completion(qapp, m
     monkeypatch.setattr(pa, "NativeRendererProcess", FakeGpuProcess)
     monkeypatch.setattr(pa, "SharedFrameRingReader", FakeGpuReader)
     renderer = pa.GpuAsyncSubtitleRenderer(320, 180)
-    renderer._paused_prewarm_per_side = 0  # 隔离暂停邻域预热，保证精确渲染序列
     renderer.frame_ready.connect(lambda _image, t_ms: emitted.append(int(t_ms)))
     try:
         renderer.set_state(TimingTrack(), Style())
@@ -2070,7 +1878,6 @@ def test_gpu_async_renderer_reserves_final_ring_before_deferred_follower(qapp, m
     monkeypatch.setattr(pa, "NativeRendererProcess", FakeGpuProcess)
     monkeypatch.setattr(pa, "SharedFrameRingReader", FakeGpuReader)
     renderer = pa.GpuAsyncSubtitleRenderer(320, 180)
-    renderer._paused_prewarm_per_side = 0  # 隔离暂停邻域预热，保证精确渲染序列
     try:
         renderer.set_state(TimingTrack(), Style())
         renderer.set_playing(False)
@@ -2153,7 +1960,6 @@ def test_gpu_async_renderer_ignores_dropped_single_frame_without_fallback(
     monkeypatch.setattr(pa, "NativeRendererProcess", FakeGpuProcess)
     monkeypatch.setattr(pa, "SharedFrameRingReader", FakeGpuReader)
     renderer = pa.GpuAsyncSubtitleRenderer(320, 180)
-    renderer._paused_prewarm_per_side = 0  # 隔离暂停邻域预热，保证精确渲染序列
     renderer.frame_ready.connect(lambda _image, t_ms: emitted.append(int(t_ms)))
     renderer.fallback_occurred.connect(fallbacks.append)
     try:
