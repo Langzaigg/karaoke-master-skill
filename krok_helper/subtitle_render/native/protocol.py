@@ -783,6 +783,8 @@ def lines_style_to_ir(
     *,
     source_index: int = 0,
     fx_table: FxPayloadTable | None = None,
+    include_placement: bool = False,
+    layout_table: "LineLayoutTable | None" = None,
 ) -> list[dict[str, object]]:
     """逐行「样式派生字段」载荷（``gpu_configure_style`` 差分更新用）。
 
@@ -818,12 +820,60 @@ def lines_style_to_ir(
             and appearance_role_source(style, style.volume_role_name) is not None
         )
     )
+    # 布局摆放视图（P6：layout scope 差分附带）：lane / 显示窗口 /
+    # 页号与页内行数 / 行偏移与摆放窗口 / 居中覆写。改字号/边距/行数后
+    # 这些字段变化而字符文本与时间不变——sidecar 在既有行数据上原位更新。
+    placement_by_index: dict[int, dict[str, object]] = {}
+    if include_placement:
+        placement_by_index = {
+            item.track_index: {
+                **(
+                    {"layout_id": layout_table.layout_id(
+                        _line_layout_dict(item.layout_style)
+                    )}
+                    if layout_table is not None
+                    else {}
+                ),
+                "lane": int(item.lane),
+                "display_start_ms": (
+                    int(item.display_start_ms)
+                    if item.display_start_ms is not None
+                    else None
+                ),
+                "display_end_ms": (
+                    int(item.display_end_ms)
+                    if item.display_end_ms is not None
+                    else None
+                ),
+                "page_index": int(item.page_index),
+                "page_line_count": int(item.page_line_count),
+                # 与 track_to_ir 同口径：静态基偏移恒 0，页偏移全部由
+                # layout_offset_windows 的时间窗口承载（native 按帧取当前窗）。
+                "layout_offset_x": 0.0,
+                "layout_offset_y": 0.0,
+                "center_override": bool(item.center_override),
+                "layout_offset_windows": [
+                    {
+                        "start_ms": int(start_ms),
+                        "end_ms": int(end_ms),
+                        "offset_x": float(offset_x),
+                        "offset_y": float(offset_y),
+                    }
+                    for start_ms, end_ms, offset_x, offset_y in (
+                        item.layout_offset_windows or ()
+                    )
+                    if int(end_ms) > int(start_ms)
+                ],
+            }
+            for item in layout_plan.lines
+        }
     entries: list[dict[str, object]] = []
     for index, line in enumerate(track.lines):
         entries.append(
             {
                 "source_index": int(source_index),
                 "source_line_index": index,
+                **(placement_by_index.get(index) or {}),
                 "signal_head": index in signal_heads,
                 "signal_band_join": (
                     signal_band_style_joins

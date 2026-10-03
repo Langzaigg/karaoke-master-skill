@@ -54,6 +54,7 @@ def style_patch_base_key(
     height: int,
     fps: int,
     dpr: float,
+    include_layout_signature: bool = True,
 ) -> tuple:
     """差分样式更新（``gpu_configure_style``）的资格闸门 key。
 
@@ -74,14 +75,16 @@ def style_patch_base_key(
     # none 性不变）不改窗口与几何 → 闸门保持命中，走 lines_style 差分
     # （行级动画字段随载荷下发）。布局签名保持严格：任何布局输入变化
     # 仍全量重配。
-    parts: list[object] = [
-        track_signature_for_windows(track),
-        lyric_layout_style_signature(style),
-    ]
+    parts: list[object] = [track_signature_for_windows(track)]
+    if include_layout_signature:
+        # layout scope（P6）：布局签名刻意缺席——行级摆放字段随差分载荷
+        # 原位更新，闸门只须保证轨道内容与画面没变。
+        parts.append(lyric_layout_style_signature(style))
     for source in extra_tracks or ():
         source_style = style_for_track(style, source)
         parts.append(value_signature(source))
-        parts.append(lyric_layout_style_signature(source_style))
+        if include_layout_signature:
+            parts.append(lyric_layout_style_signature(source_style))
     return (width, height, fps, round(float(dpr or 1.0), 4), tuple(parts))
 
 
@@ -1014,11 +1017,16 @@ class GpuAsyncSubtitleRenderer(QObject):
                         height=height,
                         fps=60,
                         dpr=dpr,
+                        include_layout_signature=(
+                            relayout_scope != "layout"
+                        ),
                     )
                     if needs_configure:
                         style_patched = False
                         if (
-                            relayout_scope in ("paint", "titles")
+                            relayout_scope in (
+                                "paint", "titles", "layout",
+                            )
                             # 差分重放（2026-10-03 起默认启用）：闸门 key 相等
                             # ⇔ 轨道/布局签名/画面全部没变，sidecar 只重放
                             # style/titles/fx_sprites/行级样式段。现象B 根因
@@ -1051,6 +1059,9 @@ class GpuAsyncSubtitleRenderer(QObject):
                                         duration_ms=duration_ms,
                                         include_lines_style=(
                                             relayout_scope != "titles"
+                                        ),
+                                        include_placement=(
+                                            relayout_scope == "layout"
                                         ),
                                     ),
                                     force_warp=force_warp,

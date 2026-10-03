@@ -599,3 +599,50 @@ def test_line_animation_type_swap_keeps_window_signature(qapp):
         track_b, st, [], width=_WIDTH, height=_HEIGHT, fps=_FPS, dpr=1.0
     )
     assert key_a == key_b
+
+
+def test_layout_patch_carries_placement_and_layout_table(qapp):
+    """P6：layout scope 差分附带行级摆放字段与新的行布局表。"""
+    from krok_helper.subtitle_render.engine.render.render_ir import (
+        build_style_patch_ir,
+    )
+    from krok_helper.subtitle_render.frontend.preview.preview_async import (
+        style_patch_base_key,
+    )
+
+    track = _patch_track()
+    style = _patch_style()
+    resized = _patch_style(font_size_px=80)
+
+    patch = build_style_patch_ir(
+        track, resized, width=_WIDTH, height=_HEIGHT, fps=_FPS,
+        duration_ms=4000, include_placement=True,
+    )
+    entries = patch["lines_style"]
+    assert patch["line_layout_table"]
+    for entry in entries:
+        for field in (
+            "lane", "display_start_ms", "display_end_ms", "page_index",
+            "page_line_count", "layout_offset_x", "layout_offset_y",
+            "center_override", "layout_offset_windows",
+        ):
+            assert field in entry, (entry["source_line_index"], field)
+
+    # 布局编辑前后的闸门 key：layout 口径（无布局签名）稳定，
+    # 严格口径（含布局签名）必变——闸门按 scope 放宽而非永久放宽。
+    base_relaxed = style_patch_base_key(
+        track, style, [], width=_WIDTH, height=_HEIGHT, fps=_FPS, dpr=1.0,
+        include_layout_signature=False,
+    )
+    resized_relaxed = style_patch_base_key(
+        track, resized, [], width=_WIDTH, height=_HEIGHT, fps=_FPS, dpr=1.0,
+        include_layout_signature=False,
+    )
+    assert base_relaxed == resized_relaxed
+    base_strict = style_patch_base_key(
+        track, style, [], width=_WIDTH, height=_HEIGHT, fps=_FPS, dpr=1.0,
+    )
+    resized_strict = style_patch_base_key(
+        track, resized, [], width=_WIDTH, height=_HEIGHT, fps=_FPS, dpr=1.0,
+    )
+    assert base_strict != resized_strict

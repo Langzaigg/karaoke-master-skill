@@ -4441,6 +4441,11 @@ class SubtitleRenderWindow(QWidget):
             # 复用整轨计划。签名仍是正确性闸门，连续调节中若夹入字体/布局
             # 变化，面板会把 scope 复位为 None，自动回落全量重排。
             self._property_panel.mark_style_relayout_scope("paint")
+        elif previous is not style:
+            # 其余样式编辑都是布局输入变化（字号/边距/行数/对齐……）：
+            # 轨道内容未变、字符文本与时间不变——行级摆放字段随 layout
+            # 差分载荷原位更新，闸门放宽布局签名（P6）。
+            self._property_panel.mark_style_relayout_scope("layout")
         self._remember_style_preferences(previous, style)
         self._refresh_preview_style_soon()
         # 角色在属性面板中新建 / 重命名 / 删除时，同步逐字符编辑器的可选项。

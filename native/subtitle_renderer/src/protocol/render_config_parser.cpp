@@ -1485,10 +1485,110 @@ static void applyLineStyleSection(
             }
 }
 
+static void applyLineLayoutSection(
+    TimingLine &line,
+    const QJsonObject &layoutObject
+) {
+    // 行级 layout 参数投影（全量解析与 layout 差分合并共用）。
+    if (!layoutObject.isEmpty()) {
+        line.layout.present = true;
+        line.layout.lineYPosition = stringValue(
+            layoutObject, QStringLiteral("line_y_position"),
+            line.layout.lineYPosition
+        );
+        line.layout.lineYMarginPx = intValue(
+            layoutObject, QStringLiteral("line_y_margin_px"),
+            line.layout.lineYMarginPx
+        );
+        line.layout.lineGapPx = intValue(
+            layoutObject, QStringLiteral("line_gap_px"),
+            line.layout.lineGapPx
+        );
+        line.layout.smartHorizontal = stringValue(
+            layoutObject, QStringLiteral("smart_horizontal"),
+            line.layout.smartHorizontal
+        );
+        line.layout.horizontalMarginPx = intValue(
+            layoutObject, QStringLiteral("horizontal_margin_px"),
+            line.layout.horizontalMarginPx
+        );
+        const QJsonArray layoutAlignments = layoutObject.value(
+            QStringLiteral("line_alignments")
+        ).toArray();
+        if (!layoutAlignments.isEmpty()) {
+            line.layout.lineAlignments.clear();
+            for (const QJsonValue &alignment : layoutAlignments) {
+        if (alignment.isString()) {
+            line.layout.lineAlignments.push_back(alignment.toString());
+        }
+            }
+        }
+        line.layout.dualLineLayout = layoutObject.value(
+            QStringLiteral("dual_line_layout")
+        ).toBool(line.layout.dualLineLayout);
+        line.layout.lineHorizontalLayout = stringValue(
+            layoutObject, QStringLiteral("line_horizontal_layout"),
+            line.layout.lineHorizontalLayout
+        );
+        line.layout.row1Align = stringValue(
+            layoutObject, QStringLiteral("row1_align"),
+            line.layout.row1Align
+        );
+        line.layout.row1OffsetX = intValue(
+            layoutObject, QStringLiteral("row1_offset_x"),
+            line.layout.row1OffsetX
+        );
+        line.layout.row1OffsetY = intValue(
+            layoutObject, QStringLiteral("row1_offset_y"),
+            line.layout.row1OffsetY
+        );
+        line.layout.row2Align = stringValue(
+            layoutObject, QStringLiteral("row2_align"),
+            line.layout.row2Align
+        );
+        line.layout.row2OffsetX = intValue(
+            layoutObject, QStringLiteral("row2_offset_x"),
+            line.layout.row2OffsetX
+        );
+        line.layout.row2OffsetY = intValue(
+            layoutObject, QStringLiteral("row2_offset_y"),
+            line.layout.row2OffsetY
+        );
+        line.layout.letterSpacingPx = intValue(
+            layoutObject, QStringLiteral("letter_spacing_px"),
+            line.layout.letterSpacingPx
+        );
+        line.layout.spaceWidthPercent = std::clamp(
+            intValue(
+        layoutObject, QStringLiteral("space_width_percent"),
+        line.layout.spaceWidthPercent
+            ),
+            10,
+            100
+        );
+        line.layout.allowBiting = layoutObject.value(
+            QStringLiteral("allow_biting")
+        ).toBool(line.layout.allowBiting);
+        line.layout.rubyIntervalPx = intValue(
+            layoutObject, QStringLiteral("ruby_interval_px"),
+            line.layout.rubyIntervalPx
+        );
+        line.layout.rubyAlignment = stringValue(
+            layoutObject, QStringLiteral("ruby_alignment"),
+            line.layout.rubyAlignment
+        );
+        line.layout.rubyGapPx = intValue(
+            layoutObject, QStringLiteral("ruby_gap_px"),
+            line.layout.rubyGapPx
+        );
+    }
+}
+
 bool applyLineStylePatch(
     RenderConfig &cfg,
     const QJsonArray &linesStyle,
-    const FxTables &fxTables
+    const FxTables &fxTables,
+    const std::vector<QJsonObject> &lineLayoutTable
 ) {
     // 差分行级样式合并：按 (source_index, source_line_index) 一一对齐。
     // 行数对不上或键缺失 = 配置漂移，返回 false 让调用方整份重配。
@@ -1521,7 +1621,94 @@ bool applyLineStylePatch(
         if (it == entries.constEnd()) {
             return false;
         }
-        applyLineStyleSection(line, it.value(), cfg.karaokeAnim, fxTables);
+        const QJsonObject entry = it.value();
+        applyLineStyleSection(line, entry, cfg.karaokeAnim, fxTables);
+        // P6 布局摆放字段（layout scope 差分附带）：lane / 显示窗口 / 页号
+        // / 行偏移 / 居中覆写原位更新；layout_id 引用 patch 根级行布局表，
+        // 复用全量解析的 line.layout 投影路径。
+        if (entry.contains(QStringLiteral("lane"))) {
+            line.lane = std::max(0, intValue(entry, QStringLiteral("lane"), 0));
+        }
+        if (entry.contains(QStringLiteral("display_start_ms"))) {
+            const QJsonValue start = entry.value(
+                QStringLiteral("display_start_ms")
+            );
+            line.displayStartMs = start.isDouble()
+                ? std::optional<int>(start.toInt()) : std::nullopt;
+        }
+        if (entry.contains(QStringLiteral("display_end_ms"))) {
+            const QJsonValue end = entry.value(
+                QStringLiteral("display_end_ms")
+            );
+            line.displayEndMs = end.isDouble()
+                ? std::optional<int>(end.toInt()) : std::nullopt;
+        }
+        if (entry.contains(QStringLiteral("page_index"))) {
+            line.pageIndex = intValue(entry, QStringLiteral("page_index"), -1);
+        }
+        if (entry.contains(QStringLiteral("page_line_count"))) {
+            line.pageLineCount = std::max(
+                0, intValue(entry, QStringLiteral("page_line_count"), 0)
+            );
+        }
+        if (entry.contains(QStringLiteral("layout_offset_x"))) {
+            line.layoutOffsetX = entry.value(
+                QStringLiteral("layout_offset_x")
+            ).toDouble(0.0);
+            line.layoutOffsetY = entry.value(
+                QStringLiteral("layout_offset_y")
+            ).toDouble(0.0);
+        }
+        if (entry.contains(QStringLiteral("center_override"))) {
+            line.centerOverride = entry.value(
+                QStringLiteral("center_override")
+            ).toBool(false);
+        }
+        if (entry.contains(QStringLiteral("layout_offset_windows"))) {
+            line.placementWindows.clear();
+            const QJsonArray windows = entry.value(
+                QStringLiteral("layout_offset_windows")
+            ).toArray();
+            line.placementWindows.reserve(
+                static_cast<std::size_t>(windows.size())
+            );
+            for (const QJsonValue &windowValue : windows) {
+                const QJsonObject window = windowValue.toObject();
+                const int startMs = intValue(
+                    window, QStringLiteral("start_ms"), 0
+                );
+                const int endMs = intValue(
+                    window, QStringLiteral("end_ms"), 0
+                );
+                if (endMs <= startMs) {
+                    continue;
+                }
+                PlacementWindow placement;
+                placement.startMs = startMs;
+                placement.endMs = endMs;
+                placement.offsetX = window.value(
+                    QStringLiteral("offset_x")
+                ).toDouble(0.0);
+                placement.offsetY = window.value(
+                    QStringLiteral("offset_y")
+                ).toDouble(0.0);
+                line.placementWindows.push_back(std::move(placement));
+            }
+        }
+        if (entry.value(QStringLiteral("layout_id")).isDouble()) {
+            const int layoutId = entry.value(
+                QStringLiteral("layout_id")
+            ).toInt();
+            QJsonObject layoutObject;
+            if (layoutId >= 0
+                && static_cast<std::size_t>(layoutId)
+                    < lineLayoutTable.size()) {
+                layoutObject = lineLayoutTable[
+                    static_cast<std::size_t>(layoutId)
+                ];
+            }
+            applyLineLayoutSection(line, layoutObject);
+        }
     }
     return true;
 }
@@ -1578,11 +1765,25 @@ std::optional<RenderConfig> applyRenderConfigStylePatch(
             patchFxTables.paints.push_back(paint.toObject());
         }
     }
+    // P6：layout scope 差分随载荷附带新的行布局表（layout_id 展开用）。
+    std::vector<QJsonObject> patchLineLayoutTable;
+    {
+        const QJsonArray layoutTable = patch.value(
+            QStringLiteral("line_layout_table")
+        ).toArray();
+        patchLineLayoutTable.reserve(
+            static_cast<std::size_t>(layoutTable.size())
+        );
+        for (const QJsonValue &layout : layoutTable) {
+            patchLineLayoutTable.push_back(layout.toObject());
+        }
+    }
     if (patch.contains(QStringLiteral("lines_style"))) {
         if (!applyLineStylePatch(
                 fresh,
                 patch.value(QStringLiteral("lines_style")).toArray(),
-                patchFxTables
+                patchFxTables,
+                patchLineLayoutTable
             )) {
             *error = QStringLiteral("lines_style patch mismatch (line set drifted)");
             return std::nullopt;
@@ -1726,98 +1927,7 @@ static void parseSourceTracks(
                     QStringLiteral("layout")
                 ).toObject();
             }
-            if (!layoutObject.isEmpty()) {
-                line.layout.present = true;
-                line.layout.lineYPosition = stringValue(
-                    layoutObject, QStringLiteral("line_y_position"),
-                    line.layout.lineYPosition
-                );
-                line.layout.lineYMarginPx = intValue(
-                    layoutObject, QStringLiteral("line_y_margin_px"),
-                    line.layout.lineYMarginPx
-                );
-                line.layout.lineGapPx = intValue(
-                    layoutObject, QStringLiteral("line_gap_px"),
-                    line.layout.lineGapPx
-                );
-                line.layout.smartHorizontal = stringValue(
-                    layoutObject, QStringLiteral("smart_horizontal"),
-                    line.layout.smartHorizontal
-                );
-                line.layout.horizontalMarginPx = intValue(
-                    layoutObject, QStringLiteral("horizontal_margin_px"),
-                    line.layout.horizontalMarginPx
-                );
-                const QJsonArray layoutAlignments = layoutObject.value(
-                    QStringLiteral("line_alignments")
-                ).toArray();
-                if (!layoutAlignments.isEmpty()) {
-                    line.layout.lineAlignments.clear();
-                    for (const QJsonValue &alignment : layoutAlignments) {
-                        if (alignment.isString()) {
-                            line.layout.lineAlignments.push_back(alignment.toString());
-                        }
-                    }
-                }
-                line.layout.dualLineLayout = layoutObject.value(
-                    QStringLiteral("dual_line_layout")
-                ).toBool(line.layout.dualLineLayout);
-                line.layout.lineHorizontalLayout = stringValue(
-                    layoutObject, QStringLiteral("line_horizontal_layout"),
-                    line.layout.lineHorizontalLayout
-                );
-                line.layout.row1Align = stringValue(
-                    layoutObject, QStringLiteral("row1_align"),
-                    line.layout.row1Align
-                );
-                line.layout.row1OffsetX = intValue(
-                    layoutObject, QStringLiteral("row1_offset_x"),
-                    line.layout.row1OffsetX
-                );
-                line.layout.row1OffsetY = intValue(
-                    layoutObject, QStringLiteral("row1_offset_y"),
-                    line.layout.row1OffsetY
-                );
-                line.layout.row2Align = stringValue(
-                    layoutObject, QStringLiteral("row2_align"),
-                    line.layout.row2Align
-                );
-                line.layout.row2OffsetX = intValue(
-                    layoutObject, QStringLiteral("row2_offset_x"),
-                    line.layout.row2OffsetX
-                );
-                line.layout.row2OffsetY = intValue(
-                    layoutObject, QStringLiteral("row2_offset_y"),
-                    line.layout.row2OffsetY
-                );
-                line.layout.letterSpacingPx = intValue(
-                    layoutObject, QStringLiteral("letter_spacing_px"),
-                    line.layout.letterSpacingPx
-                );
-                line.layout.spaceWidthPercent = std::clamp(
-                    intValue(
-                        layoutObject, QStringLiteral("space_width_percent"),
-                        line.layout.spaceWidthPercent
-                    ),
-                    10,
-                    100
-                );
-                line.layout.allowBiting = layoutObject.value(
-                    QStringLiteral("allow_biting")
-                ).toBool(line.layout.allowBiting);
-                line.layout.rubyIntervalPx = intValue(
-                    layoutObject, QStringLiteral("ruby_interval_px"),
-                    line.layout.rubyIntervalPx
-                );
-                line.layout.rubyAlignment = stringValue(
-                    layoutObject, QStringLiteral("ruby_alignment"),
-                    line.layout.rubyAlignment
-                );
-                line.layout.rubyGapPx = intValue(
-                    layoutObject, QStringLiteral("ruby_gap_px"),
-                    line.layout.rubyGapPx
-                );
-            }
+            applyLineLayoutSection(line, layoutObject);
 
             const QJsonArray chars = lineObject.value(QStringLiteral("chars")).toArray();
             line.chars.reserve(static_cast<std::size_t>(chars.size()));

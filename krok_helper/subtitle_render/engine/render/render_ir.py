@@ -301,6 +301,7 @@ def build_style_patch_ir(
     extra_tracks: list[TimingTrack] | None = None,
     duration_ms: int | None = None,
     include_lines_style: bool = True,
+    include_placement: bool = False,
 ) -> dict[str, Any]:
     """paint scope 差分更新载荷（``gpu_configure_style``）。
 
@@ -318,6 +319,7 @@ def build_style_patch_ir(
     )
     with layout_pass():
         fx_table = FxPayloadTable()
+        layout_table = LineLayoutTable() if include_placement else None
         primary_style = style_for_track(style, track)
         primary_plan = build_track_layout_plan(
             track,
@@ -342,9 +344,13 @@ def build_style_patch_ir(
         if include_lines_style:
             # "titles" scope：标题属性编辑不动轨道与布局签名，行数据完全
             # 不变——省掉逐行 bursts 重规划（Python 侧 ~35ms 大头）。
+            # "layout" scope（include_placement）：改字号/边距/行数后行级
+            # 摆放字段变化，随 lines_style 附带原位更新，字符文本/时间
+            # 不重发。
             lines_style.extend(lines_style_to_ir(
                 track, primary_style, primary_plan, source_index=0,
-                fx_table=fx_table,
+                fx_table=fx_table, include_placement=include_placement,
+                layout_table=layout_table,
             ))
             for source_index, (source, source_style, plan) in enumerate(
                 zip(extra_sources, extra_styles, extra_plans, strict=True), start=1
@@ -352,7 +358,8 @@ def build_style_patch_ir(
                 lines_style.extend(
                     lines_style_to_ir(
                         source, source_style, plan, source_index=source_index,
-                        fx_table=fx_table,
+                        fx_table=fx_table, include_placement=include_placement,
+                        layout_table=layout_table,
                     )
                 )
         return {
@@ -370,4 +377,9 @@ def build_style_patch_ir(
             "fx_sprites": dict(FX_SPRITES),
             **({"lines_style": lines_style} if include_lines_style else {}),
             **fx_table.payload(),
+            **(
+                {"line_layout_table": layout_table.payload()}
+                if layout_table is not None and layout_table.layouts
+                else {}
+            ),
         }
