@@ -1578,13 +1578,15 @@ std::optional<RenderConfig> applyRenderConfigStylePatch(
             patchFxTables.paints.push_back(paint.toObject());
         }
     }
-    if (!applyLineStylePatch(
-            fresh,
-            patch.value(QStringLiteral("lines_style")).toArray(),
-            patchFxTables
-        )) {
-        *error = QStringLiteral("lines_style patch mismatch (line set drifted)");
-        return std::nullopt;
+    if (patch.contains(QStringLiteral("lines_style"))) {
+        if (!applyLineStylePatch(
+                fresh,
+                patch.value(QStringLiteral("lines_style")).toArray(),
+                patchFxTables
+            )) {
+            *error = QStringLiteral("lines_style patch mismatch (line set drifted)");
+            return std::nullopt;
+        }
     }
     buildResolvedStyleCache(fresh);
     return fresh;

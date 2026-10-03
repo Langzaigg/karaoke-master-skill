@@ -480,3 +480,49 @@ def test_vector_glyphs_hash_gate_omits_unchanged_table():
     # 第二次：表省发，哈希仍在；失配时 sidecar 拒绝、发送端回落整表。
     assert "vector_glyphs" not in irs[1]
     assert irs[1]["vector_glyphs_hash"] == irs[0]["vector_glyphs_hash"]
+
+
+def test_titles_patch_omits_lines_style(qapp):
+    """titles scope 差分：行数据不变时省掉 lines_style（载荷与规划成本）。"""
+    from krok_helper.subtitle_render.engine.render.render_ir import (
+        build_style_patch_ir,
+    )
+
+    track = _patch_track()
+    style = _patch_style()
+
+    full = build_style_patch_ir(
+        track, style, width=_WIDTH, height=_HEIGHT, fps=_FPS,
+        duration_ms=4000, include_lines_style=False,
+    )
+    assert "lines_style" not in full
+    # 去重表随 lines_style 一起省发（表只服务于 bursts 引用展开）。
+    assert full["fx_color_table"] == []
+
+
+def test_fx_render_only_params_stay_patch_eligible():
+    """粒子物理参数/装饰档是渲染专属字段：不改变差分闸门的布局签名。"""
+    from krok_helper.subtitle_render.engine.value_signature import (
+        lyric_layout_style_signature,
+    )
+    from krok_helper.subtitle_render.frontend.preview.preview_async import (
+        style_patch_base_key,
+    )
+
+    track = _patch_track()
+    style = _patch_style()
+    base = style_patch_base_key(
+        track, style, [], width=_WIDTH, height=_HEIGHT, fps=_FPS, dpr=1.0
+    )
+    tweaked = style_patch_base_key(
+        track,
+        _patch_style(fx_particle_count=24, fx_particle_size_em=0.6,
+                     sing_fx="twinkle", entry_fx="glow"),
+        [],
+        width=_WIDTH, height=_HEIGHT, fps=_FPS, dpr=1.0,
+    )
+    assert tweaked == base  # 闸门 key 稳定 → 差分可用
+    # 布局签名同样不受 fx 参数影响（计划缓存命中）。
+    assert lyric_layout_style_signature(
+        _patch_style(fx_particle_count=24)
+    ) == lyric_layout_style_signature(style)

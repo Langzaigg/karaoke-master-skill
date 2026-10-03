@@ -612,6 +612,17 @@ _RENDER_ONLY_ANIM_STYLE_FIELDS: frozenset[str] = frozenset({
     "fx_particle_color_mode",
     "fx_particle_role_name",
     "fx_apply_to_entry_exit",
+    # 粒子物理参数（数量/尺寸/单色）与三段装饰档（entry_fx/exit_fx/
+    # sing_fx）、描边闪光、放大曲线：纯绘制参数（值签名已剔除，IR 里随
+    # 行 fx_bursts 下发），改这些走 paint 差分而不必全量重排。
+    "fx_particle_size_em",
+    "fx_particle_count",
+    "fx_particle_color",
+    "entry_fx",
+    "exit_fx",
+    "sing_fx",
+    "karaoke_stroke_flash",
+    "zoom_pulse_curve_level",
 })
 # 出入场动画「类型」字段：类型本身只在跨 ``none`` 边界时改变显示窗口（动画
 # 时间守卫按类型 != none 扩窗），其余组合（fade→slide 等）窗口不动——用逐行

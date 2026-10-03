@@ -300,6 +300,7 @@ def build_style_patch_ir(
     dpr: float = 1.0,
     extra_tracks: list[TimingTrack] | None = None,
     duration_ms: int | None = None,
+    include_lines_style: bool = True,
 ) -> dict[str, Any]:
     """paint scope 差分更新载荷（``gpu_configure_style``）。
 
@@ -337,19 +338,23 @@ def build_style_patch_ir(
             )
             for source, source_style in zip(extra_sources, extra_styles, strict=True)
         ]
-        lines_style: list[dict[str, Any]] = lines_style_to_ir(
-            track, primary_style, primary_plan, source_index=0,
-            fx_table=fx_table,
-        )
-        for source_index, (source, source_style, plan) in enumerate(
-            zip(extra_sources, extra_styles, extra_plans, strict=True), start=1
-        ):
-            lines_style.extend(
-                lines_style_to_ir(
-                    source, source_style, plan, source_index=source_index,
-                    fx_table=fx_table,
+        lines_style: list[dict[str, Any]] = []
+        if include_lines_style:
+            # "titles" scope：标题属性编辑不动轨道与布局签名，行数据完全
+            # 不变——省掉逐行 bursts 重规划（Python 侧 ~35ms 大头）。
+            lines_style.extend(lines_style_to_ir(
+                track, primary_style, primary_plan, source_index=0,
+                fx_table=fx_table,
+            ))
+            for source_index, (source, source_style, plan) in enumerate(
+                zip(extra_sources, extra_styles, extra_plans, strict=True), start=1
+            ):
+                lines_style.extend(
+                    lines_style_to_ir(
+                        source, source_style, plan, source_index=source_index,
+                        fx_table=fx_table,
+                    )
                 )
-            )
         return {
             "schema": RENDER_IR_SCHEMA,
             "screen": {
@@ -363,6 +368,6 @@ def build_style_patch_ir(
             ),
             "titles": titles_to_ir(track, style, duration_ms=duration_ms),
             "fx_sprites": dict(FX_SPRITES),
-            "lines_style": lines_style,
+            **({"lines_style": lines_style} if include_lines_style else {}),
             **fx_table.payload(),
         }

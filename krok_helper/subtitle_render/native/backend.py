@@ -1015,7 +1015,10 @@ class NativeRendererProcess:
             "style": style_ir["style"],
             "titles": style_ir["titles"],
             "fx_sprites": style_ir["fx_sprites"],
-            "lines_style": style_ir["lines_style"],
+            # lines_style 可省（titles scope 行数据不变时），sidecar 保留
+            # 既有行级样式字段。
+            **({"lines_style": style_ir["lines_style"]}
+               if "lines_style" in style_ir else {}),
             # 发射边界去重表（schema 3 开发期）：lines_style 的 bursts 用
             # color_id/paint_id 引用，表必须随载荷同发。
             "fx_color_table": style_ir.get("fx_color_table", []),

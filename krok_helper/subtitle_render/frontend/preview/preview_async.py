@@ -1010,7 +1010,7 @@ class GpuAsyncSubtitleRenderer(QObject):
                     if needs_configure:
                         style_patched = False
                         if (
-                            relayout_scope == "paint"
+                            relayout_scope in ("paint", "titles")
                             # 差分重放（2026-10-03 起默认启用）：闸门 key 相等
                             # ⇔ 轨道/布局签名/画面全部没变，sidecar 只重放
                             # style/titles/fx_sprites/行级样式段。现象B 根因
@@ -1041,6 +1041,9 @@ class GpuAsyncSubtitleRenderer(QObject):
                                         dpr=dpr,
                                         extra_tracks=extra_tracks,
                                         duration_ms=duration_ms,
+                                        include_lines_style=(
+                                            relayout_scope != "titles"
+                                        ),
                                     ),
                                     force_warp=force_warp,
                                     prewarm_t_ms=t_ms,
