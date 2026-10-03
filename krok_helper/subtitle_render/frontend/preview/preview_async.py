@@ -320,6 +320,15 @@ class NativePreviewFrameCache:
             # store() 已复制一份私有拷贝；pop 后缓存不再持有引用，直接移交即可。
             return self._images.pop(self._key(t_ms), None)
 
+    def peek(self, t_ms: int) -> Optional[QImage]:
+        """非消费式查询：命中时保留缓存条目，供反复查看同一帧零重渲。"""
+        with self._lock:
+            return self._images.get(self._key(t_ms))
+
+    def has(self, t_ms: int) -> bool:
+        with self._lock:
+            return self._key(t_ms) in self._images
+
     def clear(self) -> None:
         with self._lock:
             self._images.clear()
@@ -672,6 +681,12 @@ class GpuAsyncSubtitleRenderer(QObject):
         self._frame_cache = NativePreviewFrameCache(
             max(self._max_lookahead_frames + self._worker_count_requested + 1, 1)
         )
+        # 暂停/逐帧步进时的邻域预热队列（2026-10）：暂停态预渲染不跟随
+        # 媒体时钟（那是播放态 lookahead 的语义），改为围绕暂停锚点按
+        # ±1、±2…顺序补帧，单帧步进秒开。有界（≤8 帧），只填空闲 pending。
+        self._paused_neighborhood: deque[int] = deque()
+        # 暂停邻域预热的每侧帧数；测试用它归零以获得精确渲染序列。
+        self._paused_prewarm_per_side = 4
         self._renderer_owner = NativeRendererProcessOwner(
             process_factory=NativeRendererProcess,
             response_timeout_s=2.0,
@@ -788,7 +803,34 @@ class GpuAsyncSubtitleRenderer(QObject):
                 if not self._needs_configure:
                     self._needs_target_resize = True
                 self._pending = None
-                self._frame_cache.clear()
+                # 尺寸变化 = 场景身份变化：清空并按新帧字节数重算容量。
+                # 帧缓存预算（默认 256MB，KROK_SUBTITLE_PREVIEW_FRAME_CACHE_MB
+                # 可调）：容量 = 预算 / 帧字节，夹在 [16, 64]。大窗口 4K 栅格
+                # 一帧 ~15MB → ~17 帧（播放窗口 + 访问锚点共用，LRU 驱逐）；
+                # 小窗 ~7MB/帧 → ~36 帧。跳变不清缓存——帧内容是 (t, 场景)
+                # 的纯函数，只有场景身份变化才失效。
+                frame_bytes = max(
+                    int(
+                        round(
+                            self._logical_w
+                            * self._device_pixel_ratio
+                            * self._logical_h
+                            * self._device_pixel_ratio
+                            * 4.0
+                        )
+                    ),
+                    1,
+                )
+                budget_mb = _env_int(
+                    "KROK_SUBTITLE_PREVIEW_FRAME_CACHE_MB",
+                    256,
+                    minimum=32,
+                )
+                capacity = max(
+                    16,
+                    min(64, budget_mb * 1024 * 1024 // frame_bytes),
+                )
+                self._frame_cache = NativePreviewFrameCache(capacity)
                 # QSharedMemory cannot resize an existing named segment. Give
                 # each render-target generation its own key while preserving
                 # the sidecar/GPU device across ordinary frame requests.
@@ -840,7 +882,10 @@ class GpuAsyncSubtitleRenderer(QObject):
         requested_t = self._frame_cache.timestamp_for_key(
             self._frame_cache.key_for(requested_t)
         )
-        cached = None if self._native_preview else self._frame_cache.take(requested_t)
+        # peek（非消费）：命中后条目留在缓存里，暂停时反复查看同一帧、
+        # 或 A-B 循环对比两个位置不再逐次重渲。移交的 QImage 是 store()
+        # 时拷贝的私有对象，缓存与 GUI 共享只读引用是安全的。
+        cached = None if self._native_preview else self._frame_cache.peek(requested_t)
         with self._condition:
             if self._stopped:
                 return
@@ -853,8 +898,9 @@ class GpuAsyncSubtitleRenderer(QObject):
                 previous_generation = self._generation
                 self._generation += 1
                 self._pending = None
-                self._frame_cache.clear()
-                cached = None
+                # 不清帧缓存：帧内容是 (t, 场景) 的纯函数，跳变不会让旧
+                # 条目失效；容量由字节预算 + LRU 驱逐控制（2026-10）。
+                # 点击句子大跳变后跳回访问过的位置可直接命中。
                 self._cancel_native_generation_locked(previous_generation)
             self._latest_t = requested_t
             self._note("requests")
@@ -870,8 +916,22 @@ class GpuAsyncSubtitleRenderer(QObject):
                 self._replace_pending_locked(
                     self._pipeline_anchor_timestamp(requested_t), serial, True
                 )
-            elif cached is None:
-                self._replace_pending_locked(requested_t, serial, False)
+            else:
+                if cached is None:
+                    self._replace_pending_locked(requested_t, serial, False)
+                elif not self._playing:
+                    # 命中且暂停：直接预热邻域（当前帧零成本到手）。
+                    self._paused_neighborhood = self._paused_neighbor_targets(
+                        requested_t
+                    )
+                    self._schedule_paused_neighbor_locked(self._generation)
+            if not self._playing:
+                # 暂停锚点：未命中时本帧先渲，交付后再开始邻域预热。
+                self._paused_neighborhood = self._paused_neighbor_targets(
+                    requested_t
+                )
+            else:
+                self._paused_neighborhood.clear()
             self._condition.notify()
 
     def set_playing(self, playing: bool) -> None:
@@ -1275,11 +1335,21 @@ class GpuAsyncSubtitleRenderer(QObject):
                     image.setDevicePixelRatio(dpr)
                     if speculative:
                         self._cache_speculative(image, t_ms, generation)
+                        if not self._playing:
+                            with self._condition:
+                                self._schedule_paused_neighbor_locked(generation)
                     elif self._may_emit(t_ms, generation):
                         self._note("frames_emitted")
+                        # 用户请求的帧入缓存并按 LRU 触碰：跳走再跳回该句
+                        # 时直接命中（帧内容是 (t, 场景) 的纯函数，跳变不清
+                        # 缓存——见 request() 的跳变分支）。
+                        self._frame_cache.store(t_ms, image)
                         self.frame_ready.emit(image, int(t_ms))
                         self._schedule_lookahead(t_ms, serial, generation)
                         self._note_backend_mode("gpu")
+                        if not self._playing:
+                            with self._condition:
+                                self._schedule_paused_neighbor_locked(generation)
                     else:
                         self._note("stale_frames_dropped")
                 except Exception as exc:  # noqa: BLE001 - worker 线程必须自愈
@@ -1476,10 +1546,17 @@ class GpuAsyncSubtitleRenderer(QObject):
             image.setDevicePixelRatio(dpr)
             if is_speculative:
                 self._cache_speculative(image, request_t, generation)
+                if not self._playing:
+                    with self._condition:
+                        self._schedule_paused_neighbor_locked(generation)
             elif self._may_emit(request_t, generation):
                 self._note("frames_emitted")
+                self._frame_cache.store(request_t, image)
                 self.frame_ready.emit(image, request_t)
                 self._note_backend_mode("gpu")
+                if not self._playing:
+                    with self._condition:
+                        self._schedule_paused_neighbor_locked(generation)
             else:
                 self._note("stale_frames_dropped")
 
@@ -1511,7 +1588,13 @@ class GpuAsyncSubtitleRenderer(QObject):
             if self._stopped or generation != self._generation or self._latest_t is None:
                 self._note("stale_frames_dropped")
                 return
-            if self._frame_cache.key_for(t_ms) < self._frame_cache.key_for(self._latest_t):
+            if (
+                self._playing
+                and self._frame_cache.key_for(t_ms)
+                < self._frame_cache.key_for(self._latest_t)
+            ):
+                # 播放态时钟只前进，向后帧必然过期——丢。暂停态例外：
+                # 邻域预热刻意渲染 ±两侧（单帧回退步进），向后帧必须入缓存。
                 self._note("stale_frames_dropped")
                 return
         self._frame_cache.store(t_ms, image)
@@ -1536,6 +1619,28 @@ class GpuAsyncSubtitleRenderer(QObject):
             )
             self._note_max_pending(1)
             self._condition.notify()
+
+    def _paused_neighbor_targets(self, t_ms: int) -> deque:
+        """暂停锚点周围的预热目标：±1、±2…交错，最多 8 帧（每侧 4）。"""
+        targets: deque = deque()
+        step = int(round(1000.0 / 60.0))
+        per_side = max(0, int(self._paused_prewarm_per_side))
+        for k in range(1, per_side + 1):
+            targets.append(t_ms + k * step)
+            targets.append(t_ms - k * step)
+        return targets
+
+    def _schedule_paused_neighbor_locked(self, generation: int) -> None:
+        """把下一个未缓存的邻域帧填进空闲 pending（latest-wins 不覆盖）。"""
+        if self._playing or self._pending is not None or self._stopped:
+            return
+        while self._paused_neighborhood:
+            t = self._paused_neighborhood.popleft()
+            if t < 0 or self._frame_cache.has(t):
+                continue
+            self._pending = (t, self._request_serial, True, time.monotonic())
+            self._condition.notify()
+            return
 
     @staticmethod
     def _next_frame_timestamp(t_ms: int) -> int:
