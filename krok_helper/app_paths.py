@@ -115,6 +115,22 @@ def _repair_target_names() -> tuple[str, ...]:
     return tuple(names)
 
 
+def settings_text_needs_legacy_repair(text: str) -> bool:
+    """粗闸门：``settings.json`` 原文里连一个已知应用数据目录名都没出现时，
+    逐值修复遍历必然空手，可以直接跳过。
+
+    修复只可能改写「位于某个已知应用数据目录之下」的绝对路径；目录名一个
+    都不在文本里，就不存在这种路径。闸门只做小写子串匹配，把每次读取配置
+    都要付的全树遍历（数千个字符串逐个判定）降为文件内容真正可能含旧路径
+    时才付。
+    """
+
+    if not text:
+        return False
+    lowered = text.lower()
+    return any(name.lower() in lowered for name in _known_app_dir_names())
+
+
 def repair_legacy_appdata_path(raw: str) -> str | None:
     """把指向旧应用名数据目录且已失效的绝对路径，改写到当前名下确实存在的那份。
 

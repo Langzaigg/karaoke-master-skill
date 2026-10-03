@@ -888,55 +888,22 @@ ResolvedStyle resolvedStyleFromTitle(
 
 void buildResolvedStyleCache(RenderConfig &cfg);
 
-std::optional<RenderConfig> parseRenderConfig(const QJsonObject &ir, QString *error) {
-    if (ir.value(QStringLiteral("schema")).toInt() != kRenderIrSchema) {
-        *error = QStringLiteral("unsupported Render IR schema");
-        return std::nullopt;
-    }
-
-    RenderConfig cfg;
-    // Schema 2：根级矢量导唱符轮廓表。相同 SVG 符号只出现一次，字符通过
-    // ``vector_glyph_id`` 引用；共享同一不可变对象使 D2D geometry 可按符号缓存。
-    const QJsonObject vectorGlyphTable = ir.value(QStringLiteral("vector_glyphs")).toObject();
-    for (auto it = vectorGlyphTable.constBegin(); it != vectorGlyphTable.constEnd(); ++it) {
-        if (auto glyph = parseVectorGlyph(it.value())) {
-            cfg.vectorGlyphs.insert(
-                it.key(),
-                std::make_shared<const krok::subtitle::native::VectorGlyph>(std::move(*glyph))
-            );
-        }
-    }
-    // 装饰粒子 sprite 轮廓表（fx_sprites；Python 常量单一事实源，随场景下发）。
-    const QJsonObject fxSpriteTable = ir.value(QStringLiteral("fx_sprites")).toObject();
+void applyFxSpriteSection(RenderConfig &cfg, const QJsonObject &fxSpriteTable) {
     for (auto it = fxSpriteTable.constBegin(); it != fxSpriteTable.constEnd(); ++it) {
         if (auto glyph = parseVectorGlyph(it.value())) {
             cfg.fxSprites.insert(it.key(), std::move(*glyph));
         }
     }
-    const auto resolveVectorGlyph = [&cfg](const QJsonObject &charObject) {
-        const QString glyphId = stringValue(
-            charObject, QStringLiteral("vector_glyph_id")
-        );
-        if (!glyphId.isEmpty()) {
-            return cfg.vectorGlyphs.value(glyphId, nullptr);
-        }
-        // 旧内嵌格式（无符号表）：按值解析后包装成共享指针。
-        if (auto glyph = parseVectorGlyph(
-                charObject.value(QStringLiteral("vector_glyph"))
-            )) {
-            return std::shared_ptr<const krok::subtitle::native::VectorGlyph>(
-                new krok::subtitle::native::VectorGlyph(std::move(*glyph))
-            );
-        }
-        return std::shared_ptr<const krok::subtitle::native::VectorGlyph>();
-    };
-    const QJsonObject screen = ir.value(QStringLiteral("screen")).toObject();
+}
+
+void applyScreenSection(RenderConfig &cfg, const QJsonObject &screen) {
     cfg.width = std::max(1, intValue(screen, QStringLiteral("width"), cfg.width));
     cfg.height = std::max(1, intValue(screen, QStringLiteral("height"), cfg.height));
     cfg.fps = std::max(1, intValue(screen, QStringLiteral("fps"), cfg.fps));
     cfg.dpr = std::clamp(screen.value(QStringLiteral("dpr")).toDouble(1.0), 0.01, 4.0);
+}
 
-    const QJsonObject style = ir.value(QStringLiteral("style")).toObject();
+void applyStyleSection(RenderConfig &cfg, const QJsonObject &style) {
     ResolvedStyle &base = cfg.baseStyle;
     applySignalStyleOverrides(base, style);
     base.fontFamily = stringValue(style, QStringLiteral("font_family"), base.fontFamily);
@@ -1309,41 +1276,44 @@ std::optional<RenderConfig> parseRenderConfig(const QJsonObject &ir, QString *er
         refreshLegacyRubyFills(base);
     }
 
-    std::vector<QJsonObject> sourceTracks;
-    sourceTracks.push_back(ir.value(QStringLiteral("track")).toObject());
-    const QJsonArray extraTracks = ir.value(QStringLiteral("extra_tracks")).toArray();
-    sourceTracks.reserve(1 + static_cast<std::size_t>(extraTracks.size()));
-    for (const auto &trackValue : extraTracks) {
-        if (trackValue.isObject()) {
-            sourceTracks.push_back(trackValue.toObject());
-        }
+}
+
+namespace {
+
+struct FxTables {
+    std::vector<QString> colors;
+    std::vector<QJsonObject> paints;
+};
+
+const QString &fxTableColor(const FxTables &tables, int index) {
+    static const QString kEmpty;
+    if (index < 0 || static_cast<std::size_t>(index) >= tables.colors.size()) {
+        return kEmpty;
     }
-    for (std::size_t sourceIndex = 0; sourceIndex < sourceTracks.size(); ++sourceIndex) {
-        const QJsonObject &track = sourceTracks[sourceIndex];
-        const int sourceOffsetMs = intValue(
-            track.value(QStringLiteral("meta")).toObject(),
-            QStringLiteral("offset_ms"),
-            0
-        );
-        if (sourceIndex == 0) {
-            cfg.primaryTrackOffsetMs = sourceOffsetMs;
-        }
-        const QJsonArray lines = track.value(QStringLiteral("lines")).toArray();
-        for (int sourceLineIndex = 0; sourceLineIndex < lines.size(); ++sourceLineIndex) {
-            const QJsonObject lineObject = lines.at(sourceLineIndex).toObject();
-            TimingLine line;
-            line.endMs = intValue(lineObject, QStringLiteral("end_ms"), 0);
-            line.singerLabel = stringValue(lineObject, QStringLiteral("singer_label"));
-            line.singerId = intValue(lineObject, QStringLiteral("singer_id"), -1);
-            line.sourceIndex = static_cast<int>(sourceIndex);
-            line.sourceLineIndex = sourceLineIndex;
-            line.trackLineIndex = intValue(
-                lineObject, QStringLiteral("track_line_index"), -1
-            );
-            line.pageIndex = intValue(lineObject, QStringLiteral("page_index"), -1);
-            line.pageLineCount = std::max(
-                0, intValue(lineObject, QStringLiteral("page_line_count"), 0)
-            );
+    return tables.colors[static_cast<std::size_t>(index)];
+}
+
+QJsonObject fxTablePaint(const FxTables &tables, int index) {
+    if (index < 0 || static_cast<std::size_t>(index) >= tables.paints.size()) {
+        return QJsonObject();
+    }
+    return tables.paints[static_cast<std::size_t>(index)];
+}
+
+}  // namespace
+
+static void applyLineStyleSection(
+    TimingLine &line,
+    const QJsonObject &lineObject,
+    const QString &karaokeFallbackBase,
+    const FxTables &fxTables
+) {
+    // 行级样式派生字段（信号旗标 + 出入场/唱字动画 + 装饰粒子）。
+    // 全量解析（parseSourceTracks）与差分更新（applyLineStylePatch）
+    // 共用同一份代码，两处口径不漂移。其余字段都是赋值型；bursts 是
+    // 唯一的累积型（push_back）——差分合并时行上带着上一版的 bursts，
+    // 不先清空会把差分载荷追加成两倍（2026-10 现象B 根因）。
+    line.fxBursts.clear();
             // Default true: an IR from an older Python host has no stamp, and
             // the pre-change behavior (bars on every line) must survive that
             // pairing. New IRs always stamp the flag explicitly.
@@ -1356,60 +1326,6 @@ std::optional<RenderConfig> parseRenderConfig(const QJsonObject &ir, QString *er
             ).toBool(false);
             // Python 在源加载入口把整行时间戳严格逆序的行镜像理顺为顺序，
             // 并只在此处打标记；sidecar 据此对齐 Painter 的反向走字。
-            line.wipeReverse = lineObject.value(
-                QStringLiteral("wipe_reverse")
-            ).toBool(false);
-            line.sourceOffsetMs = sourceOffsetMs;
-            line.lane = std::max(0, intValue(lineObject, QStringLiteral("lane"), 0));
-            line.layoutOffsetX = lineObject.value(
-                QStringLiteral("layout_offset_x")
-            ).toDouble(0.0);
-            line.layoutOffsetY = lineObject.value(
-                QStringLiteral("layout_offset_y")
-            ).toDouble(0.0);
-            const QJsonArray placementWindows = lineObject.value(
-                QStringLiteral("layout_offset_windows")
-            ).toArray();
-            line.placementWindows.reserve(
-                static_cast<std::size_t>(placementWindows.size())
-            );
-            for (const QJsonValue &placementValue : placementWindows) {
-                const QJsonObject placement = placementValue.toObject();
-                const int startMs = intValue(
-                    placement, QStringLiteral("start_ms"), 0
-                );
-                const int endMs = intValue(
-                    placement, QStringLiteral("end_ms"), 0
-                );
-                if (endMs <= startMs) {
-                    continue;
-                }
-                line.placementWindows.push_back(
-                    krok::subtitle::native::PlacementWindow{
-                        startMs,
-                        endMs,
-                        static_cast<float>(placement.value(
-                            QStringLiteral("offset_x")
-                        ).toDouble(0.0)),
-                        static_cast<float>(placement.value(
-                            QStringLiteral("offset_y")
-                        ).toDouble(0.0)),
-                    }
-                );
-            }
-            if (lineObject.value(QStringLiteral("display_start_ms")).isDouble()) {
-                line.displayStartMs = lineObject.value(
-                    QStringLiteral("display_start_ms")
-                ).toInt();
-            }
-            if (lineObject.value(QStringLiteral("display_end_ms")).isDouble()) {
-                line.displayEndMs = lineObject.value(
-                    QStringLiteral("display_end_ms")
-                ).toInt();
-            }
-            line.centerOverride = lineObject.value(
-                QStringLiteral("center_override")
-            ).toBool(false);
             line.entryAnimation = stringValue(
                 lineObject, QStringLiteral("entry_anim"), QStringLiteral("none")
             );
@@ -1422,7 +1338,7 @@ std::optional<RenderConfig> parseRenderConfig(const QJsonObject &ir, QString *er
             line.exitDurationMs = std::max(
                 0, intValue(lineObject, QStringLiteral("exit_duration_ms"), 0)
             );
-            QString karaokeFallback = cfg.karaokeAnim;
+            QString karaokeFallback = karaokeFallbackBase;
             if (karaokeFallback == QStringLiteral("inherit")) {
                 karaokeFallback = (
                     line.entryAnimation == QStringLiteral("utopia")
@@ -1488,16 +1404,32 @@ std::optional<RenderConfig> parseRenderConfig(const QJsonObject &ir, QString *er
                 burst.sweep = intValue(
                     burstObject, QStringLiteral("sweep"), 0
                 );
-                burst.color = stringValue(
-                    burstObject, QStringLiteral("color"),
-                    QStringLiteral("#FFFFFF")
-                );
+                // 表化（schema 3 开发期）：color_id/paint_id 引用根级
+                // fx_color_table/fx_paint_table；无 id 键回退内联（旧格式
+                // /对照路径共用同一份解析）。
+                const bool hasColorId = burstObject.value(
+                    QStringLiteral("color_id")
+                ).isDouble();
+                burst.color = hasColorId
+                    ? fxTableColor(
+                        fxTables,
+                        burstObject.value(QStringLiteral("color_id")).toInt()
+                    )
+                    : stringValue(
+                        burstObject, QStringLiteral("color"),
+                        QStringLiteral("#FFFFFF")
+                    );
                 // 2026-10 粒子装饰规格（颜色模式非单色时随 burst 下发）：
                 // fill/stroke/stroke2 为 PaintFill dict，宽度已按粒子尺寸
                 // 缩放。旧 IR 无 "paint" 键 → hasPaint=false 走实色路径。
                 const QJsonObject paintObject = burstObject.value(
-                    QStringLiteral("paint")
-                ).toObject();
+                    QStringLiteral("paint_id")
+                ).isDouble()
+                    ? fxTablePaint(
+                        fxTables,
+                        burstObject.value(QStringLiteral("paint_id")).toInt()
+                    )
+                    : burstObject.value(QStringLiteral("paint")).toObject();
                 if (!paintObject.isEmpty()) {
                     burst.hasPaint = true;
                     burst.fill = paintFillSpec(
@@ -1525,9 +1457,21 @@ std::optional<RenderConfig> parseRenderConfig(const QJsonObject &ir, QString *er
                         0.0
                     );
                 }
-                const QJsonArray charColorsArray = burstObject.value(
-                    QStringLiteral("char_colors")
-                ).toArray();
+                QJsonArray charColorsArray;
+                if (burstObject.contains(QStringLiteral("char_color_ids"))) {
+                    const QJsonArray charColorIds = burstObject.value(
+                        QStringLiteral("char_color_ids")
+                    ).toArray();
+                    for (const QJsonValue &idValue : charColorIds) {
+                        charColorsArray.append(
+                            fxTableColor(fxTables, idValue.toInt())
+                        );
+                    }
+                } else {
+                    charColorsArray = burstObject.value(
+                        QStringLiteral("char_colors")
+                    ).toArray();
+                }
                 for (const QJsonValue &value : charColorsArray) {
                     const QString hex = value.toString();
                     if (!hex.isEmpty()) {
@@ -1539,9 +1483,247 @@ std::optional<RenderConfig> parseRenderConfig(const QJsonObject &ir, QString *er
                     line.fxBursts.push_back(std::move(burst));
                 }
             }
-            const QJsonObject layoutObject = lineObject.value(
-                QStringLiteral("layout")
-            ).toObject();
+}
+
+bool applyLineStylePatch(
+    RenderConfig &cfg,
+    const QJsonArray &linesStyle,
+    const FxTables &fxTables
+) {
+    // 差分行级样式合并：按 (source_index, source_line_index) 一一对齐。
+    // 行数对不上或键缺失 = 配置漂移，返回 false 让调用方整份重配。
+    QHash<quint64, QJsonObject> entries;
+    for (const QJsonValue &value : linesStyle) {
+        const QJsonObject entry = value.toObject();
+        if (entry.isEmpty()) {
+            continue;
+        }
+        const int sourceIndex = intValue(
+            entry, QStringLiteral("source_index"), -1
+        );
+        const int sourceLineIndex = intValue(
+            entry, QStringLiteral("source_line_index"), -1
+        );
+        if (sourceIndex < 0 || sourceLineIndex < 0) {
+            return false;
+        }
+        const quint64 key = (static_cast<quint64>(static_cast<uint>(sourceIndex)) << 32)
+            | static_cast<quint64>(static_cast<uint>(sourceLineIndex));
+        entries.insert(key, entry);
+    }
+    if (entries.size() != static_cast<int>(cfg.lines.size())) {
+        return false;
+    }
+    for (TimingLine &line : cfg.lines) {
+        const quint64 key = (static_cast<quint64>(static_cast<uint>(line.sourceIndex)) << 32)
+            | static_cast<quint64>(static_cast<uint>(line.sourceLineIndex));
+        const auto it = entries.constFind(key);
+        if (it == entries.constEnd()) {
+            return false;
+        }
+        applyLineStyleSection(line, it.value(), cfg.karaokeAnim, fxTables);
+    }
+    return true;
+}
+
+std::optional<RenderConfig> applyRenderConfigStylePatch(
+    const QJsonObject &patch,
+    const RenderConfig &current,
+    QString *error
+) {
+    // 样式派生状态在全新默认构造的 config 上重放（键缺席 → 默认值，与
+    // 全量解析一致）；行数据派生状态从 current 搬运——这正是差分命令省
+    // 掉的整轨重序列化与大 JSON 重解析。
+    const QJsonObject screen = patch.value(QStringLiteral("screen")).toObject();
+    RenderConfig screenProbe;
+    applyScreenSection(screenProbe, screen);
+    if (screenProbe.width != current.width
+        || screenProbe.height != current.height
+        || screenProbe.fps != current.fps
+        || std::abs(screenProbe.dpr - current.dpr) > 1e-9) {
+        *error = QStringLiteral("patch target mismatch (screen section changed)");
+        return std::nullopt;
+    }
+    RenderConfig fresh;
+    applyScreenSection(fresh, screen);
+    applyStyleSection(
+        fresh, patch.value(QStringLiteral("style")).toObject()
+    );
+    applyFxSpriteSection(
+        fresh, patch.value(QStringLiteral("fx_sprites")).toObject()
+    );
+    fresh.titles = patch.value(QStringLiteral("titles")).toArray();
+    fresh.primaryTrackOffsetMs = current.primaryTrackOffsetMs;
+    fresh.vectorGlyphs = current.vectorGlyphs;
+    fresh.lines = current.lines;
+    fresh.rubies = current.rubies;
+    FxTables patchFxTables;
+    {
+        const QJsonArray colorTable = patch.value(
+            QStringLiteral("fx_color_table")
+        ).toArray();
+        patchFxTables.colors.reserve(
+            static_cast<std::size_t>(colorTable.size())
+        );
+        for (const QJsonValue &color : colorTable) {
+            patchFxTables.colors.push_back(color.toString());
+        }
+        const QJsonArray paintTable = patch.value(
+            QStringLiteral("fx_paint_table")
+        ).toArray();
+        patchFxTables.paints.reserve(
+            static_cast<std::size_t>(paintTable.size())
+        );
+        for (const QJsonValue &paint : paintTable) {
+            patchFxTables.paints.push_back(paint.toObject());
+        }
+    }
+    if (!applyLineStylePatch(
+            fresh,
+            patch.value(QStringLiteral("lines_style")).toArray(),
+            patchFxTables
+        )) {
+        *error = QStringLiteral("lines_style patch mismatch (line set drifted)");
+        return std::nullopt;
+    }
+    buildResolvedStyleCache(fresh);
+    return fresh;
+}
+
+static void parseSourceTracks(
+    const QJsonObject &ir,
+    RenderConfig &cfg,
+    const FxTables &fxTables,
+    const std::vector<QJsonObject> &lineLayoutTable
+) {
+    const auto resolveVectorGlyph = [&cfg](const QJsonObject &charObject) {
+        const QString glyphId = stringValue(
+            charObject, QStringLiteral("vector_glyph_id")
+        );
+        if (!glyphId.isEmpty()) {
+            return cfg.vectorGlyphs.value(glyphId, nullptr);
+        }
+        // 旧内嵌格式（无符号表）：按值解析后包装成共享指针。
+        if (auto glyph = parseVectorGlyph(
+                charObject.value(QStringLiteral("vector_glyph"))
+            )) {
+            return std::shared_ptr<const krok::subtitle::native::VectorGlyph>(
+                new krok::subtitle::native::VectorGlyph(std::move(*glyph))
+            );
+        }
+        return std::shared_ptr<const krok::subtitle::native::VectorGlyph>();
+    };
+    std::vector<QJsonObject> sourceTracks;
+    sourceTracks.push_back(ir.value(QStringLiteral("track")).toObject());
+    const QJsonArray extraTracks = ir.value(QStringLiteral("extra_tracks")).toArray();
+    sourceTracks.reserve(1 + static_cast<std::size_t>(extraTracks.size()));
+    for (const auto &trackValue : extraTracks) {
+        if (trackValue.isObject()) {
+            sourceTracks.push_back(trackValue.toObject());
+        }
+    }
+    for (std::size_t sourceIndex = 0; sourceIndex < sourceTracks.size(); ++sourceIndex) {
+        const QJsonObject &track = sourceTracks[sourceIndex];
+        const int sourceOffsetMs = intValue(
+            track.value(QStringLiteral("meta")).toObject(),
+            QStringLiteral("offset_ms"),
+            0
+        );
+        if (sourceIndex == 0) {
+            cfg.primaryTrackOffsetMs = sourceOffsetMs;
+        }
+        const QJsonArray lines = track.value(QStringLiteral("lines")).toArray();
+        for (int sourceLineIndex = 0; sourceLineIndex < lines.size(); ++sourceLineIndex) {
+            const QJsonObject lineObject = lines.at(sourceLineIndex).toObject();
+            TimingLine line;
+            line.endMs = intValue(lineObject, QStringLiteral("end_ms"), 0);
+            line.singerLabel = stringValue(lineObject, QStringLiteral("singer_label"));
+            line.singerId = intValue(lineObject, QStringLiteral("singer_id"), -1);
+            line.sourceIndex = static_cast<int>(sourceIndex);
+            line.sourceLineIndex = sourceLineIndex;
+            line.trackLineIndex = intValue(
+                lineObject, QStringLiteral("track_line_index"), -1
+            );
+            line.pageIndex = intValue(lineObject, QStringLiteral("page_index"), -1);
+            line.pageLineCount = std::max(
+                0, intValue(lineObject, QStringLiteral("page_line_count"), 0)
+            );
+            line.wipeReverse = lineObject.value(
+                QStringLiteral("wipe_reverse")
+            ).toBool(false);
+            line.sourceOffsetMs = sourceOffsetMs;
+            line.lane = std::max(0, intValue(lineObject, QStringLiteral("lane"), 0));
+            line.layoutOffsetX = lineObject.value(
+                QStringLiteral("layout_offset_x")
+            ).toDouble(0.0);
+            line.layoutOffsetY = lineObject.value(
+                QStringLiteral("layout_offset_y")
+            ).toDouble(0.0);
+            const QJsonArray placementWindows = lineObject.value(
+                QStringLiteral("layout_offset_windows")
+            ).toArray();
+            line.placementWindows.reserve(
+                static_cast<std::size_t>(placementWindows.size())
+            );
+            for (const QJsonValue &placementValue : placementWindows) {
+                const QJsonObject placement = placementValue.toObject();
+                const int startMs = intValue(
+                    placement, QStringLiteral("start_ms"), 0
+                );
+                const int endMs = intValue(
+                    placement, QStringLiteral("end_ms"), 0
+                );
+                if (endMs <= startMs) {
+                    continue;
+                }
+                line.placementWindows.push_back(
+                    krok::subtitle::native::PlacementWindow{
+                        startMs,
+                        endMs,
+                        static_cast<float>(placement.value(
+                            QStringLiteral("offset_x")
+                        ).toDouble(0.0)),
+                        static_cast<float>(placement.value(
+                            QStringLiteral("offset_y")
+                        ).toDouble(0.0)),
+                    }
+                );
+            }
+            if (lineObject.value(QStringLiteral("display_start_ms")).isDouble()) {
+                line.displayStartMs = lineObject.value(
+                    QStringLiteral("display_start_ms")
+                ).toInt();
+            }
+            if (lineObject.value(QStringLiteral("display_end_ms")).isDouble()) {
+                line.displayEndMs = lineObject.value(
+                    QStringLiteral("display_end_ms")
+                ).toInt();
+            }
+            line.centerOverride = lineObject.value(
+                QStringLiteral("center_override")
+            ).toBool(false);
+            applyLineStyleSection(
+                line, lineObject, cfg.karaokeAnim, fxTables
+            );
+            // 表化（schema 3 开发期）：layout_id 引用根级 line_layout_table；
+            // 无 id 键回退内联 layout 对象。
+            QJsonObject layoutObject;
+            if (lineObject.value(QStringLiteral("layout_id")).isDouble()) {
+                const int layoutId = lineObject.value(
+                    QStringLiteral("layout_id")
+                ).toInt();
+                if (layoutId >= 0
+                    && static_cast<std::size_t>(layoutId)
+                        < lineLayoutTable.size()) {
+                    layoutObject = lineLayoutTable[
+                        static_cast<std::size_t>(layoutId)
+                    ];
+                }
+            } else {
+                layoutObject = lineObject.value(
+                    QStringLiteral("layout")
+                ).toObject();
+            }
             if (!layoutObject.isEmpty()) {
                 line.layout.present = true;
                 line.layout.lineYPosition = stringValue(
@@ -1713,6 +1895,61 @@ std::optional<RenderConfig> parseRenderConfig(const QJsonObject &ir, QString *er
             cfg.rubies.push_back(std::move(ruby));
         }
     }
+
+}
+
+std::optional<RenderConfig> parseRenderConfig(const QJsonObject &ir, QString *error) {
+    if (ir.value(QStringLiteral("schema")).toInt() != kRenderIrSchema) {
+        *error = QStringLiteral("unsupported Render IR schema");
+        return std::nullopt;
+    }
+
+    RenderConfig cfg;
+    // Schema 2：根级矢量导唱符轮廓表。相同 SVG 符号只出现一次，字符通过
+    // ``vector_glyph_id`` 引用；共享同一不可变对象使 D2D geometry 可按符号缓存。
+    const QJsonObject vectorGlyphTable = ir.value(QStringLiteral("vector_glyphs")).toObject();
+    for (auto it = vectorGlyphTable.constBegin(); it != vectorGlyphTable.constEnd(); ++it) {
+        if (auto glyph = parseVectorGlyph(it.value())) {
+            cfg.vectorGlyphs.insert(
+                it.key(),
+                std::make_shared<const krok::subtitle::native::VectorGlyph>(std::move(*glyph))
+            );
+        }
+    }
+    applyFxSpriteSection(cfg, ir.value(QStringLiteral("fx_sprites")).toObject());
+    applyScreenSection(cfg, ir.value(QStringLiteral("screen")).toObject());
+    applyStyleSection(cfg, ir.value(QStringLiteral("style")).toObject());
+    // 发射边界去重表（schema 3 开发期）：bursts 颜色/规格 + 行布局快照。
+    FxTables fxTables;
+    {
+        const QJsonArray colorTable = ir.value(
+            QStringLiteral("fx_color_table")
+        ).toArray();
+        fxTables.colors.reserve(static_cast<std::size_t>(colorTable.size()));
+        for (const QJsonValue &color : colorTable) {
+            fxTables.colors.push_back(color.toString());
+        }
+        const QJsonArray paintTable = ir.value(
+            QStringLiteral("fx_paint_table")
+        ).toArray();
+        fxTables.paints.reserve(static_cast<std::size_t>(paintTable.size()));
+        for (const QJsonValue &paint : paintTable) {
+            fxTables.paints.push_back(paint.toObject());
+        }
+    }
+    std::vector<QJsonObject> lineLayoutTable;
+    {
+        const QJsonArray layoutTable = ir.value(
+            QStringLiteral("line_layout_table")
+        ).toArray();
+        lineLayoutTable.reserve(
+            static_cast<std::size_t>(layoutTable.size())
+        );
+        for (const QJsonValue &layout : layoutTable) {
+            lineLayoutTable.push_back(layout.toObject());
+        }
+    }
+    parseSourceTracks(ir, cfg, fxTables, lineLayoutTable);
 
     cfg.titles = ir.value(QStringLiteral("titles")).toArray();
 

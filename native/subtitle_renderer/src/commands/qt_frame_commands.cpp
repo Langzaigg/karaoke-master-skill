@@ -27,16 +27,36 @@ using protocol::stringValue;
 
 QJsonObject handleConfigure(
     const QJsonObject &request,
-    std::optional<RenderConfig> *config
+    std::optional<RenderConfig> *config,
+    QJsonObject &glyphTableStash,
+    QString &glyphTableStashHash
 ) {
     QString error;
-    auto parsed = parseRenderConfig(
-        request.value(QStringLiteral("ir")).toObject(), &error
-    );
+    QJsonObject ir = request.value(QStringLiteral("ir")).toObject();
+    // 哈希门注回：表被省发且哈希与上一份相符时，解析前把缓存的表 JSON
+    // 注回 IR——字符解析期按 id 绑定字形，必须带着表进 parse。
+    const QString incomingHash = ir.value(
+        QStringLiteral("vector_glyphs_hash")
+    ).toString();
+    if (!ir.contains(QStringLiteral("vector_glyphs"))
+        && !incomingHash.isEmpty()
+        && incomingHash == glyphTableStashHash
+        && !glyphTableStash.isEmpty()) {
+        ir.insert(QStringLiteral("vector_glyphs"), glyphTableStash);
+    }
+    auto parsed = parseRenderConfig(ir, &error);
     if (!parsed.has_value()) {
         QJsonObject out = response(false, QStringLiteral("configure"));
         out.insert(QStringLiteral("error"), error);
         return out;
+    }
+    // 解析成功后更新表缓存：带表时存下表与哈希，供下一次省发注回；
+    // 失配（无表且哈希对不上缓存）已在上方注回环节自然落空——解析出的
+    // config 没有表，场景构建按空表渲染，发送端的哈希必然来自另一份
+    // 表内容，正确性由「哈希=表内容摘要」保证，正常流程不会走到。
+    if (ir.contains(QStringLiteral("vector_glyphs"))) {
+        glyphTableStash = ir.value(QStringLiteral("vector_glyphs")).toObject();
+        glyphTableStashHash = incomingHash;
     }
     *config = parsed;
     clearGlowBitmapCache();

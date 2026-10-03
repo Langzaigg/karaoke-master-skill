@@ -58,6 +58,11 @@ CommandDispatchResult output(QJsonObject value) {
 struct CommandRouter::Impl {
     std::optional<RenderConfig> config;
     RenderRuntime runtime;
+    // 导唱符轮廓表哈希门的 sidecar 侧缓存：发送端按内容摘要省发表体时，
+    // 在解析前把上一份表 JSON 注回 IR（字符在解析期就要按 id 绑定字形，
+    // 解析后补救会拿到空字形——曾因此静默丢失全部导唱符）。
+    QJsonObject glyphTableStash;
+    QString glyphTableStashHash;
 };
 
 CommandRouter::CommandRouter()
@@ -74,6 +79,10 @@ CommandDispatchResult CommandRouter::dispatch(const QJsonObject &request) {
         return output(handleRenderProbe(request, &impl_->runtime));
     case Command::GpuConfigure:
         return output(handleConfigureGpu(request, impl_->config, &impl_->runtime));
+    case Command::GpuConfigureStyle:
+        return output(
+            handleConfigureGpuStyle(request, &impl_->config, &impl_->runtime)
+        );
     case Command::GpuResizeTarget:
         return output(handleResizeGpuTarget(request, &impl_->config, &impl_->runtime));
     case Command::GpuRenderFrame:
@@ -88,7 +97,10 @@ CommandDispatchResult CommandRouter::dispatch(const QJsonObject &request) {
     case Command::GpuDiagnostics:
         return output(handleGpuDiagnostics(request, &impl_->runtime));
     case Command::Configure:
-        return output(handleConfigure(request, &impl_->config));
+        return output(handleConfigure(
+            request, &impl_->config,
+            impl_->glyphTableStash, impl_->glyphTableStashHash
+        ));
     case Command::RenderFrame:
         return output(handleRenderFrame(request, impl_->config));
     case Command::RenderFrameStats:

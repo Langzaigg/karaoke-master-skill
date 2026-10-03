@@ -2238,7 +2238,8 @@ def test_build_render_ir_contains_screen_style_track_and_ruby():
     assert ir["track"]["lines"][0]["chars"][0]["text"] == "君"
     assert ir["track"]["lines"][0]["chars"][0]["role_label"] == "A"
     assert ir["track"]["lines"][0]["chars"][0]["explicit_start"] is True
-    assert ir["track"]["lines"][0]["chars"][0]["explicit_end"] is False
+    # 缺省即空：explicit_end 为 False 时整个键不发（C++ 解析缺 key 即 False）。
+    assert "explicit_end" not in ir["track"]["lines"][0]["chars"][0]
     assert ir["track"]["lines"][0]["chars"][1]["pause_release_ms"] == 450
     assert ir["track"]["rubies"][0]["reading"] == "きみ"
     assert ir["track"]["rubies"][0]["reading_part_ms"] == [100, 250]
@@ -2896,7 +2897,11 @@ def test_build_render_ir_carries_painter_page_groups_for_native_smart_horizon():
         (0, 1),
         (2, 0),
     ]
-    assert lines[0]["layout"]["smart_horizontal"] == "equal_margins"
+    # layout 走根级 line_layout_table 引用（发射边界去重）；按 id 展开校验。
+    layout_table = build_render_ir(track, style, width=1920, height=1080, fps=60)[
+        "line_layout_table"
+    ]
+    assert layout_table[lines[0]["layout_id"]]["smart_horizontal"] == "equal_margins"
     # 单行页的静态行位恒为天然 T1；开启「强制顶底(N3)」时由渲染期
     # show_time ForceBottom 强制到最下行 / 冲突上移，不写进 layout_lane。
     assert [line["page_line_count"] for line in lines] == [2, 2, 1]
@@ -3296,9 +3301,12 @@ def test_gpu_capability_gate_rejects_only_unimplemented_whole_scene_features():
         ]
     )
     assert gpu_unsupported_features(layout_track, layout_style) == ()
-    line_layout = build_render_ir(
+    layout_ir = build_render_ir(
         layout_track, layout_style, width=640, height=360, fps=60
-    )["track"]["lines"][0]["layout"]
+    )
+    line_layout = layout_ir["line_layout_table"][
+        layout_ir["track"]["lines"][0]["layout_id"]
+    ]
     assert line_layout["line_y_position"] == "top"
     assert line_layout["line_y_margin_px"] == 33
     assert line_layout["line_alignments"] == ["right"]

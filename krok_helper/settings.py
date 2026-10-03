@@ -22,6 +22,7 @@ from krok_helper.app_paths import (  # noqa: F401
     get_settings_path,
     repair_legacy_appdata_path,
     settings_path_for_app_name as _settings_path_for_app_name,
+    settings_text_needs_legacy_repair,
 )
 from krok_helper.audio_alignment import (
     DEFAULT_ALIGNED_AUDIO_NAME_TEMPLATE,
@@ -180,21 +181,87 @@ def load_app_settings() -> AppSettings:
     return _stamp_baseline(_read_app_settings())
 
 
+# ── settings.json 原文缓存 ──
+# 停手防抖后的偏好落盘此前每次都要把 settings.json 完整读两遍（桥的 load +
+# save 各一次），外加两次旧路径修复全树遍历（实测合计 30~70ms，全在 GUI
+# 线程上）。盘上原文用 (mtime, size) 键控缓存：自己写盘后把缓存刷新成刚写
+# 入的内容；别的实例改盘会使 stat 变化自然失效。``repair_clean`` 记录这份
+# 内容跑过修复遍历且无事可修——命中时跳过遍历，改名迁移自愈只在文件真正
+# 变化后再跑一次。
+_RAW_SETTINGS_TEXT_CACHE: tuple[Path, tuple[int, int], str, bool] | None = None
+
+
+def _reset_raw_settings_text_cache() -> None:
+    """测试辅助：丢弃原文缓存（生产代码不需要，写盘会自行维护缓存）。"""
+    global _RAW_SETTINGS_TEXT_CACHE
+    _RAW_SETTINGS_TEXT_CACHE = None
+
+
+def _read_settings_text(path: Path) -> str | None:
+    """带 (mtime, size) 键控缓存的原文读取；读不到返回 ``None``。"""
+    global _RAW_SETTINGS_TEXT_CACHE
+    try:
+        stat = path.stat()
+    except OSError:
+        _RAW_SETTINGS_TEXT_CACHE = None
+        return None
+    key = (stat.st_mtime_ns, stat.st_size)
+    cached = _RAW_SETTINGS_TEXT_CACHE
+    if cached is not None and cached[0] == path and cached[1] == key:
+        return cached[2]
+    try:
+        text = path.read_text(encoding="utf-8")
+    except Exception:  # noqa: BLE001 - 读取失败按"没有配置"处理
+        return None
+    _RAW_SETTINGS_TEXT_CACHE = (path, key, text, False)
+    return text
+
+
+def _settings_text_repair_clean(path: Path, key: tuple[int, int]) -> bool:
+    cached = _RAW_SETTINGS_TEXT_CACHE
+    return (
+        cached is not None
+        and cached[0] == path
+        and cached[1] == key
+        and cached[3]
+    )
+
+
+def _mark_settings_text_repair_clean(path: Path, key: tuple[int, int]) -> None:
+    global _RAW_SETTINGS_TEXT_CACHE
+    cached = _RAW_SETTINGS_TEXT_CACHE
+    if cached is not None and cached[0] == path and cached[1] == key:
+        _RAW_SETTINGS_TEXT_CACHE = (path, key, cached[2], True)
+
+
+def _cache_written_settings_text(path: Path, text: str) -> None:
+    global _RAW_SETTINGS_TEXT_CACHE
+    try:
+        stat = path.stat()
+    except OSError:
+        _RAW_SETTINGS_TEXT_CACHE = None
+        return
+    _RAW_SETTINGS_TEXT_CACHE = (
+        path,
+        (stat.st_mtime_ns, stat.st_size),
+        text,
+        True,
+    )
+
+
 def _read_app_settings() -> AppSettings:
     path = get_settings_path()
     if not path.is_file():
         path = next((legacy for legacy in get_legacy_settings_paths() if legacy.is_file()), path)
     if not path.is_file():
         return AppSettings()
-
-    try:
-        raw = path.read_text(encoding="utf-8")
-    except Exception:
+    text = _read_settings_text(path)
+    if text is None:
         _backup_corrupt_settings(path, "读取失败")
         return AppSettings()
 
     try:
-        payload = json.loads(raw)
+        payload = json.loads(text)
     except Exception:
         _backup_corrupt_settings(path, "JSON 解析失败")
         return AppSettings()
@@ -203,9 +270,18 @@ def _read_app_settings() -> AppSettings:
         _backup_corrupt_settings(path, "顶层不是 JSON 对象")
         return AppSettings()
 
-    notes = _repair_stale_appdata_paths(payload)
-    if notes:
-        _persist_repaired_payload(payload, notes)
+    # 改名迁移自愈的全树遍历按内容变化次数付费：文本里连一个已知应用数据
+    # 目录名都没出现时必然空手，直接跳过；跑过一遍且无事可修的同一份内容
+    # （stat 相同）也不再重跑。
+    stat_key = _RAW_SETTINGS_TEXT_CACHE[1] if _RAW_SETTINGS_TEXT_CACHE else None
+    if stat_key is not None and not _settings_text_repair_clean(
+        path, stat_key
+    ) and settings_text_needs_legacy_repair(text):
+        notes = _repair_stale_appdata_paths(payload)
+        if notes:
+            _persist_repaired_payload(payload, notes)
+        else:
+            _mark_settings_text_repair_clean(path, stat_key)
     return _settings_from_payload(payload)
 
 
@@ -245,6 +321,42 @@ def _repair_stale_appdata_paths(payload: dict) -> list[str]:
     return notes
 
 
+def _write_raw_settings(payload: dict) -> Path:
+    """原始 payload 的 ``.tmp`` + ``os.replace`` 原子写，写后刷新原文缓存。
+
+    与 :func:`save_app_settings` 是同一套原子写法；抽出来供「不改 AppSettings
+    视角、只动盘上原始 JSON」的调用方（修复写回 / 命名空间级写）共用。
+    """
+
+    path = get_settings_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.parent / f"{path.name}.tmp"
+    text = json.dumps(payload, ensure_ascii=False, indent=2)
+    tmp.write_text(text, encoding="utf-8")
+    os.replace(tmp, path)
+    _cache_written_settings_text(path, text)
+    return path
+
+
+def write_app_settings_namespace(namespace: str, data: object) -> Path:
+    """设置桥专用：在盘上原始 JSON 里只替换一个命名空间后原子写回。
+
+    与旧的「``load_app_settings`` → 改字段 → ``save_app_settings``」等价——
+    那条链路每次 load 的基线就是盘上内容，三方合并后除本命名空间外全部原样
+    写回——但省掉整份 read + 解析 + 旧路径修复遍历。桥的写盘挂在界面每次
+    改动后的停手防抖上，这两次整读曾是停手后 GUI 卡顿（实测 30~70ms）的主体。
+
+    盘上还没有配置文件时，与旧链路一致地先落一份完整默认值再盖上命名空间。
+    额外收益：未知键（未来版本写入的）不再被桥保存丢弃，与修复写回的向前
+    兼容口径一致。
+    """
+
+    raw = _read_raw_settings()
+    payload = asdict(AppSettings()) if raw is None else raw
+    payload[namespace] = data
+    return _write_raw_settings(payload)
+
+
 def _persist_repaired_payload(payload: dict, notes: list[str]) -> None:
     """把自愈后的整份原始 payload 原子写回 settings.json。
 
@@ -257,13 +369,7 @@ def _persist_repaired_payload(payload: dict, notes: list[str]) -> None:
 
     log = logging.getLogger(__name__)
     try:
-        path = get_settings_path()
-        path.parent.mkdir(parents=True, exist_ok=True)
-        tmp = path.parent / f"{path.name}.tmp"
-        tmp.write_text(
-            json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8"
-        )
-        os.replace(tmp, path)
+        _write_raw_settings(payload)
         message = (
             f"已把 {len(notes)} 处指向旧应用名数据目录的失效路径"
             f"修复到当前数据目录：" + "；".join(notes)
@@ -398,10 +504,14 @@ def _read_raw_settings() -> dict | None:
     """读盘上的原始 JSON。读不出来（首次保存、损坏、被占用）就返回 ``None``。
 
     这里不走 :func:`load_app_settings`：后者遇到坏文件会备份并退回默认值，拿那份
-    去合并等于把好好的配置清成默认。
+    去合并等于把好好的配置清成默认。走 :func:`_read_settings_text` 的原文缓存，
+    同一份盘上内容只真正读盘一次。
     """
+    text = _read_settings_text(get_settings_path())
+    if text is None:
+        return None
     try:
-        raw = json.loads(get_settings_path().read_text(encoding="utf-8"))
+        raw = json.loads(text)
     except Exception:  # noqa: BLE001
         return None
     return raw if isinstance(raw, dict) else None
@@ -495,17 +605,12 @@ def save_app_settings(
     raw = _read_raw_settings()
     if merge_module_namespaces:
         _merge_module_namespaces_from_disk(settings, raw)
-    path = get_settings_path()
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.parent / f"{path.name}.tmp"
-    snapshot = asdict(settings)
-    payload = _merge_untouched_fields_from_disk(settings, dict(snapshot), raw)
-    tmp.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
-    os.replace(tmp, path)
+    payload = _merge_untouched_fields_from_disk(settings, dict(asdict(settings)), raw)
+    _write_raw_settings(payload)
     # 基线跟的是**内存里这份**，不是刚写下去的那份：没动过的字段要一直判"没变"，
     # 才能在后续每一次写盘时继续让位给别的实例。
-    setattr(settings, _BASELINE_ATTR, snapshot)
-    return path
+    setattr(settings, _BASELINE_ATTR, dict(asdict(settings)))
+    return get_settings_path()
 
 
 def _safe_dict(value: object) -> dict:

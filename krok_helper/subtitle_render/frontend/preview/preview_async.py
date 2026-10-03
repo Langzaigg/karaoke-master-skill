@@ -39,9 +39,42 @@ from krok_helper.subtitle_render.native.protocol import (
     gpu_unsupported_feature_labels,
     gpu_unsupported_features,
 )
+from krok_helper.subtitle_render.engine.render.render_ir import build_style_patch_ir
 
 
 _log = logging.getLogger(__name__)
+
+
+def style_patch_base_key(
+    track: TimingTrack,
+    style: Style,
+    extra_tracks: list[TimingTrack],
+    *,
+    width: int,
+    height: int,
+    fps: int,
+    dpr: float,
+) -> tuple:
+    """差分样式更新（``gpu_configure_style``）的资格闸门 key。
+
+    key 相等 ⇔ 轨道内容、布局相关样式（逐源）、画面参数全部没变——此时
+    行数据 IR 与上一次全量 configure 逐字节同源，sidecar 可以只重放样式段。
+    任何一项变化都让 key 失配，自动回落全量重配；与布局计划缓存用的是同一
+    套 ``lyric_layout_style_signature`` 语义（颜色等纯绘制字段不进签名，
+    正是差分要优化的场景）。
+    """
+    from krok_helper.subtitle_render.domain.models import style_for_track
+    from krok_helper.subtitle_render.engine.value_signature import (
+        lyric_layout_style_signature,
+        value_signature,
+    )
+
+    parts: list[object] = [value_signature(track), lyric_layout_style_signature(style)]
+    for source in extra_tracks or ():
+        source_style = style_for_track(style, source)
+        parts.append(value_signature(source))
+        parts.append(lyric_layout_style_signature(source_style))
+    return (width, height, fps, round(float(dpr or 1.0), 4), tuple(parts))
 
 
 PREVIEW_QUALITY_OPTIONS: tuple[tuple[str, str, float], ...] = (
@@ -590,6 +623,9 @@ class GpuAsyncSubtitleRenderer(QObject):
         self._needs_configure = True
         self._needs_target_resize = False
         self._relayout_scope: Optional[str] = None
+        # 差分样式更新的资格闸门：上次成功（全量/缩放）configure 时的
+        # style_patch_base_key。None = 尚无基准（首配 / sidecar 重建后）。
+        self._style_patch_key: Optional[tuple] = None
         self._playing = False
         self._stopped = False
         self._renderer_failed = False
@@ -660,6 +696,8 @@ class GpuAsyncSubtitleRenderer(QObject):
             "warp_selected": int(self._force_warp),
             "pipeline_lead_frames": self._effective_lookahead_frames,
             "generations_cancelled": 0,
+            "style_patches": 0,
+            "style_patch_fallbacks": 0,
         }
         self._timings: dict[str, deque[float]] = {
             "render_ms": deque(maxlen=4096),
@@ -958,48 +996,70 @@ class GpuAsyncSubtitleRenderer(QObject):
                 try:
                     renderer = self._ensure_renderer()
                     scene_configured = False
+                    # 差分闸门 key：预览 configure 恒按 60fps（与下方全量
+                    # configure_gpu 的 fps=60 同口径），画面变化走 resize 路径。
+                    current_patch_key = style_patch_base_key(
+                        track,
+                        style,
+                        extra_tracks,
+                        width=width,
+                        height=height,
+                        fps=60,
+                        dpr=dpr,
+                    )
                     if needs_configure:
-                        with render_progress_scope(
-                            _render_progress_reporter(
-                                _RENDER_STAGE_SPANS_GPU, self.renderProgress.emit
+                        style_patched = False
+                        if (
+                            relayout_scope == "paint"
+                            # 差分重放（2026-10-03 起默认启用）：闸门 key 相等
+                            # ⇔ 轨道/布局签名/画面全部没变，sidecar 只重放
+                            # style/titles/fx_sprites/行级样式段。现象B 根因
+                            # （差分合并未清旧行级 bursts，逐次翻倍）已修复；
+                            # 全特效真实工程上 patch 与全量重配的帧逐字节
+                            # 一致（含表化载荷）。任何失败仍回落全量重配，
+                            # 语义不变；KROK_SUBTITLE_GPU_STYLE_PATCH=0 可
+                            # 强制关闭用于对照。
+                            and _env_enabled(
+                                "KROK_SUBTITLE_GPU_STYLE_PATCH", "1"
                             )
+                            and self._style_patch_key is not None
+                            and self._style_patch_key == current_patch_key
                         ):
-                            configured = renderer.configure_gpu(
-                                track,
-                                style,
-                                width=width,
-                                height=height,
-                                fps=60,
-                                dpr=dpr,
-                                force_warp=force_warp,
-                                extra_tracks=extra_tracks,
-                                duration_ms=duration_ms,
-                                prewarm_t_ms=t_ms,
-                                worker_count=self._worker_count_requested,
-                                defer_followers=True,
-                                defer_realizations_until_first_frame=True,
-                                relayout_scope=relayout_scope,
-                                progress=lambda: self.renderProgress.emit(
-                                    80, "场景构建"
-                                ),
-                            )
-                            self._active_worker_count = max(
-                                1, min(int(configured.get("worker_count", 1)), 8)
-                            )
-                            dedicated_vram = max(
-                                int(configured.get("dedicated_video_memory", 0)), 0
-                            )
-                            min_multiworker_vram = _env_int(
-                                "KROK_SUBTITLE_GPU_MIN_MULTIWORKER_VRAM_MB",
-                                2048,
-                                minimum=0,
-                            ) * 1024 * 1024
-                            if (
-                                self._worker_count_requested > 1
-                                and dedicated_vram > 0
-                                and dedicated_vram < min_multiworker_vram
+                            # 纯样式变化且轨道/布局/画面全部没变：只重放
+                            # style/titles/fx_sprites/行级样式字段（改色/改
+                            # 装饰参数的预览延迟主体就是被省掉的那次整轨
+                            # IR 重序列化 + 大 JSON 重解析）。任何失败都回
+                            # 落全量重配，语义不变。
+                            try:
+                                renderer.configure_style_gpu(
+                                    build_style_patch_ir(
+                                        track,
+                                        style,
+                                        width=width,
+                                        height=height,
+                                        fps=60,
+                                        dpr=dpr,
+                                        extra_tracks=extra_tracks,
+                                        duration_ms=duration_ms,
+                                    ),
+                                    force_warp=force_warp,
+                                    prewarm_t_ms=t_ms,
+                                    worker_count=self._worker_count_requested,
+                                    defer_followers=True,
+                                    defer_realizations_until_first_frame=True,
+                                )
+                                style_patched = True
+                                self._note("style_patches")
+                                self._note("configure_count")
+                            except (NativeRendererError, ValueError, KeyError):
+                                self._note("style_patch_fallbacks")
+                        if not style_patched:
+                            with render_progress_scope(
+                                _render_progress_reporter(
+                                    _RENDER_STAGE_SPANS_GPU,
+                                    self.renderProgress.emit,
+                                )
                             ):
-                                self._worker_count_requested = 1
                                 configured = renderer.configure_gpu(
                                     track,
                                     style,
@@ -1011,18 +1071,55 @@ class GpuAsyncSubtitleRenderer(QObject):
                                     extra_tracks=extra_tracks,
                                     duration_ms=duration_ms,
                                     prewarm_t_ms=t_ms,
-                                    worker_count=1,
+                                    worker_count=self._worker_count_requested,
                                     defer_followers=True,
                                     defer_realizations_until_first_frame=True,
+                                    relayout_scope=relayout_scope,
                                     progress=lambda: self.renderProgress.emit(
                                         80, "场景构建"
                                     ),
                                 )
-                                self._active_worker_count = 1
-                            with self._stats_lock:
-                                self._stats["worker_count"] = self._active_worker_count
-                            self._note("configure_count")
+                                self._active_worker_count = max(
+                                    1, min(int(configured.get("worker_count", 1)), 8)
+                                )
+                                dedicated_vram = max(
+                                    int(configured.get("dedicated_video_memory", 0)), 0
+                                )
+                                min_multiworker_vram = _env_int(
+                                    "KROK_SUBTITLE_GPU_MIN_MULTIWORKER_VRAM_MB",
+                                    2048,
+                                    minimum=0,
+                                ) * 1024 * 1024
+                                if (
+                                    self._worker_count_requested > 1
+                                    and dedicated_vram > 0
+                                    and dedicated_vram < min_multiworker_vram
+                                ):
+                                    self._worker_count_requested = 1
+                                    configured = renderer.configure_gpu(
+                                        track,
+                                        style,
+                                        width=width,
+                                        height=height,
+                                        fps=60,
+                                        dpr=dpr,
+                                        force_warp=force_warp,
+                                        extra_tracks=extra_tracks,
+                                        duration_ms=duration_ms,
+                                        prewarm_t_ms=t_ms,
+                                        worker_count=1,
+                                        defer_followers=True,
+                                        defer_realizations_until_first_frame=True,
+                                        progress=lambda: self.renderProgress.emit(
+                                            80, "场景构建"
+                                        ),
+                                    )
+                                    self._active_worker_count = 1
+                                with self._stats_lock:
+                                    self._stats["worker_count"] = self._active_worker_count
+                                self._note("configure_count")
                         scene_configured = True
+                        self._style_patch_key = current_patch_key
                     elif needs_target_resize:
                         configured = renderer.resize_gpu_target(
                             width=width,
@@ -1039,6 +1136,7 @@ class GpuAsyncSubtitleRenderer(QObject):
                             self._stats["worker_count"] = self._active_worker_count
                         self._note("configure_count")
                         scene_configured = True
+                        self._style_patch_key = current_patch_key
                     if scene_configured:
                         # configure 完成（IR 重排 + sidecar 场景就绪）；此刻起等待的
                         # 是首帧实现（字形光栅化）与出帧，帧到达即由 GUI 徽标收尾。
@@ -1289,6 +1387,8 @@ class GpuAsyncSubtitleRenderer(QObject):
         if self._reader is not None:
             self._reader.close()
             self._reader = None
+        # 新 sidecar 没有已解析的行数据，差分基准作废；首个请求自动走全量。
+        self._style_patch_key = None
         self._renderer_owner.close()
 
     def _may_emit(self, t_ms: int, generation: int) -> bool:

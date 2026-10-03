@@ -1277,9 +1277,10 @@ class LyricsPanel(DropPanel):
             empty_icon="📝",
             parent=parent,
         )
-        # 色点只是配色的一个指示，不必跟住拖动配色时的每一个中间值。整表换色要
-        # 重写 68 个单元格并让 Qt 重绘整个视口（平时 9ms，改色后 37ms），全在界面
-        # 线程上。攒到停手后刷一次：连续调色期间界面不再被打断，视觉结果一致。
+        # 色点只是配色的一个指示，不必跟住拖动配色时的每一个中间值。整表换色
+        # 历史上要重写全部单元格并让 Qt 重绘整个视口（68 格时代屏幕实测 37ms，
+        # 全在界面线程），现在 flush 走角色列窄刷新（只重画色点图标，其余列
+        # 不碰），再配停手防抖：连续调色期间界面不被打断，视觉结果一致。
         self._swatch_refresh_timer = QTimer(self)
         self._swatch_refresh_timer.setSingleShot(True)
         self._swatch_refresh_timer.setInterval(_SWATCH_REFRESH_DEBOUNCE_MS)
@@ -1543,12 +1544,74 @@ class LyricsPanel(DropPanel):
         self._swatch_refresh_timer.start()
 
     def _flush_swatch_refresh(self) -> None:
-        """停手后把攒下的色点刷新做掉。"""
+        """停手后把攒下的色点刷新做掉（窄刷新：只重画角色列色点）。"""
         if not getattr(self, "_swatch_refresh_pending", False):
             return
         self._swatch_refresh_pending = False
         if self._populated:
-            self._refresh_presentation(update_widths=False)
+            self._refresh_role_swatch_column()
+
+    def _role_swatch_icon_for(
+        self, line: Optional[TimingLine], role: str
+    ) -> QIcon:
+        """角色色点图标：行内混合角色 → 双色点；否则取方案代表色。
+
+        整表刷新与本列窄刷新共用同一取色口径，避免两处漂移。
+        """
+        if line is not None and _line_role_mixed(line):
+            seen: list[str] = []
+            for label in _line_role_labels(line):
+                if label not in seen:
+                    seen.append(label)
+            return _mixed_swatch_icon(
+                [
+                    _scheme_swatch_color(
+                        self._style,
+                        label or (TITLE_SCHEME_NAME if self._title_mode else ""),
+                    )
+                    for label in seen[:2]
+                ]
+            )
+        return _swatch_icon(
+            _scheme_swatch_color(
+                self._style,
+                role or (TITLE_SCHEME_NAME if self._title_mode else ""),
+            )
+        )
+
+    def _presentation_row_line(self, row: int) -> Optional[TimingLine]:
+        """行号 → 对应轨道行；越界 / 未加载返回 ``None``。"""
+        if (
+            self._track is None
+            or not 0 <= row < len(self._presentation_rows)
+        ):
+            return None
+        track_index = self._presentation_rows[row].track_line_index
+        if track_index is None or not 0 <= track_index < len(self._track.lines):
+            return None
+        return self._track.lines[track_index]
+
+    def _refresh_role_swatch_column(self) -> None:
+        """纯配色变化的窄刷新：只重画角色列色点图标，其余列一律不碰。
+
+        旧路径复用整表 ``_refresh_presentation``：98 行 × 5 列全部重写 +
+        整视口重绘（屏幕实测 ~37ms，全在界面线程）。色点只住在角色列，
+        且角色分配属于轨道数据、不随配色变化，这里仅按行重算一个图标，
+        脏区收敛到角色列一竖条。
+        """
+        self._table.blockSignals(True)
+        try:
+            for row in range(self._table.rowCount()):
+                if row >= len(self._row_meta) or self._row_meta[row][0]:
+                    continue
+                role_item = self._table.item(row, COL_ROLE)
+                if role_item is None:
+                    continue
+                line = self._presentation_row_line(row)
+                role = _dominant_role(line) if line is not None else ""
+                role_item.setIcon(self._role_swatch_icon_for(line, role))
+        finally:
+            self._table.blockSignals(False)
 
     def _layout_name_for_id(self, layout_id: Optional[str]) -> str:
         return layout_display_name(self._style, str(layout_id or "default"))
@@ -2569,22 +2632,8 @@ class LyricsPanel(DropPanel):
                     )
                 if line_role_mixed:
                     # 行内混合角色：显示「混合」+ 双色点（前两种代表色）
-                    seen: list[str] = []
-                    for label in _line_role_labels(line):
-                        if label not in seen:
-                            seen.append(label)
                     role_item.setText("混合")
-                    role_item.setIcon(
-                        _mixed_swatch_icon(
-                            [
-                                _scheme_swatch_color(
-                                    style,
-                                    label or (TITLE_SCHEME_NAME if self._title_mode else ""),
-                                )
-                                for label in seen[:2]
-                            ]
-                        )
-                    )
+                    role_item.setIcon(self._role_swatch_icon_for(line, role))
                     role_item.setToolTip(
                         "该行包含逐字符角色分配（双击内容列或右键「逐字符分配角色…」编辑）。"
                     )
@@ -2596,14 +2645,7 @@ class LyricsPanel(DropPanel):
                             else ("标题默认" if self._title_mode else _DEFAULT_ROLE_TEXT)
                         )
                         role_item.setToolTip("")
-                    role_item.setIcon(
-                        _swatch_icon(
-                            _scheme_swatch_color(
-                                style,
-                                role or (TITLE_SCHEME_NAME if self._title_mode else ""),
-                            )
-                        )
-                    )
+                    role_item.setIcon(self._role_swatch_icon_for(line, role))
                 if line is not None and not self._title_mode:
                     effect_item.setText(
                         _animation_summary(

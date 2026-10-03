@@ -2,6 +2,7 @@
 
 #include "render_config.h"
 
+#include <QtCore/QJsonArray>
 #include <QtCore/QJsonObject>
 #include <QtCore/QJsonValue>
 #include <QtCore/QString>
@@ -12,6 +13,18 @@ namespace krok::subtitle::native::protocol {
 
 std::optional<RenderConfig> parseRenderConfig(
     const QJsonObject &ir,
+    QString *error
+);
+// 差分重配（gpu_configure_style）：在既有 config 携带的行数据（lines /
+// rubies / 矢量符号表 / 主轨偏移）上重放 patch 里的 screen/style/
+// fx_sprites/titles/lines_style 段。样式派生状态在全新默认构造的 config
+// 上重放，「键缺席 → 默认值」与全量解析完全一致；行级样式派生字段
+// （动画/信号旗标/粒子 bursts）按 (source_index, source_line_index) 差分
+// 合并。画面段漂移或行集对不上返回 nullopt 并写 error（调用方回落全量
+// configure）。
+std::optional<RenderConfig> applyRenderConfigStylePatch(
+    const QJsonObject &patch,
+    const RenderConfig &current,
     QString *error
 );
 ResolvedStyle resolvedStyleFromTitle(

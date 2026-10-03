@@ -12,8 +12,11 @@ from krok_helper.subtitle_render.engine.layout.page.plan import (
     project_page_plan_to_legacy_fields,
 )
 from krok_helper.subtitle_render.frontend.editor.lyrics_list import (
+    COL_CONTENT,
+    COL_EFFECT,
     COL_LANE,
     COL_LAYOUT,
+    COL_ROLE,
     LyricsPanel,
 )
 from krok_helper.subtitle_render.frontend.main_window import (
@@ -134,21 +137,70 @@ def test_render_only_style_change_skips_full_table_refresh(qapp):
     panel.set_style(replace(style, font_size_px=style.font_size_px + 10))
     assert calls == []
 
-    # 只改色点颜色：不在编辑当下刷新，攒到停手后刷一次，避免整表重绘打断输入。
+    # 只改色点颜色：不在编辑当下刷新，攒到停手后走角色列窄刷新，
+    # 不再触发整表重绘（避免 5 列全部重写 + 整视口重绘打断输入）。
     panel.set_style(
         replace(style, font_size_px=style.font_size_px + 10, fill_color="#123456")
     )
     assert calls == []
     assert panel._swatch_refresh_timer.isActive()
     panel._flush_swatch_refresh()
-    assert calls == [1]
+    assert calls == []
 
     # 影响行内容/列语义的字段仍然立即刷新，并且不留下待处理的色点刷新。
     panel.set_style(
         replace(style, fill_color="#123456", line_alignments=["left", "center", "right"])
     )
-    assert calls == [1, 1]
+    assert calls == [1]
     assert not panel._swatch_refresh_timer.isActive()
+
+    panel.deleteLater()
+    qapp.processEvents()
+
+
+def test_swatch_flush_updates_role_column_only(qapp):
+    """色点停手刷新是窄刷新：只重画角色列图标，其余列一律不碰。"""
+    from PyQt6.QtCore import QPoint
+
+    panel = LyricsPanel()
+    style = Style()
+    panel.set_style(style)
+    panel.set_track(_track())
+
+    lyric_row = next(
+        row
+        for row, item in enumerate(panel._presentation_rows)
+        if item.kind == "lyric"
+    )
+
+    # 哨兵：内容 / 特效列在窄刷新后必须原样保留。
+    content_item = panel.table_widget.item(lyric_row, COL_CONTENT)
+    effect_item = panel.table_widget.item(lyric_row, COL_EFFECT)
+    content_item.setText("sentinel-content")
+    effect_item.setText("sentinel-effect")
+    role_item = panel.table_widget.item(lyric_row, COL_ROLE)
+
+    def icon_center_color() -> QColor:
+        image = role_item.icon().pixmap(24, 24).toImage()
+        return image.pixelColor(QPoint(12, 12))
+
+    before = icon_center_color()
+
+    panel.set_style(replace(style, fill_color="#FF0000"))
+    panel._flush_swatch_refresh()
+
+    after = icon_center_color()
+    # 无方案行取全局 fill_color 作代表色：色点应变红。
+    assert after.name().lower() == "#ff0000"
+    assert before.name().lower() != after.name().lower()
+    assert content_item.text() == "sentinel-content"
+    assert effect_item.text() == "sentinel-effect"
+
+    # 窄刷新与整表刷新共用同一取色口径：整表刷新（布局签名变化）后色点颜色一致。
+    panel.set_style(
+        replace(style, fill_color="#FF0000", line_alignments=["left", "left"])
+    )
+    assert icon_center_color().name().lower() == after.name().lower()
 
     panel.deleteLater()
     qapp.processEvents()

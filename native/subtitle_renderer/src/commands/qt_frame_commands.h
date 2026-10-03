@@ -10,7 +10,9 @@ namespace krok::subtitle::native::commands {
 
 QJsonObject handleConfigure(
     const QJsonObject &request,
-    std::optional<protocol::RenderConfig> *config
+    std::optional<protocol::RenderConfig> *config,
+    QJsonObject &glyphTableStash,
+    QString &glyphTableStashHash
 );
 
 QJsonObject handleRenderFrame(
