@@ -4273,9 +4273,9 @@ ProbeResult Direct2DGpuBackend::renderFrameInternal(
             bool hasTransform = false;
             D2D1_RECT_F sourceRect{};
             D2D1_RECT_F effectRect{};
-            // 稳态模糊缓存命中：blurred 持有展平后的多 pass 光晕位图，
-            // source/blur/sigmas 全部为空，合成走单次 DrawBitmap。
-            ID2D1Bitmap1 *cached = nullptr;
+            // 稳态模糊缓存命中：cachedOwned 持引用计数保活（条目在合成
+            // 前被 LRU 驱逐也不悬垂），合成走单次 DrawBitmap。
+            Microsoft::WRL::ComPtr<ID2D1Bitmap1> cachedOwned;
         };
         std::vector<InlineGlowLayer> inlineGlowLayers;
         // Grouped layers (charOnly < 0) collect every character whose
@@ -4381,8 +4381,11 @@ ProbeResult Direct2DGpuBackend::renderFrameInternal(
             const int cachePasses = std::clamp(
                 charStyle.glowConcentrationLevel, 0, 2
             ) + 1;
-            const bool cacheHitEnabled = impl_->glowBlurCacheMode != 2;
-            if (cacheable && cacheHitEnabled) {
+            const bool cacheHitEnabled = impl_->glowBlurCacheMode == 4
+                ? true
+                : impl_->glowBlurCacheMode != 2;
+            if (cacheable && cacheHitEnabled
+                && impl_->glowBlurCacheMode != 4) {
                 for (Impl::GlowBlurCacheEntry &entry : impl_->glowBlurCache) {
                     if (entry.line == line
                         && entry.styleIndex == styleIndex
@@ -4393,7 +4396,7 @@ ProbeResult Direct2DGpuBackend::renderFrameInternal(
                         && entry.blurred != nullptr) {
                         entry.lastUsed = ++impl_->glowBlurCacheSerial;
                         ++impl_->glowBlurCacheHits;
-                        layer.cached = entry.blurred.Get();
+                        layer.cachedOwned = entry.blurred;
                         layer.sourceRect = entry.sourceRect;
                         inlineGlowLayers.push_back(std::move(layer));
                         return;
@@ -4680,7 +4683,12 @@ ProbeResult Direct2DGpuBackend::renderFrameInternal(
                         entry.sourceRect = layer.sourceRect;
                         entry.blurred = std::move(cacheBitmap);
                         entry.lastUsed = ++impl_->glowBlurCacheSerial;
-                        if (impl_->glowBlurCache.size()
+                        if (impl_->glowBlurCacheMode == 4) {
+                            // 诊断 mode 4：不跨帧取缓存，本帧现烘现用——
+                            // 与关闭路径的 DrawImage 全链路同帧执行，用于
+                            // 隔离“烘焙/DrawBitmap 语义”与“跨帧过期”。
+                            layer.cachedOwned = std::move(entry.blurred);
+                        } else if (impl_->glowBlurCache.size()
                             >= Impl::glowBlurCacheCapacity) {
                             auto victim = std::min_element(
                                 impl_->glowBlurCache.begin(),
@@ -6134,10 +6142,22 @@ ProbeResult Direct2DGpuBackend::renderFrameInternal(
                 layer.sourceRect.left + dx, layer.sourceRect.top + dy,
                 layer.sourceRect.right + dx, layer.sourceRect.bottom + dy
             );
-            if (layer.cached != nullptr) {
+            if (layer.cachedOwned != nullptr) {
+                // 缓存位图是预栅格化的：目标矩形必须像素对齐，否则
+                // DrawBitmap 会做双线性重采样，光晕边缘变虚/变亮（而
+                // 直绘路径的效果是在目标网格上过程式光栅化，无重采样）。
+                // 取整带来 ≤0.5px 的光晕位置吸附，对模糊内容不可见。
+                const D2D1_RECT_F alignedRect = D2D1::RectF(
+                    std::round(imageRect.left),
+                    std::round(imageRect.top),
+                    std::round(imageRect.left)
+                        + (layer.sourceRect.right - layer.sourceRect.left),
+                    std::round(imageRect.top)
+                        + (layer.sourceRect.bottom - layer.sourceRect.top)
+                );
                 context->DrawBitmap(
-                    layer.cached,
-                    imageRect,
+                    layer.cachedOwned.Get(),
+                    alignedRect,
                     1.0f,
                     D2D1_INTERPOLATION_MODE_LINEAR
                 );

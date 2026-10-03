@@ -220,7 +220,7 @@ void Direct2DGpuBackend::configure(const RenderScene &scene) {
     impl_->glowBlurCache.clear();
     impl_->glowBlurCacheSerial = 0;
     impl_->glowBlurCacheMode = direct2d::environmentSize(
-        "KROK_SUBTITLE_GPU_GLOW_CACHE_MODE", 1, 1, 3
+        "KROK_SUBTITLE_GPU_GLOW_CACHE_MODE", 1, 1, 4
     );
     impl_->diagnostics.glyphGeometryCacheHits = 0;
     impl_->diagnostics.glyphGeometryCacheMisses = 0;
