@@ -30,6 +30,7 @@ from krok_helper.subtitle_render.engine.render_progress import render_progress_s
 from krok_helper.subtitle_render.domain.timing import TimingTrack
 from krok_helper.subtitle_render.domain.models import Style
 from krok_helper.subtitle_render.native.backend import (
+    NativeQueueFullError,
     NativeRendererError,
     NativeRendererProcess,
     NativeRendererProcessOwner,
@@ -687,6 +688,12 @@ class GpuAsyncSubtitleRenderer(QObject):
         # 最近一次确认的实际出帧后端（"gpu"=sidecar / "cpu"=Painter 回退）；
         # None = 尚无帧定论（GUI 侧按渲染器选择展示）。仅在翻转时发信号。
         self._backend_mode: Optional[str] = None
+        # 连续帧级失败计数：首个失败原样重试一次（有界回读超时等瞬时设备
+        # 停顿），第二次失败才进入 renderer_failed 重启链。成功出帧即清零。
+        self._frame_error_streak = 0
+        # CPU 补帧限速（monotonic 秒）：失败窗口内最多 2 帧/秒，避免把 worker
+        # 线程按重特效 ~300ms/帧的速度堵死。
+        self._last_fallback_emit = 0.0
         self._stats = {
             "requests": 0,
             "cache_hits": 0,
@@ -695,6 +702,9 @@ class GpuAsyncSubtitleRenderer(QObject):
             "frames_emitted": 0,
             "future_frames_cached": 0,
             "stale_frames_dropped": 0,
+            "frame_error_retries": 0,
+            "queue_full_backpressure": 0,
+            "fallback_frames_emitted": 0,
             "configure_count": 0,
             "renderer_failures": 0,
             "renderer_restarts": 0,
@@ -987,17 +997,23 @@ class GpuAsyncSubtitleRenderer(QObject):
                 if self._renderer_failed:
                     if time.monotonic() < self._retry_after:
                         if not speculative:
-                            self._emit_python_fallback(
-                                track,
-                                style,
-                                extra_tracks,
-                                width,
-                                height,
-                                dpr,
-                                t_ms,
-                                generation,
-                                duration_ms,
-                            )
+                            now = time.monotonic()
+                            if now - self._last_fallback_emit >= 0.5:
+                                # 同 _run 失败分支：补帧限速，保持 worker 空闲
+                                # 以便尽快重配 GPU（详见该处注释）。
+                                self._last_fallback_emit = now
+                                self._note("fallback_frames_emitted")
+                                self._emit_python_fallback(
+                                    track,
+                                    style,
+                                    extra_tracks,
+                                    width,
+                                    height,
+                                    dpr,
+                                    t_ms,
+                                    generation,
+                                    duration_ms,
+                                )
                         continue
                     self._renderer_failed = False
                     needs_configure = True
@@ -1225,6 +1241,7 @@ class GpuAsyncSubtitleRenderer(QObject):
                         self._note("stale_frames_dropped")
                         continue
                     completed_at = time.monotonic()
+                    self._frame_error_streak = 0
                     self._record_timing("roundtrip_ms", (completed_at - work_started) * 1000.0)
                     self._adapt_pipeline_lookahead()
                     self._record_event_timing("render_ms", event.get("render_ms"))
@@ -1264,6 +1281,47 @@ class GpuAsyncSubtitleRenderer(QObject):
                     # 统一按渲染失败处理：回退本帧、稍后重试。
                     if _env_enabled("KROK_SUBTITLE_NATIVE_DEBUG_FAILURES", "0"):
                         print(f"GPU preview failed: {exc}")
+                    if isinstance(exc, NativeQueueFullError):
+                        # 流控信号：in-flight 池满（某 worker 短暂停顿期间的提交
+                        # 堆积），不是渲染器故障。短暂退避后重发同一请求，不杀
+                        # 进程、不 CPU 补帧。
+                        self._note("queue_full_backpressure")
+                        # 短退避：等一个 in-flight 槽位释放的量级即可（本环境
+                        # 单帧渲染 ~50-90ms；睡太久会让提交循环空转，把当前帧
+                        # 饿成过期）。
+                        time.sleep(0.01)
+                        with self._condition:
+                            if needs_configure:
+                                self._needs_configure = True
+                            if needs_target_resize:
+                                self._needs_target_resize = True
+                            if self._pending is None:
+                                self._pending = (t_ms, serial, speculative, submitted_at)
+                            self._condition.notify()
+                        continue
+                    if (
+                        isinstance(exc, NativeRendererError)
+                        and self._frame_error_streak == 0
+                    ):
+                        # 帧级错误（有界回读超时、瞬时设备停顿）先原样重试一次：
+                        # 直接杀进程重启会丢掉整个已配置场景，且 1s 退避窗口内
+                        # 每个请求都要 CPU 补一帧（重特效下 ~300ms/帧）。把本请求
+                        # 重新注回 pending（不覆盖更新的请求，保持 latest-wins），
+                        # 播放中即等于立即重试；连续第二次失败才走重启链。
+                        self._frame_error_streak = 1
+                        self._note("frame_error_retries")
+                        with self._condition:
+                            # 本轮消费掉的 configure/resize 标志若未成功应用
+                            # （如 configure_gpu 抛错），重试轮必须重做，否则
+                            # 会在未配置的 renderer 上直接渲染。
+                            if needs_configure:
+                                self._needs_configure = True
+                            if needs_target_resize:
+                                self._needs_target_resize = True
+                            if self._pending is None:
+                                self._pending = (t_ms, serial, speculative, submitted_at)
+                            self._condition.notify()
+                        continue
                     if not isinstance(exc, (NativeRendererError, RuntimeError)):
                         _log.exception("GPU 预览路径出现非预期异常")
                     self._renderer_failed = True
@@ -1278,17 +1336,25 @@ class GpuAsyncSubtitleRenderer(QObject):
                     )
                     self._close_renderer()
                     if not speculative:
-                        self._emit_python_fallback(
-                            track,
-                            style,
-                            extra_tracks,
-                            width,
-                            height,
-                            dpr,
-                            t_ms,
-                            generation,
-                            duration_ms,
-                        )
+                        now = time.monotonic()
+                        if now - self._last_fallback_emit >= 0.5:
+                            # CPU 补帧限速：失败窗口内每个时钟请求都补一帧会把
+                            # worker 线程按 ~300ms/帧的速度堵死（渲染恢复请求
+                            # 排不进队列）。限速后 GUI 保持最后一帧 + busy 徽标，
+                            # worker 保持空闲以便尽快重配 GPU。
+                            self._last_fallback_emit = now
+                            self._note("fallback_frames_emitted")
+                            self._emit_python_fallback(
+                                track,
+                                style,
+                                extra_tracks,
+                                width,
+                                height,
+                                dpr,
+                                t_ms,
+                                generation,
+                                duration_ms,
+                            )
         finally:
             self._close_renderer()
 

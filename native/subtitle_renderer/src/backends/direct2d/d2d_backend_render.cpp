@@ -13,6 +13,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <stdexcept>
 #include <cmath>
 #include <cstring>
 #include <limits>
@@ -8137,6 +8138,62 @@ ProbeResult Direct2DGpuBackend::renderFrameInternal(
     }
     D3D11_MAPPED_SUBRESOURCE mapped{};
     const auto gpuWaitStart = Clock::now();
+    // 有界回读等待：Map(staging, READ, 0) 会阻塞到 GPU 完成，设备级停顿
+    // （多 worker 各自持有独立 D3D 设备时的驱动级 wedge）会让它无限挂死整
+    // 个 worker 线程，宿主只看到 2s 协议超时然后整进程重启（2026-10 预览
+    // 卡死循环的根因）。先发 event query 轮询完成度，超过截止时间抛错，
+    // 让该帧以错误响应返回、worker 线程保持可用。1500ms 低于预览宿主的
+    // 2s 帧响应超时，且远高于正常回读（p95≈13ms）。
+    {
+        static constexpr int kReadbackWaitTimeoutMs = 1500;
+        D3D11_QUERY_DESC queryDesc{};
+        queryDesc.Query = D3D11_QUERY_EVENT;
+        Microsoft::WRL::ComPtr<ID3D11Query> readbackQuery;
+        checkHr(
+            device_.d3dDevice()->CreateQuery(
+                &queryDesc,
+                readbackQuery.ReleaseAndGetAddressOf()
+            ),
+            "ID3D11Device::CreateQuery(frame readback event)",
+            device_
+        );
+        device_.d3dContext()->End(readbackQuery.Get());
+        bool gpuDone = false;
+        const auto spinDeadline =
+            gpuWaitStart + std::chrono::milliseconds(2);
+        const auto waitDeadline =
+            gpuWaitStart + std::chrono::milliseconds(kReadbackWaitTimeoutMs);
+        HRESULT getDataHr = S_FALSE;
+        while (true) {
+            getDataHr =
+                device_.d3dContext()->GetData(readbackQuery.Get(), nullptr, 0, 0);
+            if (getDataHr != S_FALSE) {
+                gpuDone = getDataHr == S_OK;
+                break;
+            }
+            const auto now = Clock::now();
+            // 正常回读（≤1ms）用自旋等待即可，Sleep(1) 的定时器粒度会给每帧
+            // 平添 1-15ms；只有等过自旋窗口仍未完成时才退化为毫秒级休眠，
+            // 直到截止时间（设备 wedge 场景）。
+            if (now < spinDeadline) {
+                YieldProcessor();
+                continue;
+            }
+            if (now >= waitDeadline) {
+                break;
+            }
+            Sleep(1);
+        }
+        if (!gpuDone) {
+            if (FAILED(getDataHr)) {
+                checkHr(getDataHr, "ID3D11DeviceContext::GetData(frame readback)", device_);
+            }
+            throw std::runtime_error(
+                "frame readback timeout: GPU did not finish within "
+                + std::to_string(kReadbackWaitTimeoutMs) + "ms"
+            );
+        }
+    }
     checkHr(
         device_.d3dContext()->Map(stagingTexture, 0, D3D11_MAP_READ, 0, &mapped),
         "ID3D11DeviceContext::Map(frame)",

@@ -77,6 +77,18 @@ class NativeRendererError(RuntimeError):
     """Raised when the native sidecar reports an error or exits unexpectedly."""
 
 
+class NativeQueueFullError(NativeRendererError):
+    """Raised when the sidecar reports ``gpu_queue_full``.
+
+    这是流控信号（in-flight 池满，常见于某 worker 短暂停顿时的提交堆积），
+    不是渲染器故障：调用方应短暂退避后重发，而不是重启 sidecar。
+    """
+
+    def __init__(self, response: dict[str, Any]) -> None:
+        super().__init__(str(response.get("error") or response))
+        self.response = response
+
+
 @dataclass(frozen=True)
 class SharedFrameSlot:
     """A copied RGBA frame read from one native shared-memory ring slot."""
@@ -1110,6 +1122,8 @@ class NativeRendererProcess:
         while True:
             response = self._read_response()
             if not response.get("ok", False):
+                if response.get("event") == "gpu_queue_full":
+                    raise NativeQueueFullError(response)
                 return self._expect_ok(response)
             if response.get("event") in {
                 "gpu_frame_ready",

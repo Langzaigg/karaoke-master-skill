@@ -1099,6 +1099,173 @@ def test_gpu_native_preview_presents_without_shared_memory_or_qimage(qapp, monke
         renderer.stop()
 
 
+def test_finish_render_gpu_frame_raises_typed_queue_full_error():
+    """gpu_queue_full 是流控信号：必须抛 NativeQueueFullError 而不是裸错误。
+
+    预览调度器据此做背压重发（不杀进程），2026-10 前它被 _expect_ok 当成
+    渲染器故障直接触发重启链。
+    """
+    import krok_helper.subtitle_render.native.backend as backend
+
+    from collections import deque
+
+    renderer = backend.NativeRendererProcess.__new__(backend.NativeRendererProcess)
+    renderer._process = object()  # _current_process 只要求非 None
+    renderer.response_timeout_s = 2.0
+    renderer.configure_timeout_s = 10.0
+    renderer.gpu_configure_timeout_s = 30.0
+    renderer._event_backlog = deque()
+
+    def _fake_read_response(**_kwargs):
+        return {
+            "ok": False,
+            "event": "gpu_queue_full",
+            "error": "GPU preview in-flight limit reached",
+        }
+
+    renderer._read_response = _fake_read_response
+
+    import pytest
+
+    with pytest.raises(backend.NativeQueueFullError) as excinfo:
+        renderer.finish_render_gpu_frame()
+    assert isinstance(excinfo.value, backend.NativeRendererError)
+    assert "in-flight limit reached" in str(excinfo.value)
+
+
+def test_gpu_async_renderer_queue_full_is_backpressure_not_failure(
+    qapp, monkeypatch
+):
+    """in-flight 池满只计背压，不进 renderer_failed 重启链。"""
+    import time
+
+    import krok_helper.subtitle_render.frontend.preview.preview_async as preview_async
+    from krok_helper.subtitle_render.domain.models import Style, TimingTrack
+    from krok_helper.subtitle_render.native.backend import NativeQueueFullError
+
+    calls = {"render": 0}
+
+    class QueueThenGoodProcess:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def start(self):
+            return {"ok": True, "event": "ready"}
+
+        def configure_gpu(self, *args, **kwargs):
+            return {"ok": True, "event": "gpu_configured", "worker_count": 1}
+
+        def render_gpu_frame(self, *args, **kwargs):
+            calls["render"] += 1
+            if calls["render"] == 1:
+                raise NativeQueueFullError(
+                    {"ok": False, "error": "GPU preview in-flight limit reached"}
+                )
+            return {
+                "ok": True,
+                "event": "gpu_frame_ready",
+                "t_ms": 1_000,
+                "shm_key": "test-shm",
+                "slot_offset": 0,
+                "header_bytes": 64,
+                "payload_offset": 64,
+                "payload_bytes": 256,
+                "slot_bytes": 320,
+                "pixel_format": "bgra8888_premultiplied",
+            }
+
+        def close(self):
+            pass
+
+    class FakeReader:
+        shm_key = "test-shm"
+
+        @classmethod
+        def from_event(cls, _event):
+            return cls()
+
+        def read_qimage(self, _event):
+            image = QImage(8, 8, QImage.Format.Format_ARGB32_Premultiplied)
+            image.fill(QColor("#112233"))
+            return image
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(preview_async, "NativeRendererProcess", QueueThenGoodProcess)
+    monkeypatch.setattr(preview_async, "SharedFrameRingReader", FakeReader)
+    renderer = preview_async.GpuAsyncSubtitleRenderer(320, 180)
+    frames: list[tuple[QImage, int]] = []
+    renderer.frame_ready.connect(lambda image, t_ms: frames.append((image, t_ms)))
+    try:
+        renderer.set_state(TimingTrack(), Style())
+        renderer.request(1_000)
+        deadline = time.monotonic() + 5.0
+        while not frames and time.monotonic() < deadline:
+            qapp.processEvents()
+            time.sleep(0.01)
+
+        stats = renderer.stats_snapshot()
+        assert frames and frames[0][1] == 1_000
+        assert stats["queue_full_backpressure"] == 1
+        assert stats["renderer_failures"] == 0
+        assert stats["renderer_restarts"] == 0
+    finally:
+        renderer.stop()
+
+
+def test_gpu_async_renderer_frame_error_retries_once_before_restart(
+    qapp, monkeypatch
+):
+    """首个帧级错误原样重试（不重启、不上报），第二次才进失败链。"""
+    import time
+
+    import krok_helper.subtitle_render.frontend.preview.preview_async as preview_async
+    from krok_helper.subtitle_render.domain.models import Style, TimingTrack
+    from krok_helper.subtitle_render.native.backend import NativeRendererError
+
+    attempts = {"render": 0}
+
+    class FailTwiceThenDeadProcess:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def start(self):
+            return {"ok": True, "event": "ready"}
+
+        def configure_gpu(self, *args, **kwargs):
+            return {"ok": True, "event": "gpu_configured", "worker_count": 1}
+
+        def render_gpu_frame(self, *args, **kwargs):
+            attempts["render"] += 1
+            raise NativeRendererError(f"injected frame failure #{attempts['render']}")
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(
+        preview_async, "NativeRendererProcess", FailTwiceThenDeadProcess
+    )
+    renderer = preview_async.GpuAsyncSubtitleRenderer(320, 180)
+    fallbacks: list[str] = []
+    renderer.fallback_occurred.connect(fallbacks.append)
+    try:
+        renderer.set_state(TimingTrack(), Style())
+        renderer.request(1_000)
+        deadline = time.monotonic() + 5.0
+        while not fallbacks and time.monotonic() < deadline:
+            qapp.processEvents()
+            time.sleep(0.01)
+
+        stats = renderer.stats_snapshot()
+        assert attempts["render"] >= 2
+        assert stats["frame_error_retries"] == 1
+        assert stats["renderer_failures"] == 1
+        assert "injected frame failure #2" in fallbacks[0]
+    finally:
+        renderer.stop()
+
+
 def test_gpu_async_renderer_failure_falls_back_to_painter(qapp, monkeypatch):
     from krok_helper.subtitle_render.frontend.preview import preview_async as pa
     from krok_helper.subtitle_render.domain.models import Style, TimingTrack
@@ -1255,8 +1422,10 @@ def test_gpu_async_renderer_surfaces_changed_fallback_reason(qapp, monkeypatch):
             time.sleep(0.05)
 
         assert len(fallbacks) >= 2
-        assert "injected failure #0" in fallbacks[0]
-        assert any("injected failure #1" in message for message in fallbacks[1:])
+        # 2026-10 帧级错误重试：首个瞬时失败静默重试一次（不上报），首个
+        # 被上报的原因是第二次失败；其后原因变化仍必须再次上报。
+        assert "injected failure #1" in fallbacks[0]
+        assert any("injected failure #2" in message for message in fallbacks[1:])
     finally:
         renderer.stop()
 
@@ -2882,8 +3051,9 @@ def test_preview_graphics_backend_label_follows_gpu_failure_and_recovery(
         def start(self):
             nonlocal start_attempts
             start_attempts += 1
-            if start_attempts == 1:
-                # 首次拉起失败（模拟 GPU 访问异常 / 显存爆）。
+            if start_attempts <= 2:
+                # 前两次拉起失败（模拟 GPU 访问异常 / 显存爆）。第一次会被
+                # 帧级错误重试静默吸收，第二次进入失败链出 CPU 回退帧。
                 raise NativeRendererError("flaky sidecar first start fails")
             return {"ok": True, "event": "ready"}
 
@@ -2929,13 +3099,15 @@ def test_preview_graphics_backend_label_follows_gpu_failure_and_recovery(
         )
         graphics.set_track(track)
 
-        # 首帧：sidecar 拉起失败 → 回退 Painter 出帧 → 标签 CPU。
+        # 首帧：sidecar 前两次拉起失败（第一次被重试吸收，第二次进失败链）
+        # → 回退 Painter 出帧 → 标签 CPU。
         graphics.set_time(1_000)
         deadline = time.monotonic() + 5.0
         while graphics.render_backend_label() != "CPU" and time.monotonic() < deadline:
             qapp.processEvents()
             time.sleep(0.01)
         assert graphics.render_backend_label() == "CPU"
+        assert start_attempts == 2
 
         # 冷却结束后新请求 → 自动重试拉起 sidecar（这次成功）→ 标签 GPU。
         graphics._async_renderer._retry_after = 0.0
@@ -2945,7 +3117,7 @@ def test_preview_graphics_backend_label_follows_gpu_failure_and_recovery(
             qapp.processEvents()
             time.sleep(0.01)
         assert graphics.render_backend_label() == "GPU"
-        assert start_attempts == 2
+        assert start_attempts == 3
     finally:
         graphics.close()
         graphics.deleteLater()

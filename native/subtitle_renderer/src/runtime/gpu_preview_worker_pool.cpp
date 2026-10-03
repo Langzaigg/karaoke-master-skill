@@ -1,6 +1,7 @@
 #include "gpu_preview_worker_pool.h"
 
 #include "../backends/direct2d/d2d_backend.h"
+#include "../diagnostics/native_trace.h"
 
 #include <algorithm>
 #include <chrono>
@@ -10,6 +11,13 @@
 #include <thread>
 #include <utility>
 #include <vector>
+
+namespace {
+
+using krok::subtitle::native::diagnostics::nativeTrace;
+
+}  // namespace
+
 
 namespace krok::subtitle::native::runtime {
 
@@ -176,11 +184,19 @@ public:
     bool submit(Work work) {
         std::lock_guard<std::mutex> lock(mutex_);
         if (stopping_ || !accepting_ || outstanding_ >= workerCount_) {
+            nativeTrace(
+                "submit rejected stopping=%d accepting=%d outstanding=%d workers=%d",
+                stopping_ ? 1 : 0,
+                accepting_ ? 1 : 0,
+                outstanding_,
+                workerCount_
+            );
             return false;
         }
         queue_.push_back(std::move(work));
         ++outstanding_;
         maxOutstanding_ = std::max(maxOutstanding_, outstanding_);
+        nativeTrace("submit accepted outstanding=%d queued=%zu", outstanding_, queue_.size());
         if (readyWorkerCount_ < workerCount_) {
             ready_.notify_all();
         } else {
@@ -265,6 +281,7 @@ private:
         const krok::subtitle::native::RenderScene &scene
     ) {
         followerConfigureThread_ = std::thread([this, scene]() {
+            nativeTrace("follower wait first frame");
             {
                 std::unique_lock<std::mutex> lock(mutex_);
                 followerReady_.wait(lock, [this]() {
@@ -272,6 +289,7 @@ private:
                         || firstFrameDelivered_;
                 });
                 if (stopping_ || cancelFollowerConfigure_) {
+                    nativeTrace("follower wait exit cancelled=%d", cancelFollowerConfigure_ ? 1 : 0);
                     return;
                 }
                 followerReady_.wait_for(
@@ -280,6 +298,7 @@ private:
                     [this]() { return stopping_ || cancelFollowerConfigure_; }
                 );
                 if (stopping_ || cancelFollowerConfigure_) {
+                    nativeTrace("follower grace exit cancelled=%d", cancelFollowerConfigure_ ? 1 : 0);
                     return;
                 }
             }
@@ -290,18 +309,22 @@ private:
                         continue;
                     }
                 }
+                nativeTrace("follower configure begin backend=%zu", index);
                 try {
                     backends_[index]->configure(scene);
                 } catch (...) {
+                    nativeTrace("follower configure FAILED backend=%zu", index);
                     return;
                 }
                 {
                     std::lock_guard<std::mutex> lock(mutex_);
                     if (stopping_ || cancelFollowerConfigure_) {
+                        nativeTrace("follower configure aborted backend=%zu", index);
                         return;
                     }
                     readyWorkerCount_ = static_cast<int>(index + 1);
                 }
+                nativeTrace("follower ready backend=%zu readyWorkers=%d", index, index + 1);
                 ready_.notify_all();
             }
         });
@@ -322,9 +345,14 @@ private:
                 work = std::move(queue_.front());
                 queue_.pop_front();
             }
+            nativeTrace("worker %d task begin queued=%zu", workerIndex, queue_.size());
+            const auto taskStarted = std::chrono::steady_clock::now();
             QJsonObject result = work(
                 *backends_[static_cast<std::size_t>(workerIndex)], workerIndex
             );
+            const auto taskElapsedMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+                std::chrono::steady_clock::now() - taskStarted
+            ).count();
             {
                 std::lock_guard<std::mutex> lock(mutex_);
                 --outstanding_;
@@ -337,7 +365,14 @@ private:
             // Publish only after releasing one in-flight credit.  An export
             // consumer may immediately submit the next frame for the freed
             // ring slot as soon as it receives this response.
+            nativeTrace("worker %d task end %lldms", workerIndex, taskElapsedMs);
             publish_(result);
+            nativeTrace(
+                "worker %d published %s serial=%d",
+                workerIndex,
+                result.value(QStringLiteral("event")).toString().toUtf8().constData(),
+                result.value(QStringLiteral("request_serial")).toInt()
+            );
         }
     }
 

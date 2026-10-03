@@ -2,6 +2,7 @@
 
 #include "../backends/render_backend.h"
 #include "../diagnostics/gpu_diagnostics_json.h"
+#include "../diagnostics/native_trace.h"
 #include "../diagnostics/shared_frame_metadata_json.h"
 #include "../protocol/json_protocol.h"
 #include "../protocol/json_value.h"
@@ -23,6 +24,7 @@ namespace krok::subtitle::native::commands {
 
 using diagnostics::appendGpuFrameDiagnostics;
 using diagnostics::appendSharedFrameMetadata;
+using diagnostics::nativeTrace;
 using protocol::RenderConfig;
 using protocol::intValue;
 using protocol::response;
@@ -91,6 +93,12 @@ QJsonObject renderGpuFrameWithBackend(
         defaultSharedMemoryKey(generation) + QStringLiteral("_gpu_frame")
     );
     QString shmError;
+    nativeTrace(
+        "task %d phase ensure-ring begin slot=%d/%d",
+        frameIndex,
+        ((frameIndex % slotCount) + slotCount) % slotCount,
+        slotCount
+    );
     if (!ensureSharedFrameRing(
             runtime,
             shmKey,
@@ -107,10 +115,13 @@ QJsonObject renderGpuFrameWithBackend(
         const bool readbackBands = !packedRgba && request.value(
             QStringLiteral("readback_bands")
         ).toBool(false);
+        nativeTrace("task %d phase renderFrame begin t=%d", frameIndex, tMs);
         const auto result = backend->renderFrame(tMs, readbackBands);
+        nativeTrace("task %d phase renderFrame end", frameIndex);
         SharedFrameRing ring;
         QElapsedTimer sharedMemoryTimer;
         sharedMemoryTimer.start();
+        nativeTrace("task %d phase write-slot begin", frameIndex);
         const bool wrote = packedRgba
             ? writeSharedPackedRgbaSlot(
                 runtime,
@@ -156,6 +167,7 @@ QJsonObject renderGpuFrameWithBackend(
             ));
         const double sharedMemoryCopyMs =
             static_cast<double>(sharedMemoryTimer.nsecsElapsed()) / 1000000.0;
+        nativeTrace("task %d phase write-slot end wrote=%d", frameIndex, wrote ? 1 : 0);
         if (!wrote) {
             QJsonObject out = response(false, QStringLiteral("gpu_render_frame"));
             out.insert(QStringLiteral("error"), QStringLiteral("failed to write GPU frame shared-memory slot"));
@@ -275,17 +287,30 @@ std::optional<QJsonObject> handleRenderGpuFrame(
             krok::subtitle::native::RenderBackend &backend,
             int workerIndex
         ) {
+            nativeTrace(
+                "render task enter serial=%d t=%d worker=%d",
+                requestSerial,
+                requestSnapshot.value(QStringLiteral("t_ms")).toInt(),
+                workerIndex
+            );
             if (generationCancelled(runtime, generation)) {
                 QJsonObject dropped = response(true, QStringLiteral("gpu_frame_dropped"));
                 dropped.insert(QStringLiteral("generation"), generation);
                 dropped.insert(QStringLiteral("request_serial"), requestSerial);
                 dropped.insert(QStringLiteral("reason"), QStringLiteral("generation_cancelled"));
+                nativeTrace("render task drop-cancelled serial=%d", requestSerial);
                 return dropped;
             }
             QJsonObject workerRequest = requestSnapshot;
             workerRequest.insert(QStringLiteral("worker_index"), workerIndex);
             QJsonObject out = renderGpuFrameWithBackend(
                 workerRequest, snapshot, runtime, &backend
+            );
+            nativeTrace(
+                "render task leave serial=%d ok=%d event=%s",
+                requestSerial,
+                out.value(QStringLiteral("ok")).toBool() ? 1 : 0,
+                out.value(QStringLiteral("event")).toString().toUtf8().constData()
             );
             if (auto *currentPool = gpuPreviewPool(runtime, forceWarp)) {
                 out.insert(
@@ -298,6 +323,7 @@ std::optional<QJsonObject> handleRenderGpuFrame(
                 out.insert(QStringLiteral("generation"), generation);
                 out.insert(QStringLiteral("request_serial"), requestSerial);
                 out.insert(QStringLiteral("reason"), QStringLiteral("generation_cancelled"));
+                nativeTrace("render task drop-after-render serial=%d", requestSerial);
             }
             return out;
         }
@@ -311,6 +337,7 @@ std::optional<QJsonObject> handleRenderGpuFrame(
         out.insert(QStringLiteral("worker_count"), pool->workerCount());
         return out;
     }
+    nativeTrace("render task queued serial=%d t=%d", requestSerial, requestSnapshot.value(QStringLiteral("t_ms")).toInt());
     return std::nullopt;
 }
 

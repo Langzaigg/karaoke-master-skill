@@ -42,6 +42,8 @@ add_executable(krok_subtitle_renderer
     src/commands/qt_range_commands.h
     src/diagnostics/gpu_diagnostics_json.cpp
     src/diagnostics/gpu_diagnostics_json.h
+    src/diagnostics/native_trace.cpp
+    src/diagnostics/native_trace.h
     src/diagnostics/qt_frame_diagnostics_json.cpp
     src/diagnostics/qt_frame_diagnostics_json.h
     src/diagnostics/shared_frame_metadata_json.cpp
