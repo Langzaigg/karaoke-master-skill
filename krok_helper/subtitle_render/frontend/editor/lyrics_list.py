@@ -1285,6 +1285,13 @@ class LyricsPanel(DropPanel):
         self._swatch_refresh_timer.setSingleShot(True)
         self._swatch_refresh_timer.setInterval(_SWATCH_REFRESH_DEBOUNCE_MS)
         self._swatch_refresh_timer.timeout.connect(self._flush_swatch_refresh)
+        # 窄刷新（布局列组 / 特效列）后的表格最小宽重算：尾沿合并，避免
+        # 连续调参期间反复逐单元格量尺寸。
+        self._min_width_refresh_timer = QTimer(self)
+        self._min_width_refresh_timer.setSingleShot(True)
+        self._min_width_refresh_timer.setInterval(400)
+        self._min_width_refresh_timer.timeout.connect(self._update_minimum_width)
+        self._swatch_refresh_pending = False
         self.setObjectName("LyricsPanel")
         themed(self, self._panel_qss)
 
@@ -1534,10 +1541,23 @@ class LyricsPanel(DropPanel):
         if not layout_changed and not swatch_changed and not animation_changed:
             return
         if layout_changed or animation_changed:
-            # 行内容/列语义/特效摘要变了：立刻刷新，并把待处理的色点刷新一并做掉。
+            # 列语义/特效摘要变了：立即刷新，但窄化到受影响的列——整表刷新
+            # 要重写 5 列 × 全部行并逐单元格量最小宽（屏幕 ~37ms，全在界面
+            # 线程），改字号/边距/动画档这类高频调参每次都付不起。
+            # 布局档只动 轨标/内容对齐/布局名 三组；动画档只动 特效列。
+            # 两者同时变化（罕见，如预设切换）仍走整表。待处理的色点刷新
+            # 由色点窄刷新就地吸收（与旧行为同样「立即生效」）。
+            absorb_swatch = getattr(self, "_swatch_refresh_pending", False)
             self._swatch_refresh_timer.stop()
             self._swatch_refresh_pending = False
-            self._refresh_presentation(update_widths=True)
+            if layout_changed and animation_changed:
+                self._refresh_presentation(update_widths=True)
+            elif layout_changed:
+                self._refresh_layout_columns()
+            else:
+                self._refresh_effect_column()
+            if absorb_swatch:
+                self._refresh_role_swatch_column()
             return
         # 只有色点变了：攒起来，停手后再刷一次。
         self._swatch_refresh_pending = True
@@ -1590,6 +1610,122 @@ class LyricsPanel(DropPanel):
         if track_index is None or not 0 <= track_index < len(self._track.lines):
             return None
         return self._track.lines[track_index]
+
+    def _schedule_min_width_refresh(self) -> None:
+        """窄刷新后的表格最小宽重算：尾沿合并，停手 400ms 后算一次。
+
+        最小宽要逐可见单元格量尺寸（很贵），且只是布局下限的滞后语义——
+        连续调参期间用旧下限无感知，不值得每个 tick 付一次。
+        """
+        self._min_width_refresh_timer.start()
+
+    def _refresh_layout_columns(self) -> None:
+        """布局档变化的窄刷新：轨标 / 内容对齐 / 布局名（不动色点/特效列）。"""
+        style = self._style
+        dual = bool(style.dual_line_layout)
+        lane_color = QColor(palette().text_hint)
+        self._table.setColumnHidden(
+            COL_LANE, False if self._title_mode else not dual
+        )
+        self._recompute_render_lanes()
+        page_sizes = Counter(self._render_groups)
+        self._table.blockSignals(True)
+        try:
+            for row in range(self._table.rowCount()):
+                if row >= len(self._row_meta) or self._row_meta[row][0]:
+                    continue
+                lane_item = self._table.item(row, COL_LANE)
+                content_item = self._table.item(row, COL_CONTENT)
+                layout_item = self._table.item(row, COL_LAYOUT)
+                if (
+                    lane_item is None
+                    or content_item is None
+                    or layout_item is None
+                ):
+                    continue
+                line = self._presentation_row_line(row)
+                if line is None:
+                    continue
+                presentation = self._presentation_rows[row]
+                track_index = presentation.track_line_index
+                render_index = presentation.render_line_index
+                lane = (
+                    self._render_lanes[render_index]
+                    if 0 <= render_index < len(self._render_lanes)
+                    else 0
+                )
+                line_style = _effective_layout_style(style, line)
+                layout_ref = int(getattr(line, "layout_index", 0) or 0) if line else 0
+                layout_name = (
+                    style.layouts[layout_ref - 1].name
+                    if 1 <= layout_ref <= len(style.layouts)
+                    else layout_display_name(style, "default")
+                )
+                lane_item.setText(
+                    str((track_index or 0) + 1)
+                    if self._title_mode
+                    else (f"T{lane + 1}" if dual else "")
+                )
+                lane_item.setToolTip(f"布局：{layout_name}")
+                layout_item.setText(layout_name)
+                layout_item.setToolTip(
+                    f"当前页面使用“{layout_item.text()}”。单击可选择同容量或更大容量的布局。"
+                )
+                lane_item.setForeground(QBrush(lane_color))
+                lane_font = lane_item.font()
+                lane_font.setPointSizeF(8.0)
+                lane_item.setFont(lane_font)
+                single_line_page = (
+                    0 <= render_index < len(self._render_groups)
+                    and page_sizes[self._render_groups[render_index]] == 1
+                )
+                content_item.setTextAlignment(
+                    self._content_alignment(line_style, lane, dual, single_line_page)
+                )
+        finally:
+            self._table.blockSignals(False)
+        self._schedule_min_width_refresh()
+        self._table.viewport().update()
+
+    def _refresh_effect_column(self) -> None:
+        """动画档变化的窄刷新：只重写「特效」列摘要（标题模式下该列隐藏）。"""
+        if self._title_mode:
+            return
+        style = self._style
+        edge_flags = self._section_edge_flags()
+        self._table.blockSignals(True)
+        try:
+            for row in range(self._table.rowCount()):
+                if row >= len(self._row_meta) or self._row_meta[row][0]:
+                    continue
+                effect_item = self._table.item(row, COL_EFFECT)
+                if effect_item is None:
+                    continue
+                line = self._presentation_row_line(row)
+                if line is None:
+                    continue
+                track_index = self._presentation_rows[row].track_line_index
+                effect_item.setText(
+                    _animation_summary(
+                        style,
+                        line.animation_override,
+                        edge_flags.get(track_index, (False, False)),
+                        wipe_reverse=bool(line.wipe_reverse),
+                    )
+                )
+                if line.animation_override is None:
+                    effect_item.setIcon(QIcon())
+                    effect_item.setForeground(QBrush(QColor(palette().text_hint)))
+                else:
+                    effect_item.setIcon(
+                        _swatch_icon(QColor(palette().accent_primary))
+                    )
+                    effect_item.setForeground(QBrush(QColor(palette().accent_primary)))
+                effect_item.setToolTip("双击编辑该行特效；右键可批量设置选中行。")
+        finally:
+            self._table.blockSignals(False)
+        self._schedule_min_width_refresh()
+        self._table.viewport().update()
 
     def _refresh_role_swatch_column(self) -> None:
         """纯配色变化的窄刷新：只重画角色列色点图标，其余列一律不碰。

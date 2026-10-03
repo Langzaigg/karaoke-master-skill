@@ -147,12 +147,13 @@ def test_render_only_style_change_skips_full_table_refresh(qapp):
     panel._flush_swatch_refresh()
     assert calls == []
 
-    # 影响行内容/列语义的字段仍然立即刷新，并且不留下待处理的色点刷新。
+    # 布局档字段立即生效但走窄刷新（轨标/对齐/布局名），不再整表；
+    # 同批的色点变化由色点窄刷新就地吸收，不留下待处理刷新。
     panel.set_style(
         replace(style, fill_color="#123456", line_alignments=["left", "center", "right"])
     )
-    assert calls == [1]
-    assert not panel._swatch_refresh_timer.isActive()
+    assert calls == []  # 整表未触发
+    assert not panel._swatch_refresh_timer.isActive()  # 色点已被吸收
 
     panel.deleteLater()
     qapp.processEvents()
@@ -338,4 +339,57 @@ def test_loading_settings_dialog_edits_keep_singer_label_text(qapp):
     )
     dialog.deleteLater()
     parent.deleteLater()
+    qapp.processEvents()
+
+
+def test_layout_scope_and_animation_scope_use_narrow_refresh(qapp):
+    """布局档/动画档各自窄刷新：不触发整表，且产出的单元格值与整表一致。"""
+    panel = LyricsPanel()
+    style = Style()
+    panel.set_style(style)
+    panel.set_track(_track())
+
+    full_calls: list[int] = []
+    original_full = panel._refresh_presentation
+    panel._refresh_presentation = lambda *a, **k: (  # type: ignore[method-assign]
+        full_calls.append(1),
+        original_full(*a, **k),
+    )[1]
+
+    # 动画档（entry_anim 类型）：窄刷特效列，不整表。
+    panel.set_style(replace(style, entry_anim="fade"))
+    assert full_calls == []
+    lyric_row = next(
+        row
+        for row, item in enumerate(panel._presentation_rows)
+        if item.kind == "lyric"
+    )
+    effect_text_narrow = panel.table_widget.item(lyric_row, COL_EFFECT).text()
+    assert effect_text_narrow  # 摘要非空
+
+    # 布局档（对齐）：窄刷轨标/对齐/布局名，不整表。
+    panel.set_style(replace(style, entry_anim="fade", line_alignments=["left", "right", "center"]))
+    assert full_calls == []
+    lane_visible = not panel.table_widget.isColumnHidden(COL_LANE)
+    assert lane_visible  # 双行布局轨列可见
+
+    # 与整表对照：强制整表后，特效摘与轨标文本一致。
+    panel._refresh_presentation()
+    assert (
+        panel.table_widget.item(lyric_row, COL_EFFECT).text()
+        == effect_text_narrow
+    )
+
+    # 布局 + 动画同时变化（如预设切换）仍走整表。
+    panel.set_style(
+        replace(
+            style,
+            entry_anim="fade",
+            line_alignments=["left", "right", "center"],
+            dual_line_layout=not style.dual_line_layout,
+        )
+    )
+    assert full_calls == [1]
+
+    panel.deleteLater()
     qapp.processEvents()
