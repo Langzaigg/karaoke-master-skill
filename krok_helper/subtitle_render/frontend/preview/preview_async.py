@@ -889,7 +889,15 @@ class GpuAsyncSubtitleRenderer(QObject):
             self._pending = None
             self._cancel_native_generation_locked(self._generation)
             self._condition.notify_all()
-        self._thread.join(timeout=3.0)
+        if not self._thread.join(timeout=3.0):
+            # worker 卡在长渲染等待里（最坏 2s 帧超时 + 关闭握手 > join 窗口）：
+            # 解释器退出时 daemon 线程的 finally 不会执行，sidecar 会变孤儿并
+            # 持续占用显存（2026-10 实测）。从本线程直接收掉进程兜底；owner 的
+            # close 幂等，worker 之后的 _close_renderer 只是 no-op。
+            try:
+                self._renderer_owner.close()
+            except Exception:  # noqa: BLE001 - 关闭兜底不得向 GUI 抛错
+                pass
 
     def _cancel_native_generation_locked(self, generation: int) -> None:
         renderer = self._renderer_owner.process

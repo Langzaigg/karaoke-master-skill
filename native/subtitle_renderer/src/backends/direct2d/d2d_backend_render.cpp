@@ -8142,10 +8142,20 @@ ProbeResult Direct2DGpuBackend::renderFrameInternal(
     // （多 worker 各自持有独立 D3D 设备时的驱动级 wedge）会让它无限挂死整
     // 个 worker 线程，宿主只看到 2s 协议超时然后整进程重启（2026-10 预览
     // 卡死循环的根因）。先发 event query 轮询完成度，超过截止时间抛错，
-    // 让该帧以错误响应返回、worker 线程保持可用。1500ms 低于预览宿主的
-    // 2s 帧响应超时，且远高于正常回读（p95≈13ms）。
+    // 让该帧以错误响应返回、worker 线程保持可用。
     {
-        static constexpr int kReadbackWaitTimeoutMs = 1500;
+        // 截止时间自适应：本帧绘制耗时 × 20 倍余量，夹在 [1.5s, 2.0s]。
+        // 慢机器上单帧绘制本身就要几百 ms 时，固定 1.5s 会把合法回读误杀
+        // （2026-10 用户拍板 20 倍）；上界 2.0s 对齐预览宿主的帧响应超时——
+        // 超过它宿主本来就会放弃这一帧，无需 sidecar 更宽容。
+        static constexpr double kReadbackMargin = 20.0;
+        static constexpr int kReadbackWaitMinMs = 1500;
+        static constexpr int kReadbackWaitMaxMs = 2000;
+        const int readbackWaitTimeoutMs = std::clamp(
+            static_cast<int>(renderMs * kReadbackMargin),
+            kReadbackWaitMinMs,
+            kReadbackWaitMaxMs
+        );
         D3D11_QUERY_DESC queryDesc{};
         queryDesc.Query = D3D11_QUERY_EVENT;
         Microsoft::WRL::ComPtr<ID3D11Query> readbackQuery;
@@ -8162,7 +8172,7 @@ ProbeResult Direct2DGpuBackend::renderFrameInternal(
         const auto spinDeadline =
             gpuWaitStart + std::chrono::milliseconds(2);
         const auto waitDeadline =
-            gpuWaitStart + std::chrono::milliseconds(kReadbackWaitTimeoutMs);
+            gpuWaitStart + std::chrono::milliseconds(readbackWaitTimeoutMs);
         HRESULT getDataHr = S_FALSE;
         while (true) {
             getDataHr =
@@ -8190,7 +8200,7 @@ ProbeResult Direct2DGpuBackend::renderFrameInternal(
             }
             throw std::runtime_error(
                 "frame readback timeout: GPU did not finish within "
-                + std::to_string(kReadbackWaitTimeoutMs) + "ms"
+                + std::to_string(readbackWaitTimeoutMs) + "ms"
             );
         }
     }
