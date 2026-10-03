@@ -147,6 +147,55 @@ _LYRIC_LAYOUT_EXCLUDED_SCHEME_FIELDS = frozenset({
 """
 
 
+def track_signature_for_windows(track) -> Hashable:
+    """整轨签名，逐行动画覆盖按「窗口语义」归一化（P5 逐行动画差分）。
+
+    显示窗口只消费覆盖的 ``(类型是否为 none, 时长)``（见
+    ``_animation_windows_unchanged`` 与 ``entry_animation_ms``）与反向
+    标记；``karaoke_anim`` / ``sing_fx`` 档位是纯渲染字段（不进任何窗口
+    输入）。归一化后：
+
+    - 同为非 none 的类型互换（fade↔slide 等，时长不变）→ 签名不变 →
+      布局计划/显示窗口/差分闸门全部命中缓存，逐行样式经
+      ``_rebind_plan_line_styles`` 从当前轨道重解析；
+    - none↔非 none 或时长变化 → 签名变化 → 全量重排（窗口真的会动）。
+
+    实现是浅拷贝行级覆盖（chars 列表按引用共享，签名树走既有的
+    layout_pass memoize），不做整轨深拷贝。
+    """
+    from dataclasses import replace as _dc_replace
+
+    from krok_helper.subtitle_render.domain.timing import TimingTrack
+
+    if not isinstance(track, TimingTrack):
+        return value_signature(track)
+
+    def _normalized_override(override):
+        if override is None:
+            return None
+        return _dc_replace(
+            override,
+            entry_anim=("none" if override.entry_anim == "none" else "anim"),
+            exit_anim=("none" if override.exit_anim == "none" else "anim"),
+            karaoke_anim="inherit",
+            sing_fx="inherit",
+        )
+
+    normalized_lines = tuple(
+        (
+            line
+            if line.animation_override is None
+            else _dc_replace(
+                line, animation_override=_normalized_override(
+                    line.animation_override
+                )
+            )
+        )
+        for line in track.lines
+    )
+    return value_signature(_dc_replace(track, lines=list(normalized_lines)))
+
+
 def value_signature(value) -> Hashable:
     """Recursively describe the current value without using object identity.
 

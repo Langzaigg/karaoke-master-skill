@@ -66,10 +66,18 @@ def style_patch_base_key(
     from krok_helper.subtitle_render.domain.models import style_for_track
     from krok_helper.subtitle_render.engine.value_signature import (
         lyric_layout_style_signature,
+        track_signature_for_windows,
         value_signature,
     )
 
-    parts: list[object] = [value_signature(track), lyric_layout_style_signature(style)]
+    # 轨道用窗口语义归一化签名（P5）：逐行动画类型互换（时长不变、
+    # none 性不变）不改窗口与几何 → 闸门保持命中，走 lines_style 差分
+    # （行级动画字段随载荷下发）。布局签名保持严格：任何布局输入变化
+    # 仍全量重配。
+    parts: list[object] = [
+        track_signature_for_windows(track),
+        lyric_layout_style_signature(style),
+    ]
     for source in extra_tracks or ():
         source_style = style_for_track(style, source)
         parts.append(value_signature(source))

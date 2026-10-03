@@ -16,6 +16,7 @@ from krok_helper.subtitle_render.engine.layout.page.placement import (
 )
 from krok_helper.subtitle_render.engine.value_signature import (
     lyric_layout_style_signature,
+    track_signature_for_windows,
     value_signature,
 )
 from krok_helper.subtitle_render.engine.timing.timeline import DisplayLine
@@ -90,7 +91,7 @@ def _page_offset_cache_key(
     return (
         max(int(logical_w), 1),
         max(int(logical_h), 1),
-        value_signature(track),
+        track_signature_for_windows(track),
         lyric_layout_style_signature(style),
     )
 

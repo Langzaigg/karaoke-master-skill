@@ -42,6 +42,7 @@ from krok_helper.subtitle_render.engine.layout.line.qt_geometry import (
 from krok_helper.subtitle_render.engine.timing.timeline import DisplayLine
 from krok_helper.subtitle_render.engine.value_signature import (
     lyric_layout_style_signature,
+    track_signature_for_windows,
     value_signature,
 )
 from krok_helper.subtitle_render.domain.models import Style
@@ -156,7 +157,10 @@ def resolve_track_layout_plan(
         logical_w,
         logical_h,
         id(track),
-        value_signature(track),
+        # 窗口语义归一化签名（P5）：逐行动画「类型互换（时长不变）」不再
+        # 打布局计划缓存——计划几何不变，逐行样式由 _rebind_plan_line_styles
+        # 从当前轨道重解析。none↔非none 与时长变化仍全量重排。
+        track_signature_for_windows(track),
         lyric_layout_style_signature(style),
     )
     if use_cache and layout_cache_enabled():

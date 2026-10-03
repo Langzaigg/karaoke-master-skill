@@ -64,10 +64,14 @@ def layout_pass():
             _LAYOUT_PASS.section_edges = None
             _LAYOUT_PASS.tracks = []
             _LAYOUT_PASS.styles = []
-        _LAYOUT_PASS.lines = []
-        _LAYOUT_PASS.ruby_lists = []
-        _LAYOUT_PASS.metrics = []
-        _LAYOUT_PASS.signature_refs = []
+            _LAYOUT_PASS.lines = []
+            _LAYOUT_PASS.ruby_lists = []
+            _LAYOUT_PASS.metrics = []
+            # signature_refs 是「memo 按 id 缓存」的防复用锚：嵌套 pass 退出
+            # 不能清——外层的 signatures 字典还活着，锚一断，已 memo 的对象被
+            # 回收、地址复用后，外层会对同 id 的新对象返回旧签名（P5 调试中
+            # 由归一化签名的临时对象触发必现：副轨签名里出现主轨的字符）。
+            _LAYOUT_PASS.signature_refs = []
 
 
 __all__ = ["layout_pass"]

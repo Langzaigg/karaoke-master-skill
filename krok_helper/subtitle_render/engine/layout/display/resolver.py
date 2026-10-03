@@ -61,6 +61,7 @@ from krok_helper.subtitle_render.engine.render_progress import (
 )
 from krok_helper.subtitle_render.engine.value_signature import (
     lyric_layout_style_signature,
+    track_signature_for_windows,
     value_signature,
 )
 from krok_helper.subtitle_render.domain.models import Style
@@ -1220,7 +1221,7 @@ def resolve_display_lines_for_style(
             logical_w,
             logical_h,
             id(track),
-            value_signature(track),
+            track_signature_for_windows(track),
             lyric_layout_style_signature(style),
         )
         cached = cached_display_line_resolution(cache_key)

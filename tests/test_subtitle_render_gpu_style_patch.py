@@ -526,3 +526,76 @@ def test_fx_render_only_params_stay_patch_eligible():
     assert lyric_layout_style_signature(
         _patch_style(fx_particle_count=24)
     ) == lyric_layout_style_signature(style)
+
+
+def test_line_animation_type_swap_keeps_window_signature(qapp):
+    """P5：逐行动画「类型互换（时长不变）」不改窗口语义签名。"""
+    from dataclasses import replace as dc_replace
+
+    from krok_helper.subtitle_render.domain.timing import LineAnimationOverride
+    from krok_helper.subtitle_render.engine.value_signature import (
+        track_signature_for_windows,
+        value_signature,
+    )
+    from krok_helper.subtitle_render.frontend.preview.preview_async import (
+        style_patch_base_key,
+    )
+
+    base_line = TimingLine(
+        chars=[TimingChar("歌", 0), TimingChar("词", 500)],
+        end_ms=1500,
+        animation_override=LineAnimationOverride(
+            entry_anim="fade", exit_anim="note",
+            entry_duration_ms=400, exit_duration_ms=350,
+            karaoke_anim="scanline", sing_fx="twinkle",
+        ),
+    )
+    track_a = TimingTrack(lines=[base_line])
+    swapped = dc_replace(
+        base_line,
+        animation_override=LineAnimationOverride(
+            entry_anim="slide", exit_anim="sparkle",
+            entry_duration_ms=400, exit_duration_ms=350,
+            karaoke_anim="utopia", sing_fx="note",
+        ),
+    )
+    track_b = TimingTrack(lines=[swapped])
+
+    # 归一化签名稳定（类型互换 / 唱字档互换）……
+    assert track_signature_for_windows(track_a) == track_signature_for_windows(
+        track_b
+    )
+    # ……而严格签名如实施变化（归一化没有吞掉真实编辑）。
+    assert value_signature(track_a) != value_signature(track_b)
+
+    # none↔非none 与时长变化必须仍然全量（窗口真的会动）。
+    to_none = TimingTrack(lines=[dc_replace(
+        base_line,
+        animation_override=LineAnimationOverride(
+            entry_anim="none", exit_anim="note",
+            entry_duration_ms=400, exit_duration_ms=350,
+        ),
+    )])
+    assert track_signature_for_windows(track_a) != track_signature_for_windows(
+        to_none
+    )
+    duration_change = TimingTrack(lines=[dc_replace(
+        base_line,
+        animation_override=LineAnimationOverride(
+            entry_anim="fade", exit_anim="note",
+            entry_duration_ms=800, exit_duration_ms=350,
+        ),
+    )])
+    assert track_signature_for_windows(track_a) != track_signature_for_windows(
+        duration_change
+    )
+
+    # 差分闸门 key 同口径：类型互换命中。
+    st = _patch_style()
+    key_a = style_patch_base_key(
+        track_a, st, [], width=_WIDTH, height=_HEIGHT, fps=_FPS, dpr=1.0
+    )
+    key_b = style_patch_base_key(
+        track_b, st, [], width=_WIDTH, height=_HEIGHT, fps=_FPS, dpr=1.0
+    )
+    assert key_a == key_b
