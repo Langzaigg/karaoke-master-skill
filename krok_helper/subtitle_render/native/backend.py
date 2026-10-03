@@ -22,6 +22,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
 
+import numpy as np
+
 from krok_helper.subtitle_render.engine.render.render_ir import build_render_ir
 from krok_helper.subtitle_render.domain.timing import TimingTrack
 from krok_helper.subtitle_render.domain.models import Style
@@ -425,13 +427,20 @@ class SharedFrameRingReader:
             destination_pointer.setsize(image.sizeInBytes())
             destination = memoryview(destination_pointer)
             destination_stride = image.bytesPerLine()
+            # numpy 块拷贝：逐行 memoryview 切片赋值在 ~1500 行的预览帧上要
+            # 10ms+（2026-10 预览帧率地板的主要成分之一），按条带整块拷贝
+            # 降到 ~1ms 量级。
+            row_bytes = width * 4
+            destination_rows = np.frombuffer(
+                destination, dtype=np.uint8
+            ).reshape(height, destination_stride)
+            source_bytes = np.frombuffer(source, dtype=np.uint8)
             for top, band_height, packed_top in bands:
-                for row in range(band_height):
-                    source_start = payload_offset + (packed_top + row) * stride
-                    destination_start = (top + row) * destination_stride
-                    destination[destination_start : destination_start + width * 4] = source[
-                        source_start : source_start + width * 4
-                    ]
+                band_source = source_bytes[
+                    payload_offset + packed_top * stride : payload_offset
+                    + (packed_top + band_height) * stride
+                ].reshape(band_height, stride)[:, :row_bytes]
+                destination_rows[top : top + band_height, :row_bytes] = band_source
             return image
         finally:
             self._shared.unlock()

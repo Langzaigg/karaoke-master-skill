@@ -1415,7 +1415,17 @@ class GpuAsyncSubtitleRenderer(QObject):
                 self._stats["max_in_flight"], len(metadata)
             )
 
-        completed = [renderer.finish_render_gpu_frame() for _ in metadata]
+        completed: list[dict] = []
+        for _ in metadata:
+            try:
+                completed.append(renderer.finish_render_gpu_frame())
+            except NativeQueueFullError:
+                # 流控：该槽位的提交被拒（池被上一批投机帧占满）。被拒帧
+                # 从未开始渲染，不影响本批其余帧的交付；媒体时钟会在下一
+                # tick 重发被拒的时间戳。必须逐帧容错——让异常穿透会把整
+                # 批已完成的帧一起丢掉（2026-10 实测：背压计数暴涨且当前
+                # 帧被饿死）。
+                self._note("queue_full_backpressure")
         completed_at = time.monotonic()
         self._record_timing(
             "roundtrip_ms", (completed_at - batch_started) * 1000.0
