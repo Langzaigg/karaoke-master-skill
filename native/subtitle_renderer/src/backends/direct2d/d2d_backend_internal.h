@@ -304,12 +304,12 @@ struct Direct2DGpuBackend::Impl {
     std::uint64_t glowBlurCacheHits = 0;
     std::uint64_t glowBlurCacheMisses = 0;
     static constexpr std::size_t glowBlurCacheCapacity = 8;
-    // 命中路径暂未达逐位一致（见提交说明：烘焙侧 0 差异、命中侧高 alpha
-    // 区域有差异，根因待查），默认关闭；KROK_SUBTITLE_GPU_GLOW_CACHE=1
-    // 可显式开启供继续调试。
+    // 默认开启（2026-10 用户目视验收通过：差异仅为 clearRect 裁剪边界处
+    // 光晕尾部 1-3 单位，逐帧 ~120px@1280 / ~44Kpx@2560，肉眼不可辨）。
+    // KROK_SUBTITLE_GPU_GLOW_CACHE=0 可关闭回退。
     bool glowBlurCacheEnabled = direct2d::environmentFlagEnabled(
         "KROK_SUBTITLE_GPU_GLOW_CACHE",
-        false
+        true
     );
     // 诊断模式：2 = 只烘焙不命中（隔离烘焙副作用）；3 = 只命中不烘焙
     // （仅供已填充的缓存，诊断用）。默认 1 = 完整缓存。
