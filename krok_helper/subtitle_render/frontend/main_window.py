@@ -96,11 +96,11 @@ from krok_helper.subtitle_render.engine.export.encoder_select import (
     CODEC_H264,
     CODEC_HEVC,
     CPU_PRESETS,
-    ENCODER_AMF,
     ENCODER_AUTO,
     ENCODER_CPU,
     ENCODER_NVENC,
     ENCODER_QSV,
+    normalize_encoder_mode,
 )
 from krok_helper.subtitle_render.engine.layout.page.assignment import (
     apply_layout_to_page,
@@ -2045,7 +2045,9 @@ class SubtitleRenderWindow(QWidget):
             self._export_name_template = name_template.strip()
         encoder = output.get("encoder_mode")
         if encoder is not None:
-            idx = self._export_encoder_combo.findData(encoder)
+            idx = self._export_encoder_combo.findData(
+                normalize_encoder_mode(str(encoder))
+            )
             if idx >= 0:
                 self._export_encoder_combo.setCurrentIndex(idx)
         preset = output.get("preset")
@@ -2141,7 +2143,9 @@ class SubtitleRenderWindow(QWidget):
         )
         previous_signal_states = [control.blockSignals(True) for control in controls]
         try:
-            encoder = local_output.get("encoder_mode", ENCODER_CPU)
+            encoder = normalize_encoder_mode(
+                str(local_output.get("encoder_mode", ENCODER_CPU))
+            )
             self._export_encoder_combo.setCurrentIndex(
                 max(self._export_encoder_combo.findData(encoder), 0)
             )
@@ -8336,6 +8340,12 @@ class SubtitleRenderWindow(QWidget):
         )
         self._subtitle_loading_defaults = loaded.subtitle_loading_defaults
         self._local_output_preferences = loaded.output
+        # 旧偏好里的 legacy "amf" 在此归一为 QVBR，后续读写都只用新值。
+        encoder_pref = self._local_output_preferences.get("encoder_mode")
+        if encoder_pref is not None:
+            self._local_output_preferences["encoder_mode"] = normalize_encoder_mode(
+                str(encoder_pref)
+            )
         self._app_default_style = loaded.app_default_style
         self._style = loaded.project_style
         self._layout_assignment_preference = loaded.layout_assignment

@@ -6,20 +6,24 @@ import subprocess
 from functools import lru_cache
 from typing import Literal
 
-EncoderMode = Literal["cpu", "auto", "nvenc", "qsv", "amf"]
+EncoderMode = Literal["cpu", "auto", "nvenc", "qsv", "amf_qvbr", "amf_cqp"]
 VideoCodec = Literal["h264", "hevc"]
 
 ENCODER_CPU = "cpu"
 ENCODER_AUTO = "auto"
 ENCODER_NVENC = "nvenc"
 ENCODER_QSV = "qsv"
+ENCODER_AMF_QVBR = "amf_qvbr"
+ENCODER_AMF_CQP = "amf_cqp"
+# 4.3.x 及更早版本保存的旧值，自 4.2.8.7 起语义即 QVBR，加载时归一到 QVBR。
 ENCODER_AMF = "amf"
 ENCODER_MODES: set[str] = {
     ENCODER_CPU,
     ENCODER_AUTO,
     ENCODER_NVENC,
     ENCODER_QSV,
-    ENCODER_AMF,
+    ENCODER_AMF_QVBR,
+    ENCODER_AMF_CQP,
 }
 
 CODEC_H264 = "h264"
@@ -32,13 +36,15 @@ _CODEC_ENCODER_NAMES: dict[str, dict[str, str]] = {
         ENCODER_CPU: "libx264",
         ENCODER_NVENC: "h264_nvenc",
         ENCODER_QSV: "h264_qsv",
-        ENCODER_AMF: "h264_amf",
+        ENCODER_AMF_QVBR: "h264_amf",
+        ENCODER_AMF_CQP: "h264_amf",
     },
     CODEC_HEVC: {
         ENCODER_CPU: "libx265",
         ENCODER_NVENC: "hevc_nvenc",
         ENCODER_QSV: "hevc_qsv",
-        ENCODER_AMF: "hevc_amf",
+        ENCODER_AMF_QVBR: "hevc_amf",
+        ENCODER_AMF_CQP: "hevc_amf",
     },
 }
 
@@ -56,7 +62,9 @@ CPU_PRESETS: tuple[str, ...] = (
 
 
 def normalize_encoder_mode(mode: str) -> str:
-    """Return a supported encoder mode, falling back to CPU."""
+    """Return a supported encoder mode, migrating legacy values, falling back to CPU."""
+    if mode == ENCODER_AMF:
+        return ENCODER_AMF_QVBR
     return mode if mode in ENCODER_MODES else ENCODER_CPU
 
 
@@ -104,10 +112,29 @@ def video_encoder_options(
         # QSV ICQ accepts 1-51. A zero value disables ICQ selection in FFmpeg,
         # so preserve the shared UI range while translating only this endpoint.
         return ["-c:v", names[ENCODER_QSV], "-global_quality", str(max(1, crf)), *hevc_tag]
-    if selected == ENCODER_AMF:
+    if selected == ENCODER_AMF_CQP:
+        # CQP 与 N3 的 AMD/AMF 导出同构：质量值直通为固定量化参数，
+        # 码率是编码结果而非输入，不传 -b:v/-maxrate。hevc_amf 无 B 帧，
+        # 没有 -qp_b 选项。
+        options = [
+            "-c:v",
+            names[ENCODER_AMF_CQP],
+            "-quality",
+            "balanced",
+            "-rc",
+            "cqp",
+            "-qp_i",
+            str(crf),
+            "-qp_p",
+            str(crf),
+        ]
+        if codec == CODEC_H264:
+            options.extend(["-qp_b", str(crf)])
+        return [*options, *hevc_tag]
+    if selected == ENCODER_AMF_QVBR:
         return [
             "-c:v",
-            names[ENCODER_AMF],
+            names[ENCODER_AMF_QVBR],
             "-quality",
             "balanced",
             "-rc",
@@ -139,7 +166,8 @@ def resolved_encoder_label(ffmpeg_path: str, mode: str, codec: str = CODEC_H264)
     base = {
         ENCODER_NVENC: "NVIDIA NVENC",
         ENCODER_QSV: "Intel QSV",
-        ENCODER_AMF: "AMD AMF",
+        ENCODER_AMF_QVBR: "AMD AMF(QVBR)",
+        ENCODER_AMF_CQP: "AMD AMF(CQP)",
     }.get(selected)
     if base is None:
         return f"CPU({encoder_name})"
@@ -149,7 +177,8 @@ def resolved_encoder_label(ffmpeg_path: str, mode: str, codec: str = CODEC_H264)
 def _best_available_hardware_encoder(ffmpeg_path: str, codec: str = CODEC_H264) -> str | None:
     encoders = _available_encoders(ffmpeg_path)
     names = _CODEC_ENCODER_NAMES[normalize_video_codec(codec)]
-    for mode in (ENCODER_NVENC, ENCODER_QSV, ENCODER_AMF):
+    # auto 模式解析到 A 卡时走 QVBR；CQP 需要用户显式选择。
+    for mode in (ENCODER_NVENC, ENCODER_QSV, ENCODER_AMF_QVBR):
         if names[mode] in encoders:
             return mode
     return None

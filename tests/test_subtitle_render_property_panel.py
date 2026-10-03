@@ -9803,6 +9803,31 @@ def test_export_encoding_choices_persist_as_local_new_project_defaults(
     assert win._export_render_workers_combo.currentData() == 12
 
 
+def test_legacy_amf_encoder_choice_migrates_to_qvbr(qapp, monkeypatch):
+    """旧版保存的 "amf" 在本地偏好与工程加载时都归一到 QVBR，不落回 CPU。"""
+    monkeypatch.setattr(mw, "fluent_error", lambda *a, **k: None)
+    monkeypatch.setattr(mw, "fluent_warning", lambda *a, **k: None)
+
+    class FakeSettingsProvider:
+        def __init__(self):
+            self.data = {"output": {"encoder_mode": "amf"}}
+
+        def load(self):
+            return dict(self.data)
+
+        def save(self, data):
+            self.data = dict(data)
+
+    provider = FakeSettingsProvider()
+    win = mw.SubtitleRenderWindow(embedded=True, settings_provider=provider)
+    assert win._export_encoder_combo.currentData() == "amf_qvbr"
+    assert win._local_output_preferences["encoder_mode"] == "amf_qvbr"
+
+    # 旧工程文件里的 legacy 值同样落到 QVBR 档。
+    win._apply_project_data({"output": {"encoder_mode": "amf", "crf": 18}})
+    assert win._export_encoder_combo.currentData() == "amf_qvbr"
+
+
 def test_main_window_drops_leaked_project_roles_and_falls_back_to_global_selection(
     qapp, monkeypatch
 ):

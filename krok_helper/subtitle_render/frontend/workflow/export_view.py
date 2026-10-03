@@ -40,7 +40,8 @@ from krok_helper.subtitle_render.engine.export.encoder_select import (
     CODEC_H264,
     CODEC_HEVC,
     CPU_PRESETS,
-    ENCODER_AMF,
+    ENCODER_AMF_CQP,
+    ENCODER_AMF_QVBR,
     ENCODER_AUTO,
     ENCODER_CPU,
     ENCODER_NVENC,
@@ -779,7 +780,13 @@ class ExportWorkspaceView(QWidget):
         encoder_combo.addItem("自动硬编", userData=ENCODER_AUTO)
         encoder_combo.addItem("NVIDIA NVENC", userData=ENCODER_NVENC)
         encoder_combo.addItem("Intel QSV", userData=ENCODER_QSV)
-        encoder_combo.addItem("AMD AMF", userData=ENCODER_AMF)
+        encoder_combo.addItem("AMD AMF (QVBR)", userData=ENCODER_AMF_QVBR)
+        encoder_combo.addItem("AMD AMF (CQP)", userData=ENCODER_AMF_CQP)
+        encoder_combo.setToolTip(
+            "AMD 显卡的两个档位：QVBR 把质量值换算成质量等级，体积更可控；"
+            "CQP 与 NicoKaraMaker3 相同，质量值直接作为固定量化参数，"
+            "画质上限更高，但数值越小文件越大，0 接近无损、体积会非常大。"
+        )
         encoder_combo.currentIndexChanged.connect(
             lambda _index: self.encoderChanged.emit()
         )
@@ -812,7 +819,8 @@ class ExportWorkspaceView(QWidget):
         crf_spin = make_export_spin(0, 51, 18, "")
         crf_spin.setToolTip(
             "统一质量值：数值越小画质越高、文件越大；18 通常接近视觉无损，"
-            "使用 AMD 硬件编码时会在后台近似换算为对应质量等级；"
+            "AMD AMF (QVBR) 会在后台换算为对应质量等级，AMD AMF (CQP) 则直接"
+            "作为固定量化参数直通；"
             "实际画质和文件大小会因显卡型号、编码器与画面内容而异。"
         )
         quality_row.addWidget(
