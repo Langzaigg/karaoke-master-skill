@@ -407,6 +407,9 @@ struct RenderConfig {
     // reference entries through ``vector_glyph_id`` and share the same immutable
     // object, so a thousand inline guide glyphs pay for one outline only.
     QHash<QString, std::shared_ptr<const krok::subtitle::native::VectorGlyph>> vectorGlyphs;
+    // 发送端对 vector_glyphs 表的内容摘要；表按哈希门省发时 sidecar 据此
+    // 保留上一份表（跨 configure 的行数据引用依赖同构符号对象）。
+    QString vectorGlyphsHash;
     // 装饰粒子 sprite 轮廓表（fx_sprites；值语义，投影到 RenderScene::fxSprites）。
     QHash<QString, krok::subtitle::native::VectorGlyph> fxSprites;
     std::vector<TimingLine> lines;

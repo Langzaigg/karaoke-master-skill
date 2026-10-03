@@ -69,7 +69,7 @@ class VectorGlyphTable:
             (
                 str(command[0]),
                 *(
-                    0.0 if float(value) == 0.0 else float(value)
+                    (0.0 if float(value) == 0.0 else round(float(value), 2))
                     for value in command[1:]
                 ),
             )
@@ -100,6 +100,96 @@ class VectorGlyphTable:
     @property
     def empty(self) -> bool:
         return not self.payload
+
+
+class FxPayloadTable:
+    """fx_bursts 载荷去重表（IR 发射边界专用）。
+
+    burst 里的 ``color`` / ``paint`` 规格 / ``char_colors`` 是全工程仅几
+    个唯一值、却逐行逐字重复数百次的内容（实测 3 唯一 / 614 次），是
+    IR 体积与解析成本的大头。发射时换成 id 引用 + 根级表，sidecar 解析
+    时展开回 ``FxBurst`` 原字段——内存结构与渲染零变化；CPU Painter
+    继续直接消费 ``plan_line_bursts`` 的内联结果，不经本表。
+    """
+
+    def __init__(self) -> None:
+        self.colors: list[str] = []
+        self._color_ids: dict[str, int] = {}
+        self.paints: list[dict[str, Any]] = []
+        self._paint_ids: dict[str, int] = {}
+
+    def _color_id(self, color: object) -> int:
+        key = str(color)
+        index = self._color_ids.get(key)
+        if index is None:
+            index = len(self.colors)
+            self._color_ids[key] = index
+            self.colors.append(key)
+        return index
+
+    def _paint_id(self, paint: dict[str, Any]) -> int:
+        key = json.dumps(paint, ensure_ascii=False, sort_keys=True,
+                         separators=(",", ":"))
+        index = self._paint_ids.get(key)
+        if index is None:
+            index = len(self.paints)
+            self._paint_ids[key] = index
+            self.paints.append(paint)
+        return index
+
+    def tabulate_burst(self, burst: dict[str, Any]) -> dict[str, Any]:
+        out = {
+            key: value
+            for key, value in burst.items()
+            if key not in ("color", "paint", "char_colors")
+        }
+        out["color_id"] = self._color_id(burst.get("color"))
+        paint = burst.get("paint")
+        if isinstance(paint, dict) and paint:
+            out["paint_id"] = self._paint_id(paint)
+        char_colors = burst.get("char_colors")
+        if isinstance(char_colors, list) and char_colors:
+            out["char_color_ids"] = [
+                self._color_id(color) for color in char_colors
+            ]
+        return out
+
+    def payload(self) -> dict[str, Any]:
+        return {
+            "fx_color_table": list(self.colors),
+            "fx_paint_table": [dict(paint) for paint in self.paints],
+        }
+
+
+def tabulate_fx_bursts(
+    bursts: list[dict[str, object]] | None,
+    fx_table: FxPayloadTable | None,
+) -> list[dict[str, object]]:
+    """bursts 载荷发射：表在手走 id 引用，无表保持内联（对照/旧路径）。"""
+    if fx_table is None:
+        return list(bursts or [])
+    return [fx_table.tabulate_burst(burst) for burst in (bursts or [])]
+
+
+class LineLayoutTable:
+    """每行 ``layout`` 参数快照的去重表（实测 2 唯一 / 66 行）。"""
+
+    def __init__(self) -> None:
+        self.layouts: list[dict[str, Any]] = []
+        self._ids: dict[str, int] = {}
+
+    def layout_id(self, layout: dict[str, Any]) -> int:
+        key = json.dumps(layout, ensure_ascii=False, sort_keys=True,
+                         separators=(",", ":"))
+        index = self._ids.get(key)
+        if index is None:
+            index = len(self.layouts)
+            self._ids[key] = index
+            self.layouts.append(layout)
+        return index
+
+    def payload(self) -> list[dict[str, Any]]:
+        return [dict(layout) for layout in self.layouts]
 GPU_UNSUPPORTED_FEATURE_LABELS = {
     "line_animation": "\u672a\u77e5\u6574\u884c\u52a8\u753b",
     "karaoke_animation": "\u672a\u77e5\u5531\u5b57\u7279\u6548",
@@ -280,26 +370,59 @@ def timing_char_to_ir(
     glyph_table: VectorGlyphTable | None = None,
     anim_anchor_ms: int | None = None,
 ) -> dict[str, Any]:
+    # 「缺省即空」的字段值为默认时整个键不发（C++ 解析器对缺 key 本就按
+    # 默认处理，scanline/zoom_pulse 等字段一直是这个惯例）：624 字里上千
+    # 个 false/null 字段是纯键名开销。
     char: dict[str, Any] = {
         "text": ch.text,
         "start_ms": int(ch.start_ms),
-        "explicit_start": bool(ch.explicit_start),
-        "explicit_end": bool(ch.explicit_end),
-        "pause_release_ms": (
-            int(ch.pause_release_ms) if ch.pause_release_ms is not None else None
-        ),
-        "role_label": ch.role_label,
-        "bitmap_guide": bitmap_guide_to_ir(ch.vector_glyph, anim_anchor_ms),
     }
+    if ch.explicit_start:
+        char["explicit_start"] = True
+    if ch.explicit_end:
+        char["explicit_end"] = True
+    if ch.pause_release_ms is not None:
+        char["pause_release_ms"] = int(ch.pause_release_ms)
+    if ch.role_label:
+        char["role_label"] = ch.role_label
+    guide = bitmap_guide_to_ir(ch.vector_glyph, anim_anchor_ms)
+    if guide is not None:
+        char["bitmap_guide"] = guide
     if glyph_table is not None:
         if ch.vector_glyph is not None:
             glyph_id = glyph_table.reference(ch.vector_glyph)
             if glyph_id is not None:
                 char["vector_glyph_id"] = glyph_id
-    else:
+    elif ch.vector_glyph is not None:
         # Legacy inline form：无符号表的调用方（旧测试 / 探针）仍可整包内嵌。
         char["vector_glyph"] = guide_symbol_to_dict(ch.vector_glyph)
     return char
+
+
+def _line_layout_dict(layout_style: Style) -> dict[str, Any]:
+    """每行 ``layout`` 参数快照（发射边界表化的载荷单元）。"""
+    return {
+                "line_y_position": layout_style.line_y_position,
+                "line_y_margin_px": int(layout_style.line_y_margin_px),
+                "line_gap_px": int(layout_style.line_gap_px),
+                "smart_horizontal": layout_style.smart_horizontal,
+                "horizontal_margin_px": int(layout_style.horizontal_margin_px),
+                "line_alignments": list(layout_style.line_alignments),
+                "dual_line_layout": bool(layout_style.dual_line_layout),
+                "line_horizontal_layout": layout_style.line_horizontal_layout,
+                "row1_align": layout_style.row1_align,
+                "row1_offset_x": int(layout_style.row1_offset_x),
+                "row1_offset_y": int(layout_style.row1_offset_y),
+                "row2_align": layout_style.row2_align,
+                "row2_offset_x": int(layout_style.row2_offset_x),
+                "row2_offset_y": int(layout_style.row2_offset_y),
+                "letter_spacing_px": int(layout_style.letter_spacing_px),
+                "space_width_percent": int(layout_style.space_width_percent),
+                "allow_biting": bool(layout_style.allow_biting),
+                "ruby_interval_px": int(layout_style.ruby_interval_px),
+                "ruby_alignment": layout_style.ruby_alignment,
+                "ruby_gap_px": int(layout_style.ruby_gap_px),
+            }
 
 
 def timing_line_to_ir(
@@ -331,6 +454,8 @@ def timing_line_to_ir(
     layout_offset_y: float = 0.0,
     layout_offset_windows: list[tuple[int, int, float, float]] | None = None,
     glyph_table: VectorGlyphTable | None = None,
+    fx_table: "FxPayloadTable | None" = None,
+    layout_table: "LineLayoutTable | None" = None,
 ) -> dict[str, Any]:
     render_line = render_line or line
     # 与 painter._paint_line_static 的动图锚点同一公式：行显示窗口起点，
@@ -394,7 +519,13 @@ def timing_line_to_ir(
         "stroke_flash": bool(stroke_flash),
         # 装饰粒子（入场/退场/唱字）：Python 侧规划（与 painter 同一
         # plan_line_bursts），锚点坐标由 native 按自身布局解析。
-        "fx_bursts": list(fx_bursts or []),
+        # 发射边界表化（color/paint/char_colors → id + 根级表）；表为
+        # None 时保持内联（旧调用方 / 对照路径）。
+        "fx_bursts": (
+            [fx_table.tabulate_burst(burst) for burst in (fx_bursts or [])]
+            if fx_table is not None
+            else list(fx_bursts or [])
+        ),
         "layout_offset_x": float(layout_offset_x),
         "layout_offset_y": float(layout_offset_y),
         "layout_offset_windows": [
@@ -410,30 +541,14 @@ def timing_line_to_ir(
             if int(end_ms) > int(start_ms)
         ],
         "layout": (
-            {
-                "line_y_position": layout_style.line_y_position,
-                "line_y_margin_px": int(layout_style.line_y_margin_px),
-                "line_gap_px": int(layout_style.line_gap_px),
-                "smart_horizontal": layout_style.smart_horizontal,
-                "horizontal_margin_px": int(layout_style.horizontal_margin_px),
-                "line_alignments": list(layout_style.line_alignments),
-                "dual_line_layout": bool(layout_style.dual_line_layout),
-                "line_horizontal_layout": layout_style.line_horizontal_layout,
-                "row1_align": layout_style.row1_align,
-                "row1_offset_x": int(layout_style.row1_offset_x),
-                "row1_offset_y": int(layout_style.row1_offset_y),
-                "row2_align": layout_style.row2_align,
-                "row2_offset_x": int(layout_style.row2_offset_x),
-                "row2_offset_y": int(layout_style.row2_offset_y),
-                "letter_spacing_px": int(layout_style.letter_spacing_px),
-                "space_width_percent": int(layout_style.space_width_percent),
-                "allow_biting": bool(layout_style.allow_biting),
-                "ruby_interval_px": int(layout_style.ruby_interval_px),
-                "ruby_alignment": layout_style.ruby_alignment,
-                "ruby_gap_px": int(layout_style.ruby_gap_px),
-            }
-            if layout_style is not None
+            _line_layout_dict(layout_style)
+            if layout_table is None and layout_style is not None
             else None
+        ),
+        **(
+            {"layout_id": layout_table.layout_id(_line_layout_dict(layout_style))}
+            if layout_table is not None and layout_style is not None
+            else {}
         ),
         "resolved_intervals": (
             [[int(start), int(end)] for start, end in resolved_intervals]
@@ -471,6 +586,8 @@ def track_to_ir(
     *,
     layout_plan: TrackLayoutPlan | None = None,
     glyph_table: VectorGlyphTable | None = None,
+    fx_table: FxPayloadTable | None = None,
+    layout_table: LineLayoutTable | None = None,
     time_offset_delta_ms: int = 0,
 ) -> dict[str, Any]:
     """Serialize one track; ``time_offset_delta_ms`` folds a per-track style
@@ -647,6 +764,8 @@ def track_to_ir(
                 ),
                 layout_offset_windows=list(page_offset_windows.get(index, ())),
                 glyph_table=glyph_table,
+                fx_table=fx_table,
+                layout_table=layout_table,
             )
             for index, line in enumerate(track.lines)
         ],
@@ -660,6 +779,7 @@ def lines_style_to_ir(
     layout_plan: TrackLayoutPlan,
     *,
     source_index: int = 0,
+    fx_table: FxPayloadTable | None = None,
 ) -> list[dict[str, object]]:
     """逐行「样式派生字段」载荷（``gpu_configure_style`` 差分更新用）。
 
@@ -722,24 +842,27 @@ def lines_style_to_ir(
                 "stroke_flash": bool(
                     animation_styles[index].karaoke_stroke_flash
                 ),
-                "fx_bursts": plan_line_bursts(
-                    animation_styles[index],
-                    index,
-                    schedule[index][1] if index in schedule else None,
-                    schedule[index][2] if index in schedule else None,
-                    line_end_ms(render_lines[index]),
-                    resolved_intervals[index],
-                    char_visible=[
-                        not str(getattr(ch, "text", "") or "").isspace()
-                        for ch in render_lines[index].chars
-                    ],
-                    char_styles=[
-                        style_for_role(
-                            animation_styles[index],
-                            getattr(ch, "role_label", None),
-                        )
-                        for ch in render_lines[index].chars
-                    ],
+                "fx_bursts": tabulate_fx_bursts(
+                    plan_line_bursts(
+                        animation_styles[index],
+                        index,
+                        schedule[index][1] if index in schedule else None,
+                        schedule[index][2] if index in schedule else None,
+                        line_end_ms(render_lines[index]),
+                        resolved_intervals[index],
+                        char_visible=[
+                            not str(getattr(ch, "text", "") or "").isspace()
+                            for ch in render_lines[index].chars
+                        ],
+                        char_styles=[
+                            style_for_role(
+                                animation_styles[index],
+                                getattr(ch, "role_label", None),
+                            )
+                            for ch in render_lines[index].chars
+                        ],
+                    ),
+                    fx_table,
                 ),
             }
         )

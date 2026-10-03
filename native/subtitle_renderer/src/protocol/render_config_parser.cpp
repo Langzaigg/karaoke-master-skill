@@ -1278,10 +1278,35 @@ void applyStyleSection(RenderConfig &cfg, const QJsonObject &style) {
 
 }
 
+namespace {
+
+struct FxTables {
+    std::vector<QString> colors;
+    std::vector<QJsonObject> paints;
+};
+
+const QString &fxTableColor(const FxTables &tables, int index) {
+    static const QString kEmpty;
+    if (index < 0 || static_cast<std::size_t>(index) >= tables.colors.size()) {
+        return kEmpty;
+    }
+    return tables.colors[static_cast<std::size_t>(index)];
+}
+
+QJsonObject fxTablePaint(const FxTables &tables, int index) {
+    if (index < 0 || static_cast<std::size_t>(index) >= tables.paints.size()) {
+        return QJsonObject();
+    }
+    return tables.paints[static_cast<std::size_t>(index)];
+}
+
+}  // namespace
+
 static void applyLineStyleSection(
     TimingLine &line,
     const QJsonObject &lineObject,
-    const QString &karaokeFallbackBase
+    const QString &karaokeFallbackBase,
+    const FxTables &fxTables
 ) {
     // 行级样式派生字段（信号旗标 + 出入场/唱字动画 + 装饰粒子）。
     // 全量解析（parseSourceTracks）与差分更新（applyLineStylePatch）
@@ -1379,16 +1404,32 @@ static void applyLineStyleSection(
                 burst.sweep = intValue(
                     burstObject, QStringLiteral("sweep"), 0
                 );
-                burst.color = stringValue(
-                    burstObject, QStringLiteral("color"),
-                    QStringLiteral("#FFFFFF")
-                );
+                // 表化（schema 3 开发期）：color_id/paint_id 引用根级
+                // fx_color_table/fx_paint_table；无 id 键回退内联（旧格式
+                // /对照路径共用同一份解析）。
+                const bool hasColorId = burstObject.value(
+                    QStringLiteral("color_id")
+                ).isDouble();
+                burst.color = hasColorId
+                    ? fxTableColor(
+                        fxTables,
+                        burstObject.value(QStringLiteral("color_id")).toInt()
+                    )
+                    : stringValue(
+                        burstObject, QStringLiteral("color"),
+                        QStringLiteral("#FFFFFF")
+                    );
                 // 2026-10 粒子装饰规格（颜色模式非单色时随 burst 下发）：
                 // fill/stroke/stroke2 为 PaintFill dict，宽度已按粒子尺寸
                 // 缩放。旧 IR 无 "paint" 键 → hasPaint=false 走实色路径。
                 const QJsonObject paintObject = burstObject.value(
-                    QStringLiteral("paint")
-                ).toObject();
+                    QStringLiteral("paint_id")
+                ).isDouble()
+                    ? fxTablePaint(
+                        fxTables,
+                        burstObject.value(QStringLiteral("paint_id")).toInt()
+                    )
+                    : burstObject.value(QStringLiteral("paint")).toObject();
                 if (!paintObject.isEmpty()) {
                     burst.hasPaint = true;
                     burst.fill = paintFillSpec(
@@ -1416,9 +1457,21 @@ static void applyLineStyleSection(
                         0.0
                     );
                 }
-                const QJsonArray charColorsArray = burstObject.value(
-                    QStringLiteral("char_colors")
-                ).toArray();
+                QJsonArray charColorsArray;
+                if (burstObject.contains(QStringLiteral("char_color_ids"))) {
+                    const QJsonArray charColorIds = burstObject.value(
+                        QStringLiteral("char_color_ids")
+                    ).toArray();
+                    for (const QJsonValue &idValue : charColorIds) {
+                        charColorsArray.append(
+                            fxTableColor(fxTables, idValue.toInt())
+                        );
+                    }
+                } else {
+                    charColorsArray = burstObject.value(
+                        QStringLiteral("char_colors")
+                    ).toArray();
+                }
                 for (const QJsonValue &value : charColorsArray) {
                     const QString hex = value.toString();
                     if (!hex.isEmpty()) {
@@ -1432,7 +1485,11 @@ static void applyLineStyleSection(
             }
 }
 
-bool applyLineStylePatch(RenderConfig &cfg, const QJsonArray &linesStyle) {
+bool applyLineStylePatch(
+    RenderConfig &cfg,
+    const QJsonArray &linesStyle,
+    const FxTables &fxTables
+) {
     // 差分行级样式合并：按 (source_index, source_line_index) 一一对齐。
     // 行数对不上或键缺失 = 配置漂移，返回 false 让调用方整份重配。
     QHash<quint64, QJsonObject> entries;
@@ -1464,7 +1521,7 @@ bool applyLineStylePatch(RenderConfig &cfg, const QJsonArray &linesStyle) {
         if (it == entries.constEnd()) {
             return false;
         }
-        applyLineStyleSection(line, it.value(), cfg.karaokeAnim);
+        applyLineStyleSection(line, it.value(), cfg.karaokeAnim, fxTables);
     }
     return true;
 }
@@ -1500,8 +1557,31 @@ std::optional<RenderConfig> applyRenderConfigStylePatch(
     fresh.vectorGlyphs = current.vectorGlyphs;
     fresh.lines = current.lines;
     fresh.rubies = current.rubies;
+    FxTables patchFxTables;
+    {
+        const QJsonArray colorTable = patch.value(
+            QStringLiteral("fx_color_table")
+        ).toArray();
+        patchFxTables.colors.reserve(
+            static_cast<std::size_t>(colorTable.size())
+        );
+        for (const QJsonValue &color : colorTable) {
+            patchFxTables.colors.push_back(color.toString());
+        }
+        const QJsonArray paintTable = patch.value(
+            QStringLiteral("fx_paint_table")
+        ).toArray();
+        patchFxTables.paints.reserve(
+            static_cast<std::size_t>(paintTable.size())
+        );
+        for (const QJsonValue &paint : paintTable) {
+            patchFxTables.paints.push_back(paint.toObject());
+        }
+    }
     if (!applyLineStylePatch(
-            fresh, patch.value(QStringLiteral("lines_style")).toArray()
+            fresh,
+            patch.value(QStringLiteral("lines_style")).toArray(),
+            patchFxTables
         )) {
         *error = QStringLiteral("lines_style patch mismatch (line set drifted)");
         return std::nullopt;
@@ -1510,7 +1590,12 @@ std::optional<RenderConfig> applyRenderConfigStylePatch(
     return fresh;
 }
 
-static void parseSourceTracks(const QJsonObject &ir, RenderConfig &cfg) {
+static void parseSourceTracks(
+    const QJsonObject &ir,
+    RenderConfig &cfg,
+    const FxTables &fxTables,
+    const std::vector<QJsonObject> &lineLayoutTable
+) {
     const auto resolveVectorGlyph = [&cfg](const QJsonObject &charObject) {
         const QString glyphId = stringValue(
             charObject, QStringLiteral("vector_glyph_id")
@@ -1618,11 +1703,27 @@ static void parseSourceTracks(const QJsonObject &ir, RenderConfig &cfg) {
                 QStringLiteral("center_override")
             ).toBool(false);
             applyLineStyleSection(
-                line, lineObject, cfg.karaokeAnim
+                line, lineObject, cfg.karaokeAnim, fxTables
             );
-            const QJsonObject layoutObject = lineObject.value(
-                QStringLiteral("layout")
-            ).toObject();
+            // 表化（schema 3 开发期）：layout_id 引用根级 line_layout_table；
+            // 无 id 键回退内联 layout 对象。
+            QJsonObject layoutObject;
+            if (lineObject.value(QStringLiteral("layout_id")).isDouble()) {
+                const int layoutId = lineObject.value(
+                    QStringLiteral("layout_id")
+                ).toInt();
+                if (layoutId >= 0
+                    && static_cast<std::size_t>(layoutId)
+                        < lineLayoutTable.size()) {
+                    layoutObject = lineLayoutTable[
+                        static_cast<std::size_t>(layoutId)
+                    ];
+                }
+            } else {
+                layoutObject = lineObject.value(
+                    QStringLiteral("layout")
+                ).toObject();
+            }
             if (!layoutObject.isEmpty()) {
                 line.layout.present = true;
                 line.layout.lineYPosition = stringValue(
@@ -1818,7 +1919,37 @@ std::optional<RenderConfig> parseRenderConfig(const QJsonObject &ir, QString *er
     applyFxSpriteSection(cfg, ir.value(QStringLiteral("fx_sprites")).toObject());
     applyScreenSection(cfg, ir.value(QStringLiteral("screen")).toObject());
     applyStyleSection(cfg, ir.value(QStringLiteral("style")).toObject());
-    parseSourceTracks(ir, cfg);
+    // 发射边界去重表（schema 3 开发期）：bursts 颜色/规格 + 行布局快照。
+    FxTables fxTables;
+    {
+        const QJsonArray colorTable = ir.value(
+            QStringLiteral("fx_color_table")
+        ).toArray();
+        fxTables.colors.reserve(static_cast<std::size_t>(colorTable.size()));
+        for (const QJsonValue &color : colorTable) {
+            fxTables.colors.push_back(color.toString());
+        }
+        const QJsonArray paintTable = ir.value(
+            QStringLiteral("fx_paint_table")
+        ).toArray();
+        fxTables.paints.reserve(static_cast<std::size_t>(paintTable.size()));
+        for (const QJsonValue &paint : paintTable) {
+            fxTables.paints.push_back(paint.toObject());
+        }
+    }
+    std::vector<QJsonObject> lineLayoutTable;
+    {
+        const QJsonArray layoutTable = ir.value(
+            QStringLiteral("line_layout_table")
+        ).toArray();
+        lineLayoutTable.reserve(
+            static_cast<std::size_t>(layoutTable.size())
+        );
+        for (const QJsonValue &layout : layoutTable) {
+            lineLayoutTable.push_back(layout.toObject());
+        }
+    }
+    parseSourceTracks(ir, cfg, fxTables, lineLayoutTable);
 
     cfg.titles = ir.value(QStringLiteral("titles")).toArray();
 

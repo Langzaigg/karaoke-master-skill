@@ -751,6 +751,9 @@ class NativeRendererProcess:
         self._stderr_tail: deque[str] = deque(maxlen=80)
         self._stdout_noise_tail: deque[str] = deque(maxlen=20)
         self._event_backlog: deque[dict[str, Any]] = deque()
+        # 导唱符轮廓表哈希门的进程内记忆（None = 从未发过表，首次必发）。
+        # 生命周期与本 sidecar 进程一致：重启即新实例、记忆清零。
+        self._last_vector_glyphs_hash: str | None = None
         self._stderr_lock = threading.Lock()
         self._stdout_noise_lock = threading.Lock()
         self._send_lock = threading.Lock()
@@ -887,6 +890,22 @@ class NativeRendererProcess:
         if progress is not None:
             # IR（Python 侧整轨重排）完成、即将进入 sidecar 场景构建等待。
             progress()
+        # 导唱符轮廓表哈希门：轨道内容不变时表逐字节相同（表键即内容摘要），
+        # 重发这 ~200KB（表化+精度收紧后）纯属浪费——sidecar 保留上一份表，
+        # 哈希相符就不带表。任何失配（sidecar 重建 / 首次）自动回落整表重发。
+        glyph_table = ir.get("vector_glyphs")
+        if glyph_table is not None:
+            import hashlib as _hashlib
+
+            table_hash = _hashlib.sha256(
+                json.dumps(glyph_table, sort_keys=True,
+                           separators=(",", ":")).encode("utf-8")
+            ).hexdigest()
+            ir["vector_glyphs_hash"] = table_hash
+            if table_hash == self._last_vector_glyphs_hash:
+                del ir["vector_glyphs"]
+            else:
+                self._last_vector_glyphs_hash = table_hash
         self._send({"cmd": "configure", "ir": ir})
         return self._expect_ok(
             self._read_until_event("configured", timeout_s=self.configure_timeout_s)
@@ -997,6 +1016,10 @@ class NativeRendererProcess:
             "titles": style_ir["titles"],
             "fx_sprites": style_ir["fx_sprites"],
             "lines_style": style_ir["lines_style"],
+            # 发射边界去重表（schema 3 开发期）：lines_style 的 bursts 用
+            # color_id/paint_id 引用，表必须随载荷同发。
+            "fx_color_table": style_ir.get("fx_color_table", []),
+            "fx_paint_table": style_ir.get("fx_paint_table", []),
         }
         self._send(payload)
         return self._expect_ok(

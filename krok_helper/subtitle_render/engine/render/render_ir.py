@@ -39,6 +39,8 @@ from krok_helper.subtitle_render.serialization.timing import guide_symbol_to_dic
 from krok_helper.subtitle_render.engine.guide.semantics import guide_symbol_is_bitmap
 from krok_helper.subtitle_render.native.protocol import (
     RENDER_IR_SCHEMA,
+    FxPayloadTable,
+    LineLayoutTable,
     VectorGlyphTable,
     bitmap_guide_to_ir,
     lines_style_to_ir,
@@ -204,6 +206,8 @@ def build_render_ir(
     with layout_pass():
         # 主轨与附加轨共用一张轮廓表：同一 SVG 导唱符全片只序列化一次。
         glyph_table = VectorGlyphTable()
+        fx_table = FxPayloadTable()
+        layout_table = LineLayoutTable()
         # 按轴样式：主轨恒为全局 style；非跟随副轨叠加该轴时间 overrides。
         # 每源布局计划与 IR 序列化只用该源自己的 effective style；偏移差值
         # 经每源 meta.offset_ms 通道折算（C++ 侧窗口偏移 = 全局
@@ -250,6 +254,8 @@ def build_render_ir(
                 primary_style,
                 layout_plan=primary_plan,
                 glyph_table=glyph_table,
+                fx_table=fx_table,
+                layout_table=layout_table,
                 time_offset_delta_ms=(
                     primary_style.timing_offset_ms - style.timing_offset_ms
                 ),
@@ -262,6 +268,8 @@ def build_render_ir(
                     source_style,
                     layout_plan=plan,
                     glyph_table=glyph_table,
+                    fx_table=fx_table,
+                    layout_table=layout_table,
                     time_offset_delta_ms=(
                         source_style.timing_offset_ms - style.timing_offset_ms
                     ),
@@ -274,6 +282,11 @@ def build_render_ir(
         }
         if not glyph_table.empty:
             ir["vector_glyphs"] = glyph_table.payload
+        # 发射边界去重表：bursts 颜色/规格 + 行布局快照（sidecar 解析时
+        # 展开回原字段，内存结构与渲染零变化）。
+        ir.update(fx_table.payload())
+        if layout_table.layouts:
+            ir["line_layout_table"] = layout_table.payload()
         return ir
 
 
@@ -303,6 +316,7 @@ def build_style_patch_ir(
         style_with_output_scanline(style, height), height
     )
     with layout_pass():
+        fx_table = FxPayloadTable()
         primary_style = style_for_track(style, track)
         primary_plan = build_track_layout_plan(
             track,
@@ -324,14 +338,16 @@ def build_style_patch_ir(
             for source, source_style in zip(extra_sources, extra_styles, strict=True)
         ]
         lines_style: list[dict[str, Any]] = lines_style_to_ir(
-            track, primary_style, primary_plan, source_index=0
+            track, primary_style, primary_plan, source_index=0,
+            fx_table=fx_table,
         )
         for source_index, (source, source_style, plan) in enumerate(
             zip(extra_sources, extra_styles, extra_plans, strict=True), start=1
         ):
             lines_style.extend(
                 lines_style_to_ir(
-                    source, source_style, plan, source_index=source_index
+                    source, source_style, plan, source_index=source_index,
+                    fx_table=fx_table,
                 )
             )
         return {
@@ -348,4 +364,5 @@ def build_style_patch_ir(
             "titles": titles_to_ir(track, style, duration_ms=duration_ms),
             "fx_sprites": dict(FX_SPRITES),
             "lines_style": lines_style,
+            **fx_table.payload(),
         }

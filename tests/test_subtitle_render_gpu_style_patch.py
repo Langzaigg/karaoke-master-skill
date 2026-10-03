@@ -316,3 +316,167 @@ def test_configure_style_gpu_frame_matches_full_configure(qapp):
         assert checksum_patch_b == checksum_full_b
         # 改色确实改变了画面（防两帧同图导致假等价）。
         assert checksum_full_b != checksum_full_a
+
+
+# ── 表化（schema 3 开发期）等价测试：展开 == 内联 ──────────────────────
+
+
+def _expand_bursts(bursts, colors, paints):
+    out = []
+    for burst in bursts:
+        expanded = {
+            key: value
+            for key, value in burst.items()
+            if key not in ("color_id", "paint_id", "char_color_ids")
+        }
+        expanded["color"] = colors[burst["color_id"]]
+        if "paint_id" in burst:
+            expanded["paint"] = paints[burst["paint_id"]]
+        if "char_color_ids" in burst:
+            expanded["char_colors"] = [
+                colors[index] for index in burst["char_color_ids"]
+            ]
+        out.append(expanded)
+    return out
+
+
+def test_fx_tables_expand_to_inline_bursts(qapp):
+    """表化 bursts 展开后与无表内联构建逐字段相等（幂等金标准）。"""
+    from krok_helper.subtitle_render.engine.render.adapters.layout_plan import (
+        build_track_layout_plan,
+    )
+    from krok_helper.subtitle_render.native.protocol import (
+        VectorGlyphTable,
+        track_to_ir,
+    )
+
+    track = _patch_track()
+    style = _patch_style(
+        entry_anim="sparkle",
+        exit_anim="note",
+        sing_fx="note",
+        fx_particle_color_mode="follow_after",
+        fx_apply_to_entry_exit=True,
+    )
+
+    full = build_render_ir(
+        track, style, width=_WIDTH, height=_HEIGHT, fps=_FPS,
+        duration_ms=4000, relayout_scope=None,
+    )
+    plan = build_track_layout_plan(
+        track, style, logical_w=_WIDTH, logical_h=_HEIGHT
+    )
+    inline = track_to_ir(
+        track, style, layout_plan=plan, glyph_table=VectorGlyphTable()
+    )
+
+    colors = full["fx_color_table"]
+    paints = full["fx_paint_table"]
+    assert colors and paints
+    assert len(full["track"]["lines"]) == len(inline["lines"])
+    for tabulated_line, inline_line in zip(
+        full["track"]["lines"], inline["lines"], strict=True
+    ):
+        expanded = _expand_bursts(
+            tabulated_line["fx_bursts"], colors, paints
+        )
+        assert expanded == inline_line["fx_bursts"]
+
+
+def test_line_layout_table_expands_to_inline_layout(qapp):
+    """行布局快照表展开后与无表内联构建相等。"""
+    from krok_helper.subtitle_render.engine.render.adapters.layout_plan import (
+        build_track_layout_plan,
+    )
+    from krok_helper.subtitle_render.native.protocol import (
+        VectorGlyphTable,
+        track_to_ir,
+    )
+
+    track = _patch_track()
+    style = _patch_style()
+
+    full = build_render_ir(
+        track, style, width=_WIDTH, height=_HEIGHT, fps=_FPS,
+        duration_ms=4000, relayout_scope=None,
+    )
+    plan = build_track_layout_plan(
+        track, style, logical_w=_WIDTH, logical_h=_HEIGHT
+    )
+    inline = track_to_ir(
+        track, style, layout_plan=plan, glyph_table=VectorGlyphTable()
+    )
+
+    table = full["line_layout_table"]
+    assert table  # 布局快照表在场
+    for tabulated_line, inline_line in zip(
+        full["track"]["lines"], inline["lines"], strict=True
+    ):
+        assert table[tabulated_line["layout_id"]] == inline_line["layout"]
+
+
+def test_char_ir_omits_default_fields_keeps_explicit(qapp):
+    """字符级「缺省即空」：默认值整个键不发，显式值保留。"""
+    from krok_helper.subtitle_render.native.protocol import timing_char_to_ir
+
+    plain = timing_char_to_ir(TimingChar("歌", 100))
+    assert "explicit_start" not in plain
+    assert "explicit_end" not in plain
+    assert "pause_release_ms" not in plain
+    assert "role_label" not in plain
+    assert "bitmap_guide" not in plain
+
+    full = timing_char_to_ir(
+        TimingChar(
+            "歌", 100, explicit_start=True, explicit_end=True,
+            pause_release_ms=450, role_label="A",
+        )
+    )
+    assert full["explicit_start"] is True
+    assert full["explicit_end"] is True
+    assert full["pause_release_ms"] == 450
+    assert full["role_label"] == "A"
+
+
+def test_vector_glyphs_hash_gate_omits_unchanged_table():
+    """哈希门：同一 sidecar 连接内轨道未变时第二次 configure 不带轮廓表。"""
+    from krok_helper.subtitle_render.domain.timing import GuideSymbol
+    from krok_helper.subtitle_render.native.backend import NativeRendererProcess
+
+    symbol = GuideSymbol(
+        path_commands=(("M", 0.0, 0.0), ("L", 100.0, 100.0), ("Z",)),
+        units_per_em=1000,
+        advance_width=1000.0,
+    )
+    track = TimingTrack(
+        lines=[
+            TimingLine(
+                chars=[TimingChar("歌", 0)],
+                end_ms=1000,
+                guide_symbol=symbol,
+            )
+        ]
+    )
+    renderer = NativeRendererProcess()
+    payloads: list[dict] = []
+    # 不启动真进程：spy 直接记载荷并伪造 configured 响应（哈希门是纯
+    # Python 状态机，sidecar 保留行为由真实 e2e 覆盖）。
+    responses = iter([
+        {"ok": True, "event": "configured"},
+        {"ok": True, "event": "configured"},
+    ])
+    renderer._send = payloads.append
+    renderer._read_until_event = lambda event, timeout_s=None: next(responses)
+
+    style = _patch_style()
+    kwargs = {"width": 640, "height": 360, "fps": 60}
+    renderer.configure(track, style, **kwargs)
+    renderer.configure(track, style, **kwargs)
+
+    irs = [p["ir"] for p in payloads if p.get("cmd") == "configure"]
+    assert len(irs) == 2
+    assert "vector_glyphs" in irs[0]
+    assert "vector_glyphs_hash" in irs[0]
+    # 第二次：表省发，哈希仍在；失配时 sidecar 拒绝、发送端回落整表。
+    assert "vector_glyphs" not in irs[1]
+    assert irs[1]["vector_glyphs_hash"] == irs[0]["vector_glyphs_hash"]
