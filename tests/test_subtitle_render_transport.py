@@ -1969,6 +1969,109 @@ def test_gpu_native_due_scheduler_fills_during_recovery(qapp, monkeypatch):
         renderer.stop()
 
 
+def test_gpu_scheduler_evicts_stale_cache_keys_instead_of_wedging(qapp, monkeypatch):
+    """G5 播放几秒后永久冻结的回归（2026-10 长跑探针 WEDGED）。
+
+    请求跳过的已填键是死键：take() 只按精确键命中、请求只前进、seek
+    （>250ms 跳变）才清缓存。死键累积占满容量后 free_slots 恒 0，填充
+    永久停止——真实工程 15s 探针 t=4s 缓存 29/29、t=5s 起 hits+0。
+    调度器必须每轮清扫播放头之前的键（evict_before）。
+    """
+    from PyQt6.QtGui import QImage
+
+    from krok_helper.subtitle_render.frontend.preview import preview_async as pa
+    from krok_helper.subtitle_render.domain.models import Style, TimingTrack
+
+    pending: list[dict] = []
+    cached_events = threading.Event()
+
+    class FakeGpuProcess:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def start(self):
+            return {"ok": True, "event": "ready"}
+
+        def configure_gpu(self, *args, **kwargs):
+            return {"ok": True, "event": "gpu_configured"}
+        def resize_gpu_target(self, *args, **kwargs):
+            return {"ok": True, "event": "gpu_configured", "worker_count": 1}
+
+        def begin_render_gpu_frame(self, t_ms, **kwargs):
+            pending.append(
+                {
+                    "ok": True,
+                    "event": "gpu_frame_ready",
+                    "shm_key": "gpu-wedge-ring",
+                    "t_ms": int(t_ms),
+                    "request_serial": int(kwargs.get("request_serial", 0)),
+                }
+            )
+
+        def try_finish_render_gpu_frame(self, _timeout_s):
+            return pending.pop(0) if pending else None
+
+        def close(self):
+            pass
+
+    class FakeGpuReader:
+        def __init__(self, shm_key):
+            self.shm_key = shm_key
+
+        @classmethod
+        def from_event(cls, event):
+            return cls(event["shm_key"])
+
+        def read_qimage(self, _event):
+            cached_events.set()
+            return QImage(4, 4, QImage.Format.Format_ARGB32_Premultiplied)
+
+        def close(self):
+            pass
+
+    monkeypatch.setenv("KROK_SUBTITLE_GPU_MAX_LOOKAHEAD_FRAMES", "2")
+    monkeypatch.setenv("KROK_SUBTITLE_GPU_LOOKAHEAD_FRAMES", "1")
+    monkeypatch.setenv("KROK_SUBTITLE_GPU_WORKERS", "1")
+    monkeypatch.setattr(pa, "NativeRendererProcess", FakeGpuProcess)
+    monkeypatch.setattr(pa, "SharedFrameRingReader", FakeGpuReader)
+    renderer = pa.GpuAsyncSubtitleRenderer(320, 180)
+    try:
+        assert renderer._frame_cache.capacity() == 4  # 2 max + 1 worker + 1
+        renderer.set_state(TimingTrack(), Style())
+        renderer.set_playing(True)
+
+        def fill_count():
+            return renderer.stats_snapshot()["future_frames_cached"]
+
+        # 初始窗口填充起来。
+        renderer.request(1_000)
+        deadline = time.monotonic() + 2.0
+        while fill_count() < 3 and time.monotonic() < deadline:
+            qapp.processEvents()
+            time.sleep(0.01)
+        assert fill_count() >= 3
+
+        # 连续 200ms 步进（< 250ms seek 阈值，不触发清缓存）：每步跳过
+        # 大部分已填键，制造死键积累。旧代码数步内 free_slots 归零、
+        # future_frames_cached 冻结；有清扫则持续增长。
+        for step in range(12):
+            before = fill_count()
+            renderer.request(1_000 + 200 * (step + 1))
+            deadline = time.monotonic() + 1.0
+            while fill_count() <= before and time.monotonic() < deadline:
+                qapp.processEvents()
+                time.sleep(0.005)
+            assert fill_count() > before, (
+                f"第 {step} 步后填充停止：缓存被死键占满（楔死回归）"
+            )
+        stats = renderer.stats_snapshot()
+        assert stats["cache_misses"] > 0
+        assert renderer._frame_cache.size() <= renderer._frame_cache.capacity()
+    finally:
+        renderer.set_playing(False)
+        renderer.stop()
+
+
 def test_gpu_native_mode_hot_switch_keeps_sidecar_and_flips_transport(qapp, monkeypatch):
     """G6↔G5 热切换：同一 sidecar 内翻转直画/读回，进程不重建。
 

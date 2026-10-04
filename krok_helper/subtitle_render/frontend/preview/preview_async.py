@@ -362,6 +362,20 @@ class NativePreviewFrameCache:
             # store() 已复制一份私有拷贝；pop 后缓存不再持有引用，直接移交即可。
             return self._images.pop(self._key(t_ms), None)
 
+    def evict_before(self, key: int) -> int:
+        """丢弃所有帧键 < ``key`` 的条目，返回逐出数。
+
+        播放头之前的键永远不会再被 take() 命中（请求只前进；seek 走
+        代际变化 + clear）。若不主动清扫，被请求跳过的已填键会累积成
+        「死键」占满容量 → free_slots=0 → 永久停填 → 播放几秒后完全
+        冻结（2026-10 G5 长跑楔死，15s 探针 t=5s 起 hits+0 / cache 满）。
+        """
+        with self._lock:
+            dead = [cached for cached in self._images if cached < int(key)]
+            for cached in dead:
+                del self._images[cached]
+            return len(dead)
+
     def clear(self) -> None:
         with self._lock:
             self._images.clear()
@@ -2195,6 +2209,11 @@ class GpuAsyncSubtitleRenderer(QObject):
                 # 提交（worker 持续饱和不排空），前沿按管线时延 EMA 前移
                 # （帧完成时刻恰好落在请求键上），到点缓存命中上屏。
                 cache = self._frame_cache
+                # 播放头之前的死键清扫（详见 evict_before 注释）：请求跳过的
+                # 已填键若不逐出会占满容量 → free_slots 恒 0 → 播放几秒后
+                # 永久停摆（15s 长跑探针 t=5s 起 hits+0 / cache 29/29 不动）。
+                if cache.evict_before(cache.key_for(int(media_now))):
+                    self._note("stale_frames_dropped")
                 if cpu_mode:
                     floor_key = cache.key_for(int(media_now))
                     ceiling_key = cache.key_for(
