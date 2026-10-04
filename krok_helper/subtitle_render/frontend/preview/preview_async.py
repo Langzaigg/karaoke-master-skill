@@ -714,6 +714,9 @@ class GpuAsyncSubtitleRenderer(QObject):
         # 级，单独一条 EMA。
         self._native_last_presented: Optional[tuple[int, int]] = None
         self._render_ms_ema = 0.0
+        # G6 到点调度器的媒体时钟锚点。
+        self._g6_media_t = 0
+        self._g6_media_wall = 0.0
         self._cpu_render_ms_ema = 0.0
         self._native_project_ahead = _env_enabled(
             "KROK_SUBTITLE_G6_PROJECT_AHEAD", "1"
@@ -991,6 +994,9 @@ class GpuAsyncSubtitleRenderer(QObject):
                 cached = None
                 self._cancel_native_generation_locked(previous_generation)
             self._latest_t = requested_t
+            # G6 到点调度器的媒体时钟锚点（按墙钟外推）。
+            self._g6_media_t = requested_t
+            self._g6_media_wall = time.monotonic()
             self._note("requests")
             if cached is not None:
                 self._note("cache_hits")
@@ -1384,6 +1390,15 @@ class GpuAsyncSubtitleRenderer(QObject):
                         )
                         continue
                     if self._native_preview and native_target is not None:
+                        if self._playing:
+                            # 播放态进入到点队列调度器：渲染跑到到点前、
+                            # 到点出队上屏、空闲填缝（用户模型：22fps 就渲
+                            # 22 帧有效的，提前完成则填 15,25,35…逐步爬回
+                            # 60）。暂停态走下面的同步逐帧路径。
+                            self._run_native_due_scheduler(
+                                renderer, generation, force_warp
+                            )
+                            continue
                         (
                             parent_hwnd,
                             target_x,
@@ -1410,9 +1425,8 @@ class GpuAsyncSubtitleRenderer(QObject):
                                 self._note("frames_emitted")
                                 self.frame_presented.emit(int(settled_t))
                             continue
-                        # 拆分路径：先渲染到纹理（可提前），用真实渲染耗时
-                        # 持有到点，再上屏——present_gpu_frame 的渲染+上屏
-                        # 一体调用没法在中间等待，提前持有会让帧迟到。
+                        # 拆分路径：先渲染到纹理（可提前），再上屏。暂停态
+                        # 渲染完立即可上屏（_hold_until_due 对非播放态直通）。
                         render_event = renderer.render_gpu_frame_direct(
                             render_t,
                             force_warp=force_warp,
@@ -1818,6 +1832,163 @@ class GpuAsyncSubtitleRenderer(QObject):
             key = max(key, last[1] + 1)
         key = min(key, ceiling_key)
         return self._frame_cache.timestamp_for_key(key)
+
+    def _media_now_ms(self) -> float:
+        """播放态媒体时钟：以最近一次 request 为锚点按墙钟外推。"""
+        with self._condition:
+            if self._g6_media_wall <= 0.0:
+                return float(self._g6_media_t)
+            return float(self._g6_media_t) + (
+                time.monotonic() - self._g6_media_wall
+            ) * 1000.0
+
+    def _run_native_due_scheduler(
+        self,
+        renderer: NativeRendererProcess,
+        generation: int,
+        force_warp: bool,
+    ) -> None:
+        """G6 播放态到点队列调度器（2026-10 用户模型的完整实现）。
+
+        - 目标键 = max(上次已出帧键+1, 媒体时钟+EMA) 且不超前容忍窗：
+          落后时抽帧追上（22fps 就渲 22 帧有效的，帧帧到点上屏）；
+          提前完成时继续渲染后续帧填进队列（15,25,35… 的填缝），
+          到点逐帧放出——恢复期 GPU 不空转、帧率按容量逐步爬回 60。
+        - 退出条件：暂停 / 视图隐藏（target 清空）/ 代际变化（seek、
+          样式改动）/ 停止。异常上抛给 _run 的失败语义统一处理。
+        """
+        fps = max(int(self._frame_cache._fps), 1)  # noqa: SLF001
+        interval_ms = 1000.0 / fps
+        queue_cap = max(2, int(self._STALE_TOLERANCE_MS / interval_ms) + 1)
+        rendered_queue: list[tuple[int, int]] = []  # (key, t_ms) 递增
+
+        while True:
+            with self._condition:
+                if (
+                    self._stopped
+                    or not self._playing
+                    or not self._native_preview
+                    or self._native_target is None
+                    or generation != self._generation
+                ):
+                    return
+                native_target = self._native_target
+            media_now = self._media_now_ms()
+
+            # 1) 出队到点帧（一帧一帧放，保持到点才播放的语义）。
+            while rendered_queue and rendered_queue[0][1] <= media_now + 1.0:
+                _, due_t = rendered_queue.pop(0)
+                self._present_g6_frame(
+                    renderer, due_t, native_target, generation, force_warp
+                )
+                media_now = self._media_now_ms()
+
+            # 2) 补渲染：填缝到容忍窗前沿为止。
+            last_key = rendered_queue[-1][0] if rendered_queue else None
+            with self._condition:
+                last = self._native_last_presented
+            if (
+                last is not None
+                and last[0] == self._generation
+                and (last_key is None or last_key < last[1])
+            ):
+                last_key = last[1]
+            if len(rendered_queue) < queue_cap:
+                floor_key = 0 if last_key is None else last_key + 1
+                ahead_key = self._frame_cache.key_for(
+                    int(media_now + self._render_ms_ema)
+                )
+                ceiling_key = self._frame_cache.key_for(
+                    int(media_now + self._STALE_TOLERANCE_MS)
+                )
+                target_key = max(floor_key, ahead_key, 0)
+                target_key = min(target_key, ceiling_key)
+                if target_key >= max(floor_key, 0) or last_key is None:
+                    render_t = self._frame_cache.timestamp_for_key(target_key)
+                    render_event = renderer.render_gpu_frame_direct(
+                        render_t,
+                        force_warp=force_warp,
+                        generation=generation,
+                        frame_index=self._frame_index,
+                    )
+                    self._frame_index += 1
+                    render_ms = float(render_event.get("render_ms") or 0.0)
+                    if render_ms > 0.0:
+                        self._render_ms_ema = (
+                            render_ms
+                            if self._render_ms_ema <= 0.0
+                            else self._render_ms_ema * 0.7 + render_ms * 0.3
+                        )
+                    self._record_event_timing("render_ms", render_ms)
+                    rendered_queue.append((target_key, render_t))
+                    self._note("requests")
+                    continue
+
+            # 3) 队列满/填到前沿：等到点或新事件（唤醒即重评）。
+            with self._condition:
+                if self._stopped or not self._playing:
+                    return
+                self._condition.wait(timeout=0.002)
+
+    def _present_g6_frame(
+        self,
+        renderer: NativeRendererProcess,
+        render_t: int,
+        native_target: tuple,
+        generation: int,
+        force_warp: bool,
+    ) -> None:
+        """上屏一帧已渲染的纹理：区域钳制到当前配置纹理内 + 记账/emit。"""
+        (
+            parent_hwnd,
+            target_x,
+            target_y,
+            target_width,
+            target_height,
+            src_x,
+            src_y,
+        ) = native_target
+        # 窗口几何来自 GUI 线程的最新值，纹理尺寸是本 worker 最近一次
+        # configure/resize 的值——resize 期间两者短暂不一致时把区域
+        # 钳进纹理内，避免 present 校验失败被计入连续失败弹回退框。
+        with self._condition:
+            phys_w = max(int(round(self._logical_w * self._device_pixel_ratio)), 1)
+            phys_h = max(int(round(self._logical_h * self._device_pixel_ratio)), 1)
+        src_x = min(max(src_x, 0), max(phys_w - 1, 0))
+        src_y = min(max(src_y, 0), max(phys_h - 1, 0))
+        target_width = min(max(target_width, 1), phys_w - src_x)
+        target_height = min(max(target_height, 1), phys_h - src_y)
+        if target_width < 1 or target_height < 1:
+            return
+
+        event = renderer.present_rendered_gpu_frame(
+            parent_hwnd=parent_hwnd,
+            x=target_x,
+            y=target_y,
+            width=target_width,
+            height=target_height,
+            src_x=src_x,
+            src_y=src_y,
+            t_ms=render_t,
+            force_warp=force_warp,
+            generation=generation,
+        )
+        completed_at = time.monotonic()
+        self._frame_error_streak = 0
+        self._native_preview_failures = 0
+        self._note("frames_emitted")
+        self._record_event_timing("present_ms", event.get("present_ms"))
+        self._native_note_presented(generation, render_t, event)
+        if self._may_emit(render_t, generation):
+            self.frame_presented.emit(int(render_t))
+            self._note_backend_mode("gpu")
+            self._g6_present_count += 1
+            if self._g6_present_count == 1:
+                print(
+                    f"[GPU 预览] G6 首帧直画成功 "
+                    f"present={event.get('present_ms', '?')}ms",
+                    flush=True,
+                )
 
     def _hold_until_due(
         self, requested_t: int, submitted_at: float, render_t: int, generation: int

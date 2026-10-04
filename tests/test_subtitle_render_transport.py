@@ -1749,7 +1749,7 @@ def test_gpu_native_preview_recovery_stays_monotonic(qapp, monkeypatch):
     from krok_helper.subtitle_render.domain.models import Style, TimingTrack
 
     presented: list[tuple[int, int, int]] = []  # (generation, t, media_at_present)
-    clock = {"t": 60_000}
+    clock = {"t": 60_000, "t0": 0.0}
     lock = threading.Lock()
     slow_remaining = {"n": 3}
 
@@ -1788,7 +1788,7 @@ def test_gpu_native_preview_recovery_stays_monotonic(qapp, monkeypatch):
                     (
                         int(kwargs.get("generation", 0)),
                         int(kwargs.get("t_ms", 0)),
-                        clock["t"],
+                        int(60_000 + (time.monotonic() - clock["t0"]) * 1000.0),
                     )
                 )
             return {
@@ -1818,7 +1818,8 @@ def test_gpu_native_preview_recovery_stays_monotonic(qapp, monkeypatch):
         # 媒体时钟用墙钟驱动（生产中由 QElapsedTimer 平滑驱动，与墙钟
         # 1:1）——离散步进（每拍 sleep 开销 >16.7ms 只走 16ms）会比真实
         # 媒体慢，导致到点持有的模型被误判为提前上屏。
-        t0 = time.monotonic()
+        clock["t0"] = time.monotonic()
+        t0 = clock["t0"]
         while time.monotonic() - t0 < 1.2:
             with lock:
                 clock["t"] = 60_000 + int((time.monotonic() - t0) * 1000.0)
@@ -1840,6 +1841,83 @@ def test_gpu_native_preview_recovery_stays_monotonic(qapp, monkeypatch):
             if t - media > 40
         ]
         assert not early, f"提前上屏未到点的帧: {early[:6]}"
+    finally:
+        renderer.stop()
+
+
+def test_gpu_native_due_scheduler_fills_during_recovery(qapp, monkeypatch):
+    """恢复期填缝（2026-10 用户模型的核心断言）：吞吐骤升后，渲染要跑在
+    出队前面（队列积累、GPU 不空转），而不是渲一帧睡到到点。
+    """
+    from krok_helper.subtitle_render.frontend.preview import preview_async as pa
+    from krok_helper.subtitle_render.domain.models import Style, TimingTrack
+
+    renders: list[tuple[float, int]] = []  # (wall, t)
+    presents: list[tuple[float, int]] = []
+    slow = {"n": 3}
+    lock = threading.Lock()
+
+    class FakeGpuProcess:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def start(self):
+            return {"ok": True, "event": "ready", "native_preview_protocol": 1}
+
+        def configure_gpu(self, *args, **kwargs):
+            return {"ok": True, "event": "gpu_configured", "native_preview": True}
+
+        def render_gpu_frame_direct(self, t_ms, **kwargs):
+            if slow["n"] > 0:
+                slow["n"] -= 1
+                time.sleep(0.166)
+                dur = 166.0
+            else:
+                dur = 1.0
+            with lock:
+                renders.append((time.monotonic(), int(t_ms)))
+            return {"ok": True, "event": "gpu_frame_rendered_direct",
+                    "t_ms": int(t_ms), "render_ms": dur}
+
+        def present_rendered_gpu_frame(self, **kwargs):
+            with lock:
+                presents.append((time.monotonic(), int(kwargs.get("t_ms", 0))))
+            return {"ok": True, "event": "gpu_frame_presented",
+                    "t_ms": int(kwargs.get("t_ms", 0)), "render_ms": 0.0,
+                    "present_ms": 0.2, "readback_ms": 0.0,
+                    "child_hwnd": 1, "transport": "direct_composition"}
+
+        def render_gpu_frame(self, *args, **kwargs):
+            raise AssertionError("G6 native preview must not use shared-memory readback")
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(pa, "gpu_native_preview_enabled", lambda: True)
+    monkeypatch.setattr(pa, "NativeRendererProcess", FakeGpuProcess)
+    renderer = pa.GpuAsyncSubtitleRenderer(320, 180)
+    try:
+        renderer.set_native_target(12345, 0, 0, 320, 180)
+        renderer.set_state(TimingTrack(), Style())
+        renderer.set_playing(True)
+        t0 = time.monotonic()
+        while time.monotonic() - t0 < 1.2:
+            renderer.request(60_000 + int((time.monotonic() - t0) * 1000.0))
+            qapp.processEvents()
+            time.sleep(0.016)
+        time.sleep(0.2)
+        qapp.processEvents()
+
+        # 骤快起点 = 第 4 次渲染的墙钟
+        fast_at = renders[3][0]
+        fast_renders = [t for w, t in renders if w >= fast_at]
+        fast_presents = [t for w, t in presents if w >= fast_at]
+        # 填缝：骤快后渲染显著多于呈现（多出来的在队列里等待到点）。
+        assert len(fast_renders) >= len(fast_presents) + 3, (
+            f"恢复期未填缝: renders={len(fast_renders)} presents={len(fast_presents)}"
+        )
+        # 呈现节奏 ≈ 帧间隔（到点逐帧放，不是渲完立即全部放完）。
+        assert len(fast_presents) >= 5, "应有持续到点出队"
     finally:
         renderer.stop()
 

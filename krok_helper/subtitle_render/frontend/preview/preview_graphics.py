@@ -359,6 +359,15 @@ class PreviewGraphicsView(QGraphicsView):
         self._t_ms: int = 0
         self._duration_ms: int = 0
         self._preview_quality = DEFAULT_PREVIEW_QUALITY
+        # G6 直画几何跟随：画布自身 moveEvent 只反映「相对父级」的移动；
+        # 面板被 AspectRatioBox 居中平移时画布相对位置不变、但对顶层窗口
+        # 的绝对位置变了（2026-10 用户实测高度变化字幕偏移）。用自监视
+        # 过滤器盯整条祖先链的 Move/Resize，并随重挂父级（预览窗弹出/
+        # 收回）重装。
+        self._native_geometry_targets: list[QWidget] = []
+        self.installEventFilter(self)
+        self._retarget_native_geometry_watch()
+
         self._resize_render_timer = QTimer(self)
         self._resize_render_timer.setSingleShot(True)
         self._resize_render_timer.setInterval(_RESIZE_RENDER_DEBOUNCE_MS)
@@ -424,6 +433,29 @@ class PreviewGraphicsView(QGraphicsView):
         # 不刷新就会整体偏移（2026-10 用户实测 x 向会重算、y 向不会）。
         if getattr(self._async_renderer, "uses_native_preview", False):
             self._resize_render_timer.start()
+
+    def _retarget_native_geometry_watch(self) -> None:
+        for target in self._native_geometry_targets:
+            target.removeEventFilter(self)
+        self._native_geometry_targets = []
+        ancestor = self.parentWidget()
+        while ancestor is not None:
+            ancestor.installEventFilter(self)
+            self._native_geometry_targets.append(ancestor)
+            ancestor = ancestor.parentWidget()
+
+    def eventFilter(self, watched, event):  # noqa: N802
+        if event.type() in (
+            QEvent.Type.Move,
+            QEvent.Type.Resize,
+            QEvent.Type.ParentChange,
+        ):
+            if watched is self:
+                # 重挂父级（嵌入页 ↔ 悬浮播放窗）：重装祖先链过滤器。
+                self._retarget_native_geometry_watch()
+            if getattr(self._async_renderer, "uses_native_preview", False):
+                self._resize_render_timer.start()
+        return super().eventFilter(watched, event)
 
     def event(self, ev):  # noqa: N802
         # 窗口被拖到缩放比例（DPR）不同的显示器时不会触发 resizeEvent，
