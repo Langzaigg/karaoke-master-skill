@@ -2506,6 +2506,23 @@ def test_gpu_async_renderer_one_frame_lookahead_uses_bounded_cache(qapp, monkeyp
                 "t_ms": int(t_ms),
             }
 
+        def begin_render_gpu_frame(self, t_ms, **kwargs):
+            rendered.append(int(t_ms))
+            self._completed.append(
+                {
+                    "ok": True,
+                    "event": "gpu_frame_ready",
+                    "shm_key": "gpu-lookahead-ring",
+                    "t_ms": int(t_ms),
+                    "request_serial": int(kwargs.get("request_serial", 0)),
+                }
+            )
+
+        _completed: list[dict] = []
+
+        def try_finish_render_gpu_frame(self, _timeout_s):
+            return self._completed.pop(0) if self._completed else None
+
         def close(self):
             pass
 
@@ -2920,6 +2937,9 @@ def test_gpu_async_renderer_pooled_batch_accepts_out_of_order_completion(qapp, m
         def finish_render_gpu_frame(self):
             return pending.pop()
 
+        def try_finish_render_gpu_frame(self, _timeout_s):
+            return pending.pop() if pending else None
+
         def send_cancel_generation(self, _generation):
             pass
 
@@ -3016,6 +3036,9 @@ def test_gpu_async_renderer_reserves_final_ring_before_deferred_follower(qapp, m
 
         def finish_render_gpu_frame(self):
             return pending.pop()
+
+        def try_finish_render_gpu_frame(self, _timeout_s):
+            return pending.pop() if pending else None
 
         def send_cancel_generation(self, _generation):
             pass
@@ -3214,7 +3237,8 @@ def test_gpu_async_renderer_weak_gpu_shrinks_pool_to_one(qapp, monkeypatch):
         renderer.set_state(TimingTrack(), Style())
         renderer.request(1_000)
         assert delivered.wait(timeout=2.0)
-        assert configured_workers == [2, 1]
+        # 默认申请 4 worker（2026-10 用户拍板），弱显存机器收缩到 1。
+        assert configured_workers == [4, 1]
         assert renderer.stats_snapshot()["worker_count"] == 1
     finally:
         renderer.stop()

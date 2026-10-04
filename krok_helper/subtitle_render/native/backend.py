@@ -1142,6 +1142,32 @@ class NativeRendererProcess:
                 return self._expect_ok(response)
             self._event_backlog.append(response)
 
+    def try_finish_render_gpu_frame(
+        self, timeout_s: float
+    ) -> Optional[dict[str, Any]]:
+        """Non-blocking variant of :meth:`finish_render_gpu_frame`.
+
+        Returns ``None`` only when no response arrived within ``timeout_s``.
+        Protocol errors and :class:`NativeQueueFullError` still raise — the
+        continuous fill scheduler keeps workers saturated and must distinguish
+        "nothing finished yet" from real failures.
+        """
+        while True:
+            response = self._read_response_or_none(timeout_s=timeout_s)
+            if response is None:
+                return None
+            if not response.get("ok", False):
+                if response.get("event") == "gpu_queue_full":
+                    raise NativeQueueFullError(response)
+                return self._expect_ok(response)
+            if response.get("event") in {
+                "gpu_frame_ready",
+                "gpu_frame_dropped",
+                "gpu_queue_full",
+            }:
+                return self._expect_ok(response)
+            self._event_backlog.append(response)
+
     def render_gpu_frame(
         self,
         t_ms: int,
@@ -1401,29 +1427,38 @@ class NativeRendererProcess:
         timeout_s: float | None = None,
         waiting_for: str = "protocol response",
     ) -> dict[str, Any]:
+        payload = self._read_response_or_none(
+            timeout_s=timeout_s, waiting_for=waiting_for
+        )
+        if payload is None:
+            process = self._current_process()
+            raise NativeRendererError(
+                self._format_timeout_error(
+                    process,
+                    timeout_s=self._resolved_timeout(timeout_s),
+                    waiting_for=waiting_for,
+                )
+            )
+        return payload
+
+    def _read_response_or_none(
+        self,
+        *,
+        timeout_s: float | None = None,
+        waiting_for: str = "protocol response",
+    ) -> Optional[dict[str, Any]]:
+        """Read one event line; return None on read timeout (no raise)."""
         process = self._current_process()
         effective_timeout_s = self._resolved_timeout(timeout_s)
         deadline = time.monotonic() + effective_timeout_s
         while True:
             remaining = deadline - time.monotonic()
             if remaining <= 0:
-                raise NativeRendererError(
-                    self._format_timeout_error(
-                        process,
-                        timeout_s=effective_timeout_s,
-                        waiting_for=waiting_for,
-                    )
-                )
+                return None
             try:
                 line = self._stdout_queue.get(timeout=remaining)
-            except queue.Empty as exc:
-                raise NativeRendererError(
-                    self._format_timeout_error(
-                        process,
-                        timeout_s=effective_timeout_s,
-                        waiting_for=waiting_for,
-                    )
-                ) from exc
+            except queue.Empty:
+                return None
 
             if line is None:
                 raise NativeRendererError(

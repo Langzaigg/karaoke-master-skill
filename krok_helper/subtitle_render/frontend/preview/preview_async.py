@@ -720,8 +720,11 @@ class GpuAsyncSubtitleRenderer(QObject):
         # 成功出帧即清零；连续达到阈值才降级/重启（2026-10 用户拍板）。
         self._consecutive_failure_limit = 5
         self._native_preview_failures = 0
+        # 默认 4 worker（2026-10 用户拍板「4worker 必做，一定有低端机」）：
+        # G5 读回管线渲染+回读串行时延高，2 worker 填缝追不上 60fps 消费；
+        # 低端机更显式需要 4 路并行摊薄单帧成本。env 可覆盖，上限 8。
         self._worker_count_requested = _env_int(
-            "KROK_SUBTITLE_GPU_WORKERS", 2, minimum=1
+            "KROK_SUBTITLE_GPU_WORKERS", 4, minimum=1
         )
         self._worker_count_requested = min(self._worker_count_requested, 8)
         # 注意：这里不再按 native 模式把 _worker_count_requested 冻结成 1。
@@ -745,6 +748,9 @@ class GpuAsyncSubtitleRenderer(QObject):
         # 级，单独一条 EMA。
         self._native_last_presented: Optional[tuple[int, int]] = None
         self._render_ms_ema = 0.0
+        # 读回填缝的前沿前移量（毫秒，控制器式 EMA 自校正）：让帧的完成
+        # 时刻恰好落在请求键上，避免填进缓存时播放头已越过该键。
+        self._fill_lead_ms = 0.0
         # G6 到点调度器的媒体时钟锚点。
         self._g6_media_t = 0
         self._g6_media_wall = 0.0
@@ -953,8 +959,10 @@ class GpuAsyncSubtitleRenderer(QObject):
             self._needs_target_resize = True
             if enabled:
                 # G5→G6：直画模式不用投机缓存（pending 跟随请求戳 + 投喂
-                # 前移），lookahead 冻结为 0。
+                # 前移），lookahead 冻结为 0。首帧里程碑计数复位，重新进入
+                # 直画时再打一次「首帧直画成功」。
                 self._lookahead_frames = 0
+                self._g6_present_count = 0
             else:
                 # G6→G5：撤掉 DComp 子窗口（close 哨兵），恢复投机前瞻。
                 self._native_target = None
@@ -2108,6 +2116,8 @@ class GpuAsyncSubtitleRenderer(QObject):
         interval_ms = 1000.0 / fps
         queue_cap = max(2, int(self._STALE_TOLERANCE_MS / interval_ms) + 1)
         rendered_queue: list[tuple[int, int]] = []  # native: (key, t_ms) 递增
+        # 读回（G5）连续饱和提交的在途表：wire serial → 填充目标时间戳。
+        inflight: dict[int, int] = {}
         cpu_mode = cpu_render is not None
 
         while True:
@@ -2177,98 +2187,166 @@ class GpuAsyncSubtitleRenderer(QObject):
                         self._note("requests")
                         continue
             else:
-                # 读回（G5）/ painter（CPU 回退）填缝：把 [当前, 容忍窗]
-                # 内缓存缺失的帧持续渲染入缓存；GUI 请求到点时缓存命中
-                # 上屏（呈现天然到点）。
-                floor_key = self._frame_cache.key_for(int(media_now))
-                ceiling_key = self._frame_cache.key_for(
-                    int(media_now + self._STALE_TOLERANCE_MS)
-                )
+                # 读回（G5）/ painter（CPU 回退）：连续饱和填缝。
+                # 旧模型「凑一批、提交 N、阻塞收 N」在批间把池抽干，且填充
+                # 前沿从 media_now 起步——渲染完成时播放头往往已越过该键
+                # （2026-10 真实工程实测：20fps 填充对 63fps 请求，缓存
+                # ~91% miss，播放饿死/冻结）。新模型：完成一帧立刻补一帧
+                # 提交（worker 持续饱和不排空），前沿按管线时延 EMA 前移
+                # （帧完成时刻恰好落在请求键上），到点缓存命中上屏。
                 cache = self._frame_cache
-                # 填缝受缓存容量约束：窗口超出容量时，最老帧被逐出→
-                # 又变"缺失"→无限重渲同一窗口（2026-10 实测 130 次重复）。
-                ceiling_key = min(
-                    ceiling_key, floor_key + cache.capacity() - 1
-                )
-                free_slots = cache.capacity() - cache.size()
-                render_cap = 1 if cpu_mode else max(1, self._active_worker_count)
-                render_cap = max(min(render_cap, free_slots), 0)
-                batch: list[int] = []
-                key = floor_key
-                while key <= ceiling_key and len(batch) < render_cap:
-                    if not cache.contains_key(key):
-                        batch.append(cache.timestamp_for_key(key))
-                    key += 1
-                if batch and cpu_mode:
-                    for fill_t in batch:
-                        image = cpu_render(fill_t)
-                        if image is None:
-                            continue
-                        self._note("fallback_frames")
-                        self._cache_speculative(image, fill_t, generation)
+                if cpu_mode:
+                    floor_key = cache.key_for(int(media_now))
+                    ceiling_key = cache.key_for(
+                        int(media_now + self._STALE_TOLERANCE_MS)
+                    )
+                    ceiling_key = min(
+                        ceiling_key, floor_key + cache.capacity() - 1
+                    )
+                    painted = 0
+                    key = floor_key
+                    while key <= ceiling_key and painted < 2:
+                        if not cache.contains_key(key):
+                            fill_t = cache.timestamp_for_key(key)
+                            image = cpu_render(fill_t)
+                            if image is not None:
+                                self._note("fallback_frames")
+                                self._cache_speculative(
+                                    image, fill_t, generation
+                                )
+                            painted += 1
+                        key += 1
                     continue
-                if batch and self._active_worker_count > 1:
+
+                # a) 收割一帧完成（小超时等待，避免空转轮询烧 CPU）。
+                if inflight:
                     try:
-                        self._render_pooled_batch(
-                            renderer,
-                            t_ms=batch[0],
-                            serial=serial,
-                            speculative=True,
-                            generation=generation,
-                            shm_key=shm_key,
-                            dpr=dpr,
-                            submitted_at=time.monotonic(),
-                            force_warp=force_warp,
-                            explicit_timestamps=batch,
-                        )
+                        event = renderer.try_finish_render_gpu_frame(0.002)
                     except NativeQueueFullError:
+                        # 流控：sidecar in-flight 池满。短暂退避后同批重提。
                         self._note("queue_full_backpressure")
                         with self._condition:
                             self._condition.wait(timeout=0.004)
-                    continue
-                if batch:
-                    # 单 worker（含 WARP）：单命令逐帧渲染入缓存，等价语义
-                    # 但少一半协议往返。
-                    for fill_t in batch:
-                        event = renderer.render_gpu_frame(
-                            fill_t,
-                            force_warp=force_warp,
-                            generation=generation,
-                            frame_index=self._frame_index,
-                            shm_key=shm_key,
-                            include_checksum=False,
-                            readback_bands=True,
-                            # 与池化路径同槽位数（同 key 下 ensure 参数必须
-                            # 恒定，理由见 _readback_slot_count）。
-                            slot_count=self._readback_slot_count(),
+                        event = None
+                    if event is not None:
+                        done_serial = int(event.get("request_serial", -1))
+                        fill_t = inflight.pop(done_serial, None)
+                        self._absorb_readback_event(
+                            event, fill_t, generation, dpr
                         )
-                        self._frame_index += 1
-                        render_ms = float(event.get("render_ms") or 0.0)
-                        if render_ms > 0.0:
-                            self._render_ms_ema = (
-                                render_ms
-                                if self._render_ms_ema <= 0.0
-                                else self._render_ms_ema * 0.7 + render_ms * 0.3
-                            )
-                        self._record_event_timing("render_ms", render_ms)
-                        event_key = str(event.get("shm_key") or "")
-                        if (
-                            self._reader is None
-                            or self._reader.shm_key != event_key
-                        ):
-                            if self._reader is not None:
-                                self._reader.close()
-                            self._reader = SharedFrameRingReader.from_event(event)
-                        image = self._reader.read_qimage(event)
-                        image.setDevicePixelRatio(dpr)
-                        self._cache_speculative(image, fill_t, generation)
-                    continue
+                # b) 补提：worker 有空位且窗口内有缺失键 → 立刻提交，
+                #    在途上限 = active worker 数，缓存槽位同步预留。
+                render_cap = max(1, self._active_worker_count)
+                lead = int(
+                    max(0.0, min(self._fill_lead_ms, self._STALE_TOLERANCE_MS))
+                )
+                floor_key = cache.key_for(int(media_now + lead))
+                ceiling_key = cache.key_for(
+                    int(media_now + self._STALE_TOLERANCE_MS)
+                )
+                ceiling_key = min(ceiling_key, floor_key + cache.capacity() - 1)
+                inflight_keys = {cache.key_for(t) for t in inflight.values()}
+                key = floor_key
+                while key <= ceiling_key and len(inflight) < render_cap:
+                    free_slots = cache.capacity() - cache.size() - len(inflight)
+                    if free_slots <= 0:
+                        break
+                    if key in inflight_keys or cache.contains_key(key):
+                        key += 1
+                        continue
+                    fill_t = cache.timestamp_for_key(key)
+                    wire = self._frame_index
+                    self._frame_index += 1
+                    renderer.begin_render_gpu_frame(
+                        fill_t,
+                        force_warp=force_warp,
+                        generation=generation,
+                        frame_index=wire,
+                        request_serial=wire,
+                        shm_key=shm_key,
+                        include_checksum=False,
+                        readback_bands=True,
+                        slot_count=self._readback_slot_count(),
+                    )
+                    inflight[wire] = fill_t
+                    inflight_keys.add(key)
+                    self._note("requests")
+                    key += 1
+                if inflight:
+                    with self._stats_lock:
+                        self._stats["max_in_flight"] = max(
+                            self._stats["max_in_flight"], len(inflight)
+                        )
+                if not inflight:
+                    # 窗口已填满且无在途：短睡等唤醒（播放头推进后窗口
+                    # 前移出新的缺失键）。
+                    with self._condition:
+                        if self._stopped or not self._playing:
+                            return
+                        self._condition.wait(timeout=0.002)
+                continue
 
             # 3) 队列满/填到前沿：等到点或新事件（唤醒即重评）。
             with self._condition:
                 if self._stopped or not self._playing:
                     return
                 self._condition.wait(timeout=0.002)
+
+    def _absorb_readback_event(
+        self,
+        event: dict,
+        fill_t: Optional[int],
+        generation: int,
+        dpr: float,
+    ) -> None:
+        """处理一帧读回完成事件：worker 爬坡 + 时延记账 + 入缓存。
+
+        填充前沿前移量（_fill_lead_ms）按控制器式 EMA 自校正：误差 =
+        完成时刻媒体钟 - 填充目标（正=完成晚于目标，需要更大前移）。
+        """
+        ready_workers = max(
+            1,
+            min(
+                int(event.get("worker_count_ready", self._active_worker_count)),
+                self._worker_count_requested,
+            ),
+        )
+        if ready_workers != self._active_worker_count:
+            self._active_worker_count = ready_workers
+            with self._stats_lock:
+                self._stats["worker_count"] = ready_workers
+        if fill_t is None:
+            # 上一轮调度器遗留的在途响应（热切换/代际变化后冲刷）。
+            self._note("stale_frames_dropped")
+            return
+        if event.get("event") == "gpu_frame_dropped":
+            self._note("stale_frames_dropped")
+            return
+        render_ms = float(event.get("render_ms") or 0.0)
+        if render_ms > 0.0:
+            self._render_ms_ema = (
+                render_ms
+                if self._render_ms_ema <= 0.0
+                else self._render_ms_ema * 0.7 + render_ms * 0.3
+            )
+        self._record_event_timing("render_ms", render_ms)
+        self._record_event_timing("readback_ms", event.get("readback_ms"))
+        error_ms = self._media_now_ms() - fill_t
+        self._fill_lead_ms = max(
+            0.0,
+            min(
+                self._fill_lead_ms + 0.3 * error_ms,
+                self._STALE_TOLERANCE_MS,
+            ),
+        )
+        event_key = str(event.get("shm_key") or "")
+        if self._reader is None or self._reader.shm_key != event_key:
+            if self._reader is not None:
+                self._reader.close()
+            self._reader = SharedFrameRingReader.from_event(event)
+        image = self._reader.read_qimage(event)
+        image.setDevicePixelRatio(dpr)
+        self._cache_speculative(image, fill_t, generation)
 
     def _present_g6_frame(
         self,

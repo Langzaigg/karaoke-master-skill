@@ -348,6 +348,7 @@ from krok_helper.subtitle_render.settings.preferences import (
     DISCARDED_BACKUP_RETENTION_DAYS,
     LAYOUT_DEFAULT_STYLE_FIELDS as _LAYOUT_DEFAULT_STYLE_FIELDS,
     LAYOUT_DEFAULT_VALUE_FIELDS as _LAYOUT_DEFAULT_VALUE_FIELDS,
+    SIGNAL_MODULE_STYLE_FIELDS as _SIGNAL_MODULE_STYLE_FIELDS,
     load_app_preferences,
     prepare_app_preferences,
     style_presets_from_dict as _style_presets_from_dict,
@@ -6678,13 +6679,12 @@ class SubtitleRenderWindow(QWidget):
                 gpu_native_preview_enabled,
             )
             actual = gpu_native_preview_enabled()
-            renderer = getattr(self._preview_panel, "_async_renderer", None)
-            native = bool(renderer and getattr(renderer, "uses_native_preview", False))
+            # 读面板转发的模式属性：面板上没有 _async_renderer（挂在 canvas
+            # 上），直接读会永远拿 None → 模式永远误报 G5。
+            native = bool(self._preview_panel.uses_native_preview)
             mode = "G6 DirectComposition 直画" if native else "G5 shared-memory/QImage"
             if native:
-                established = bool(
-                    renderer and getattr(renderer, "native_target_established", False)
-                )
+                established = bool(self._preview_panel.native_target_established)
                 # 开关在导出页，预览画布此刻多半隐藏：G6 已选定，子窗口要等
                 # 画布可见（showEvent）才建立——不是切换失败。
                 mode += "（直画已建立）" if established else "（待预览画布可见后直画）"
@@ -8055,6 +8055,21 @@ class SubtitleRenderWindow(QWidget):
         「保存为软件默认布局」显式落库（见 ``_save_layout_default``）。
         """
 
+        # 音量柱/指示灯与标题习惯同口径：只记这次真的改过的字段。这些字段
+        # 已并入 ``APP_STYLE_EXPLICIT_DEFAULT_FIELDS``，随手打开/关闭别的
+        # 工程不会经 merge_common_style_preferences 把习惯冲回那个工程的
+        # 值。``*_role_name`` 照记悬空引用：新工程没有该角色时按既有语义
+        # 回退（UI 幽灵条目 + auto 档装饰）。
+        signal_changes = {
+            name: getattr(current, name)
+            for name in _SIGNAL_MODULE_STYLE_FIELDS
+            if getattr(previous, name) != getattr(current, name)
+        }
+        if signal_changes:
+            self._app_default_style = replace(
+                self._app_default_style, **signal_changes
+            )
+
         layout_changed = any(
             getattr(previous, field_name) != getattr(current, field_name)
             for field_name in _LAYOUT_DEFAULT_STYLE_FIELDS
@@ -8190,7 +8205,8 @@ class SubtitleRenderWindow(QWidget):
             self,
             "恢复默认偏好",
             "将把字幕视频生成模块记住的偏好恢复为出厂默认，包括：\n"
-            "· 新建工程的默认样式与标题习惯（淡入淡出、显示时段等）\n"
+            "· 新建工程的默认样式与标题习惯（淡入淡出、显示时段等），以及"
+            "音量柱/指示灯的开关与参数习惯\n"
             "· 按行数记住的「软件默认布局」选择与当前配色方案选择\n"
             "· 自动和声、「批量识别导唱标记」等对话框的上次设置\n"
             "· 输出偏好（GPU 预览 / 导出、输出目录、命名模板、编码器设置）\n"

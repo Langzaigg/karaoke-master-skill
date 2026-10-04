@@ -552,6 +552,24 @@ class PreviewPanel(DropPanel):
             return False
         return setter(bool(enabled))
 
+    @property
+    def uses_native_preview(self) -> bool:
+        """当前渲染器是否处于 G6 直画模式（主窗口模式上报用）。
+
+        主窗口曾直接读 `_preview_panel._async_renderer`——该属性在面板上
+        不存在，模式上报永远误报 G5（2026-10 用户按控制台判断「无法切换
+        到 G6」，实际切换是成功的）。
+        """
+        renderer = getattr(self._canvas, "_async_renderer", None)
+        return bool(renderer and getattr(renderer, "uses_native_preview", False))
+
+    @property
+    def native_target_established(self) -> bool:
+        renderer = getattr(self._canvas, "_async_renderer", None)
+        return bool(
+            renderer and getattr(renderer, "native_target_established", False)
+        )
+
     def set_preview_quality(self, quality: object) -> None:
         setter = getattr(self._canvas, "set_preview_quality", None)
         if setter is not None:
