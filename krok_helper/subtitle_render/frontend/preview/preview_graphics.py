@@ -787,6 +787,16 @@ class PreviewGraphicsView(QGraphicsView):
                 self._output_h,
                 render_dpr,
             )
+            print(
+                f"[G6 target] viewport={viewport.width()}x{viewport.height()} "
+                f"dpr={screen_dpr:.2f} scene_scale={abs(self.transform().m11()):.3f} "
+                f"render_dpr={render_dpr:.3f} "
+                f"mapped=({mapped_scene.left():.0f},{mapped_scene.top():.0f},"
+                f"{mapped_scene.width():.0f}x{mapped_scene.height():.0f}) "
+                f"physical={physical_w}x{physical_h} "
+                f"output={self._output_w}x{self._output_h}",
+                flush=True,
+            )
             self._async_renderer.set_native_target(
                 int(viewport.winId()),
                 int(round(mapped_scene.left() * screen_dpr)),
