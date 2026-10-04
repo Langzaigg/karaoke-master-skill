@@ -428,11 +428,24 @@ class PreviewGraphicsView(QGraphicsView):
 
     def moveEvent(self, event):  # noqa: N802
         super().moveEvent(event)
-        # 高度变化时 AspectRatioBox/布局常只**移动**画布（尺寸不变，垂直
-        # 居中重摆），resizeEvent 不触发——DComp 子窗口挂在顶层 HWND 上，
-        # 不刷新就会整体偏移（2026-10 用户实测 x 向会重算、y 向不会）。
-        if getattr(self._async_renderer, "uses_native_preview", False):
-            self._resize_render_timer.start()
+        self._sync_native_geometry_now()
+
+    def _sync_native_geometry_now(self) -> None:
+        """native 模式下立即重算 DComp 子窗口几何。
+
+        高度变化常只平移画布（尺寸不变，resizeEvent 不触发）；几何同步
+        只是元组替换（廉价），不等待与重渲绑定的去抖（2026-10 用户实测
+        拖拽停稳后 y 向也不更新——去抖期间到来的 Move 若被节流吞掉，
+        最后一次几何就永远停在旧值）。
+        """
+        renderer = self._async_renderer
+        if renderer is None or not getattr(
+            renderer, "uses_native_preview", False
+        ):
+            return
+        if not self.isVisible():
+            return
+        self._sync_native_child_window(self._display_device_scale())
 
     def _retarget_native_geometry_watch(self) -> None:
         for target in self._native_geometry_targets:
@@ -454,6 +467,8 @@ class PreviewGraphicsView(QGraphicsView):
                 # 重挂父级（嵌入页 ↔ 悬浮播放窗）：重装祖先链过滤器。
                 self._retarget_native_geometry_watch()
             if getattr(self._async_renderer, "uses_native_preview", False):
+                # 几何立即同步；完整重渲（目标尺寸变化时才需要）走去抖。
+                self._sync_native_geometry_now()
                 self._resize_render_timer.start()
         return super().eventFilter(watched, event)
 
@@ -918,6 +933,17 @@ class PreviewGraphicsView(QGraphicsView):
             src_x,
             src_y,
         )
+        if os.environ.get("KROK_G6_GEOM_DEBUG", "0").strip().lower() in (
+            "1",
+            "true",
+        ):
+            print(
+                f"[G6 geom] hwnd={int(window.winId())} win=({win_x},{win_y},"
+                f"{win_w}x{win_h}) src=({src_x},{src_y}) "
+                f"visible=({visible.left():.0f},{visible.top():.0f},"
+                f"{visible.width():.0f}x{visible.height():.0f})",
+                flush=True,
+            )
 
     def _stop_async_renderer(self) -> None:
         renderer = self._async_renderer
