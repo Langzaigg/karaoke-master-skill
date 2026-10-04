@@ -195,9 +195,13 @@ NativePreviewResult NativePreviewSurface::present(
     }
     D3D11_TEXTURE2D_DESC sourceDescription{};
     source->GetDesc(&sourceDescription);
-    if (sourceDescription.Width != static_cast<UINT>(target.width)
-        || sourceDescription.Height != static_cast<UINT>(target.height)) {
-        throw BackendError("native preview target must match the configured GPU texture size");
+    // 子窗口矩形可以小于渲染纹理（场景映射矩形被视口裁剪），但拷贝源
+    // 区域必须完整落在纹理内，否则看到的是越界垃圾。
+    if (target.srcX < 0 || target.srcY < 0
+        || target.width <= 0 || target.height <= 0
+        || static_cast<UINT>(target.srcX + target.width) > sourceDescription.Width
+        || static_cast<UINT>(target.srcY + target.height) > sourceDescription.Height) {
+        throw BackendError("native preview source region exceeds the GPU texture");
     }
     ensureWindow(target);
     ensureSwapChain(device, target.width, target.height);
@@ -208,7 +212,25 @@ NativePreviewResult NativePreviewSurface::present(
         swapChain_->GetBuffer(0, IID_PPV_ARGS(backBuffer.ReleaseAndGetAddressOf())),
         "IDXGISwapChain1::GetBuffer(native preview)"
     );
-    context->CopyResource(backBuffer.Get(), source);
+    D3D11_BOX sourceBox;
+    sourceBox.left = static_cast<UINT>(target.srcX);
+    sourceBox.top = static_cast<UINT>(target.srcY);
+    sourceBox.front = 0;
+    sourceBox.right = static_cast<UINT>(target.srcX + target.width);
+    sourceBox.bottom = static_cast<UINT>(target.srcY + target.height);
+    sourceBox.back = 1;
+    // 拷贝区域与 back buffer 同尺寸：flip 模型 swap chain 要求每帧覆盖
+    // 整个 back buffer，1:1 无缩放拷贝正好满足，且不会有重采样模糊。
+    context->CopySubresourceRegion(
+        backBuffer.Get(),
+        0,
+        0,
+        0,
+        0,
+        source,
+        0,
+        &sourceBox
+    );
     checkHr(swapChain_->Present(0, 0), "IDXGISwapChain1::Present(native preview)");
     pumpWindowMessages();
     const auto presentEnd = std::chrono::steady_clock::now();

@@ -432,6 +432,16 @@ class PreviewGraphicsView(QGraphicsView):
         self._resize_render_timer.stop()
         self._refresh_async_target()
 
+    def hideEvent(self, event):  # noqa: N802
+        super().hideEvent(event)
+        # 视图隐藏（切标签页/关悬浮播放窗）时必须撤掉 DComp 子窗口：
+        # 它挂在顶层窗口 HWND 上，不随视口一起隐藏，残留的话会一直浮在
+        # 其他 UI 上。showEvent → _refresh_async_target 会重新建立。
+        renderer = self._async_renderer
+        if renderer is not None and getattr(renderer, "uses_native_preview", False):
+            renderer.clear_native_target()
+        self._resize_render_timer.stop()
+
     def closeEvent(self, event):  # noqa: N802
         self._stop_async_renderer()
         super().closeEvent(event)
@@ -696,12 +706,15 @@ class PreviewGraphicsView(QGraphicsView):
         self._subtitle_item.set_async_image(image)
 
     def _on_native_frame_presented(self, t_ms: int) -> None:
+        # G6 下 DComp 子窗口是唯一的字幕层：任何成功 present 都要立刻清掉
+        # Qt 侧可能残留的异步图。此前 t 不匹配的早退路径不清图，旧 QImage
+        # 会与直画层双绘（两份字幕/错位叠加）。
+        self._subtitle_item.clear_async_image()
         if int(t_ms) != int(self._t_ms):
             tolerance = self._async_frame_tolerance()
             if tolerance <= 0 or abs(int(t_ms) - int(self._t_ms)) > tolerance:
                 return
         self._note_frame_delivered()
-        self._subtitle_item.clear_async_image()
         self.framePainted.emit()
 
     def set_output_size(self, width: int, height: int) -> None:
@@ -743,7 +756,13 @@ class PreviewGraphicsView(QGraphicsView):
             Qt.AspectRatioMode.KeepAspectRatioByExpanding,
         )
 
-    def _scene_device_pixel_ratio(self) -> float:
+    def _display_device_scale(self) -> float:
+        """DPR × scene→viewport 缩放，即视频矩形在屏幕上的物理口径。
+
+        未做质量钳制；G6 直画用它作为渲染目标尺度，保证纹理与屏幕矩形
+        逐像素对应（present 走 1:1 拷贝）。质量钳制只应作用于 G5/CPU 的
+        栅格分辨率，见 :meth:`_scene_device_pixel_ratio`。
+        """
         # DPR-aware 渲染（af1ad4e）：worker 直接按 viewport 设备倍率（DPR × scene→viewport
         # 缩放）栅格化，GUI 等倍 blit，省掉 1920×1080→viewport device 的 smooth-scale。
         # KROK_SUBTITLE_PREVIEW_DPR_AWARE=0 回退到旧路径（worker 渲 logical、GUI 缩放），用于 A/B。
@@ -753,59 +772,101 @@ class PreviewGraphicsView(QGraphicsView):
             "no",
             "off",
         ):
-            display_scale = 1.0
-        else:
-            viewport = self.viewport()
-            dpr = (
-                viewport.devicePixelRatioF()
-                if viewport is not None
-                else self.devicePixelRatioF()
-            )
-            scene_scale = abs(self.transform().m11()) or 1.0
-            # 按显示物理分辨率栅格化即可：文字直接在目标尺寸光栅化比
-            # 高分辨率渲染再缩小更锐（实测边缘梯度更高）。预览清晰度的上限
-            # 是窗口像素数——想看 1:1 细节请把预览窗口拉大 / 最大化。
-            display_scale = max(float(dpr or 1.0) * float(scene_scale), 0.01)
-        return preview_quality_render_scale(display_scale, self._preview_quality)
+            return 1.0
+        viewport = self.viewport()
+        dpr = (
+            viewport.devicePixelRatioF()
+            if viewport is not None
+            else self.devicePixelRatioF()
+        )
+        scene_scale = abs(self.transform().m11()) or 1.0
+        # 按显示物理分辨率栅格化即可：文字直接在目标尺寸光栅化比
+        # 高分辨率渲染再缩小更锐（实测边缘梯度更高）。预览清晰度的上限
+        # 是窗口像素数——想看 1:1 细节请把预览窗口拉大 / 最大化。
+        return max(float(dpr or 1.0) * float(scene_scale), 0.01)
+
+    def _scene_device_pixel_ratio(self) -> float:
+        return preview_quality_render_scale(
+            self._display_device_scale(), self._preview_quality
+        )
 
     def _refresh_async_target(self) -> None:
         if self._async_renderer is None:
             return
-        render_dpr = self._scene_device_pixel_ratio()
+        native_mode = getattr(self._async_renderer, "uses_native_preview", False)
+        render_dpr = self._display_device_scale() if native_mode else (
+            self._scene_device_pixel_ratio()
+        )
         self._async_renderer.set_render_target(
             self._output_w,
             self._output_h,
             render_dpr,
         )
-        if getattr(self._async_renderer, "uses_native_preview", False):
-            viewport = self.viewport()
-            viewport.setAttribute(Qt.WidgetAttribute.WA_NativeWindow, True)
-            mapped_scene = self.mapFromScene(self._scene.sceneRect()).boundingRect()
-            screen_dpr = max(float(viewport.devicePixelRatioF() or 1.0), 0.01)
-            physical_w, physical_h, _ = preview_render_target_size(
-                self._output_w,
-                self._output_h,
-                render_dpr,
-            )
-            print(
-                f"[G6 target] viewport={viewport.width()}x{viewport.height()} "
-                f"dpr={screen_dpr:.2f} scene_scale={abs(self.transform().m11()):.3f} "
-                f"render_dpr={render_dpr:.3f} "
-                f"mapped=({mapped_scene.left():.0f},{mapped_scene.top():.0f},"
-                f"{mapped_scene.width():.0f}x{mapped_scene.height():.0f}) "
-                f"physical={physical_w}x{physical_h} "
-                f"output={self._output_w}x{self._output_h}",
-                flush=True,
-            )
-            self._async_renderer.set_native_target(
-                int(viewport.winId()),
-                int(round(mapped_scene.left() * screen_dpr)),
-                int(round(mapped_scene.top() * screen_dpr)),
-                physical_w,
-                physical_h,
-            )
+        if native_mode:
+            self._sync_native_child_window(render_dpr)
         self._note_render_requested()
         self._async_renderer.request(self._t_ms)
+
+    def _sync_native_child_window(self, render_dpr: float) -> None:
+        """按屏幕上的可见视频矩形更新 DComp 子窗口几何。
+
+        坐标链：场景 → 视口（mapFromScene）→ 顶层窗口客户区（mapTo）→
+        物理像素（× 顶层 DPR）。子窗口挂在**顶层** HWND 上而不是视口的
+        原生 HWND——视口一旦 WA_NativeWindow，悬浮播放窗的标题栏/传输条
+        （画在顶层 backing store 里的兄弟控件）就会被原生子窗口整体压住；
+        挂顶层后子窗口只覆盖视频矩形，透明像素直接透出底下的 UI。
+
+        ``fitInView`` 是 KeepAspectRatioByExpanding，映射矩形可能超出视口
+        （视口更宽时上下溢出）；超出的部分用户本来看不见，子窗口必须裁掉，
+        否则字幕会画到视口相邻的 UI 上。裁剪后纹理与窗口不再同源起点，
+        通过 src_x/src_y 告诉 sidecar 从渲染纹理的哪个物理像素开始 1:1 拷贝。
+        """
+        window = self.window()
+        viewport = self.viewport()
+        if window is None or viewport is None or not self.isVisible():
+            self._async_renderer.clear_native_target()
+            return
+        physical_w, physical_h, _ = preview_render_target_size(
+            self._output_w,
+            self._output_h,
+            render_dpr,
+        )
+        dpr = max(float(window.devicePixelRatioF() or 1.0), 0.01)
+        mapped_scene = self.mapFromScene(self._scene.sceneRect()).boundingRect()
+        viewport_rect = QRectF(viewport.rect())
+        visible = QRectF(
+            max(mapped_scene.left(), viewport_rect.left()),
+            max(mapped_scene.top(), viewport_rect.top()),
+            0.0,
+            0.0,
+        )
+        visible.setRight(min(mapped_scene.right(), viewport_rect.right()))
+        visible.setBottom(min(mapped_scene.bottom(), viewport_rect.bottom()))
+        if visible.width() < 1.0 or visible.height() < 1.0:
+            self._async_renderer.clear_native_target()
+            return
+        top_left = self.mapTo(window, visible.topLeft().toPoint())
+        win_x = int(round(top_left.x() * dpr))
+        win_y = int(round(top_left.y() * dpr))
+        win_w = min(max(int(round(visible.width() * dpr)), 1), physical_w)
+        win_h = min(max(int(round(visible.height() * dpr)), 1), physical_h)
+        src_x = min(
+            max(int(round((visible.left() - mapped_scene.left()) * dpr)), 0),
+            max(physical_w - win_w, 0),
+        )
+        src_y = min(
+            max(int(round((visible.top() - mapped_scene.top()) * dpr)), 0),
+            max(physical_h - win_h, 0),
+        )
+        self._async_renderer.set_native_target(
+            int(window.winId()),
+            win_x,
+            win_y,
+            win_w,
+            win_h,
+            src_x,
+            src_y,
+        )
 
     def _stop_async_renderer(self) -> None:
         renderer = self._async_renderer

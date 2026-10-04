@@ -380,12 +380,24 @@ QJsonObject handlePresentGpuFrame(
     target.y = intValue(request, QStringLiteral("y"), 0);
     target.width = intValue(request, QStringLiteral("width"), 0);
     target.height = intValue(request, QStringLiteral("height"), 0);
-    if (target.width != config->physicalWidth()
-        || target.height != config->physicalHeight()) {
+    target.srcX = intValue(request, QStringLiteral("src_x"), 0);
+    target.srcY = intValue(request, QStringLiteral("src_y"), 0);
+    // 子窗口矩形可小于渲染纹理（视口裁剪），但拷贝源区域必须完整在纹理内。
+    if (target.width <= 0 || target.height <= 0) {
         QJsonObject out = response(false, QStringLiteral("gpu_present_frame"));
         out.insert(
             QStringLiteral("error"),
-            QStringLiteral("native preview dimensions must match the configured physical render target")
+            QStringLiteral("native preview dimensions must be positive")
+        );
+        return out;
+    }
+    if (target.srcX < 0 || target.srcY < 0
+        || target.srcX + target.width > config->physicalWidth()
+        || target.srcY + target.height > config->physicalHeight()) {
+        QJsonObject out = response(false, QStringLiteral("gpu_present_frame"));
+        out.insert(
+            QStringLiteral("error"),
+            QStringLiteral("native preview source region exceeds the configured render target")
         );
         return out;
     }

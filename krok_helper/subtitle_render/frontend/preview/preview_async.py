@@ -692,7 +692,13 @@ class GpuAsyncSubtitleRenderer(QObject):
         if self._force_warp or self._native_preview:
             self._worker_count_requested = 1
         self._active_worker_count = 1
-        self._native_target: Optional[tuple[int, int, int, int, int]] = None
+        self._native_target: Optional[
+            tuple[int, int, int, int, int, int, int]
+        ] = None
+        # sidecar 里是否可能还挂着 DComp 子窗口；True 时若 target 被清空，
+        # worker 会通过 close 哨兵主动撤掉，避免隐藏视图后残留画面。
+        self._native_child_open = False
+        self._native_close_requested = False
         self._lookahead_frames = _env_int(
             "KROK_SUBTITLE_GPU_LOOKAHEAD_FRAMES", 12, minimum=0
         )
@@ -757,6 +763,7 @@ class GpuAsyncSubtitleRenderer(QObject):
             "generations_cancelled": 0,
             "style_patches": 0,
             "style_patch_fallbacks": 0,
+            "native_preview_closed": 0,
         }
         self._timings: dict[str, deque[float]] = {
             "render_ms": deque(maxlen=4096),
@@ -845,14 +852,24 @@ class GpuAsyncSubtitleRenderer(QObject):
         y: int,
         width: int,
         height: int,
+        src_x: int = 0,
+        src_y: int = 0,
     ) -> None:
-        """Update the sidecar child HWND parent and physical target geometry."""
+        """Update the sidecar child HWND parent and physical target geometry.
+
+        ``x/y/width/height`` 是子窗口在父（顶层）窗口客户区里的物理像素
+        矩形（已裁剪到视口可见范围）；``src_x/src_y`` 是该矩形左上角在
+        渲染纹理里的物理像素偏移——场景映射矩形超出视口被裁掉时，纹理
+        与窗口起点不再重合，sidecar 从偏移处 1:1 拷贝。
+        """
         target = (
             int(parent_hwnd),
             int(x),
             int(y),
             max(int(width), 1),
             max(int(height), 1),
+            max(int(src_x), 0),
+            max(int(src_y), 0),
         )
         with self._condition:
             if self._stopped or not self._native_preview:
@@ -866,6 +883,23 @@ class GpuAsyncSubtitleRenderer(QObject):
                     self._request_serial,
                     False,
                 )
+            self._condition.notify_all()
+
+    def clear_native_target(self) -> None:
+        """Drop the native target and destroy the sidecar child window.
+
+        视图隐藏（切标签页/关播放窗）时调用：子窗口挂在顶层 HWND 上，
+        不会随视口隐藏，必须显式撤掉，否则残留画面浮在其他 UI 上。
+        worker 可能正阻塞在无 pending 的等待里，用 close 哨兵唤醒它。
+        """
+        with self._condition:
+            if self._stopped or not self._native_preview:
+                return
+            if self._native_target is None and not self._native_child_open:
+                return
+            self._native_target = None
+            self._pending = None
+            self._native_close_requested = True
             self._condition.notify_all()
 
     def request(self, t_ms: int) -> None:
@@ -956,10 +990,18 @@ class GpuAsyncSubtitleRenderer(QObject):
 
     def _take_next_request(self):
         with self._condition:
-            while not self._stopped and self._pending is None:
+            while (
+                not self._stopped
+                and self._pending is None
+                and not (self._native_close_requested and self._native_child_open)
+            ):
                 self._condition.wait()
             if self._stopped:
                 return None
+            if self._pending is None:
+                # 只为关闭 DComp 子窗口醒来（视图隐藏，见 clear_native_target）。
+                self._native_close_requested = False
+                return "__close_native__"
             t_ms, serial, speculative, submitted_at = self._pending
             self._pending = None
             needs_configure = self._needs_configure
@@ -993,6 +1035,21 @@ class GpuAsyncSubtitleRenderer(QObject):
                 snapshot = self._take_next_request()
                 if snapshot is None:
                     return
+                if snapshot == "__close_native__":
+                    # 视图隐藏：撤掉 sidecar 里的 DComp 子窗口。close 失败
+                    # 也不阻断——sidecar 重启/退出时窗口随进程销毁。
+                    renderer = self._renderer_owner.process
+                    if renderer is not None:
+                        try:
+                            renderer.close_gpu_preview(
+                                force_warp=self._force_warp,
+                            )
+                            self._note("native_preview_closed")
+                        except (AttributeError, NativeRendererError, RuntimeError):
+                            pass
+                    with self._condition:
+                        self._native_child_open = False
+                    continue
                 (
                     track,
                     style,
@@ -1243,7 +1300,15 @@ class GpuAsyncSubtitleRenderer(QObject):
                         )
                         continue
                     if self._native_preview and native_target is not None:
-                        parent_hwnd, target_x, target_y, target_width, target_height = native_target
+                        (
+                            parent_hwnd,
+                            target_x,
+                            target_y,
+                            target_width,
+                            target_height,
+                            src_x,
+                            src_y,
+                        ) = native_target
                         event = renderer.present_gpu_frame(
                             t_ms,
                             parent_hwnd=parent_hwnd,
@@ -1251,6 +1316,8 @@ class GpuAsyncSubtitleRenderer(QObject):
                             y=target_y,
                             width=target_width,
                             height=target_height,
+                            src_x=src_x,
+                            src_y=src_y,
                             force_warp=force_warp,
                             generation=generation,
                             frame_index=self._frame_index,
@@ -1289,6 +1356,8 @@ class GpuAsyncSubtitleRenderer(QObject):
                     completed_at = time.monotonic()
                     self._frame_error_streak = 0
                     self._native_preview_failures = 0
+                    if self._native_preview and native_target is not None:
+                        self._native_child_open = True
                     self._record_timing("roundtrip_ms", (completed_at - work_started) * 1000.0)
                     self._adapt_pipeline_lookahead()
                     self._record_event_timing("render_ms", event.get("render_ms"))

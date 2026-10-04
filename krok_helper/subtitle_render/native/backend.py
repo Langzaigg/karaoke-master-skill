@@ -1182,11 +1182,17 @@ class NativeRendererProcess:
         y: int,
         width: int,
         height: int,
+        src_x: int = 0,
+        src_y: int = 0,
         force_warp: bool = False,
         generation: int = 0,
         frame_index: int = 0,
     ) -> dict[str, Any]:
-        """Present one GPU frame in a DirectComposition child HWND without readback."""
+        """Present one GPU frame in a DirectComposition child HWND without readback.
+
+        ``x/y/width/height`` 为子窗口在父窗口客户区的物理矩形；``src_x/src_y``
+        为该矩形在渲染纹理里的物理像素起点（场景矩形被视口裁剪时非零）。
+        """
         self._send(
             {
                 "cmd": "gpu_present_frame",
@@ -1199,6 +1205,8 @@ class NativeRendererProcess:
                 "y": int(y),
                 "width": int(width),
                 "height": int(height),
+                "src_x": int(src_x),
+                "src_y": int(src_y),
             }
         )
         return self._expect_ok(self._read_response())

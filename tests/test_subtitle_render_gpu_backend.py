@@ -239,7 +239,22 @@ def test_gpu_g6_direct_composition_child_window_has_zero_readback(qapp, monkeypa
                     height=180,
                     force_warp=True,
                 )
+                # 视口裁剪后的真实形态：子窗口小于渲染纹理，从纹理的
+                # (src_x, src_y) 起 1:1 拷贝窗口大小的区域（2026-10 G6
+                # 定位返工的新几何契约）。
+                sub_rect_event = process.present_gpu_frame(
+                    600,
+                    parent_hwnd=parent_hwnd,
+                    x=16,
+                    y=8,
+                    width=288,
+                    height=164,
+                    src_x=16,
+                    src_y=8,
+                    force_warp=True,
+                )
                 result.update(configured=configured, event=event)
+                result["sub_rect_event"] = sub_rect_event
                 presented.set()
                 release.wait(timeout=5.0)
                 closed = process.close_gpu_preview(force_warp=True)
@@ -260,8 +275,9 @@ def test_gpu_g6_direct_composition_child_window_has_zero_readback(qapp, monkeypa
     assert user32.GetParent(child_hwnd) == parent_hwnd
     child_rect = ctypes.wintypes.RECT()
     assert user32.GetWindowRect(child_hwnd, ctypes.byref(child_rect))
-    assert child_rect.right - child_rect.left == 320
-    assert child_rect.bottom - child_rect.top == 180
+    # 第二次 present 已把子窗口改到裁剪子矩形几何。
+    assert child_rect.right - child_rect.left == 288
+    assert child_rect.bottom - child_rect.top == 164
     release.set()
     while worker.is_alive() and time.monotonic() < deadline:
         qapp.processEvents()
@@ -279,6 +295,7 @@ def test_gpu_g6_direct_composition_child_window_has_zero_readback(qapp, monkeypa
     assert result["event"]["readback_ms"] == 0.0
     assert float(result["event"]["present_ms"]) >= 0.0
     assert child_hwnd > 0
+    assert result["sub_rect_event"]["event"] == "gpu_frame_presented"
     assert result["closed"]["event"] == "gpu_preview_closed"
     assert not user32.IsWindow(child_hwnd)
 

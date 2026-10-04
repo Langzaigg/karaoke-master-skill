@@ -899,8 +899,11 @@ def test_preview_graphics_g6_passes_native_hwnd_and_physical_scene_geometry(
         def set_render_target(self, width, height, device_pixel_ratio=1.0):
             self.render_targets.append((width, height, device_pixel_ratio))
 
-        def set_native_target(self, parent_hwnd, x, y, width, height):
-            self.native_targets.append((parent_hwnd, x, y, width, height))
+        def set_native_target(self, parent_hwnd, x, y, width, height, src_x=0, src_y=0):
+            self.native_targets.append((parent_hwnd, x, y, width, height, src_x, src_y))
+
+        def clear_native_target(self):
+            self.native_targets.clear()
 
         def set_state(self, *args, **kwargs):
             pass
@@ -926,13 +929,181 @@ def test_preview_graphics_g6_passes_native_hwnd_and_physical_scene_geometry(
 
         renderer = FakeNativePreviewRenderer.instances[-1]
         logical_w, logical_h, render_dpr = renderer.render_targets[-1]
-        parent_hwnd, _x, _y, physical_w, physical_h = renderer.native_targets[-1]
+        parent_hwnd, win_x, win_y, win_w, win_h, src_x, src_y = (
+            renderer.native_targets[-1]
+        )
+        # 子窗口挂在顶层窗口 HWND 上（不是视口的原生 HWND——视口原生化会
+        # 把悬浮播放窗的标题栏/传输条压到视频下面）。
+        assert parent_hwnd == int(graphics.window().winId())
+        # G6 渲染目标不做质量钳制：纹理=屏幕物理尺寸。
+        display_scale = graphics._display_device_scale()  # noqa: SLF001
+        assert render_dpr == display_scale
         expected_w, expected_h, _ = pg.preview_render_target_size(
             logical_w, logical_h, render_dpr
         )
-        assert parent_hwnd == int(graphics.viewport().winId())
-        assert (physical_w, physical_h) == (expected_w, expected_h)
-        assert physical_w > 0 and physical_h > 0
+        # 窗口矩形 = 视口可见部分映射到顶层客户区的物理像素，绝不超过纹理。
+        assert 1 <= win_w <= expected_w
+        assert 1 <= win_h <= expected_h
+        # 未裁剪时（场景映射矩形完全在视口内）源偏移为 0；一旦被裁剪，
+        # 偏移与窗口尺寸之和必须恰好铺满纹理。
+        assert 0 <= src_x and src_x + win_w <= expected_w
+        assert 0 <= src_y and src_y + win_h <= expected_h
+        if src_x == 0 and win_w == expected_w:
+            assert win_x >= 0
+    finally:
+        graphics.close()
+        graphics.deleteLater()
+        qapp.processEvents()
+
+
+def test_preview_graphics_g6_clips_child_window_to_viewport(qapp, monkeypatch):
+    """视口比场景更宽时（expanding fit 上下溢出），子窗口必须裁剪到视口可见区。
+
+    裁掉的部分用户本来看不见；若照搬整个映射矩形，字幕会画到视口上下
+    相邻的 UI 上。裁剪后用 src_x/src_y 标记纹理内的拷贝起点。
+    """
+    from PyQt6.QtCore import QRectF
+
+    from krok_helper.subtitle_render.frontend.preview import preview_graphics as pg
+    from krok_helper.subtitle_render.frontend.preview.preview_graphics import PreviewGraphicsView
+
+    class FakeSignal:
+        def connect(self, *args, **kwargs):
+            pass
+
+    class FakeNativePreviewRenderer:
+        instances = []
+
+        def __init__(self, width, height, parent=None):
+            self.frame_ready = FakeSignal()
+            self.frame_presented = FakeSignal()
+            self.fallback_occurred = FakeSignal()
+            self.uses_native_preview = True
+            self.render_targets = []
+            self.native_targets = []
+            FakeNativePreviewRenderer.instances.append(self)
+
+        def set_render_target(self, width, height, device_pixel_ratio=1.0):
+            self.render_targets.append((width, height, device_pixel_ratio))
+
+        def set_native_target(self, parent_hwnd, x, y, width, height, src_x=0, src_y=0):
+            self.native_targets.append((parent_hwnd, x, y, width, height, src_x, src_y))
+
+        def clear_native_target(self):
+            self.native_targets.clear()
+
+        def set_state(self, *args, **kwargs):
+            pass
+
+        def request(self, t_ms):
+            pass
+
+        def set_playing(self, playing):
+            pass
+
+        def stop(self):
+            pass
+
+    monkeypatch.setattr(pg, "async_preview_enabled", lambda: True)
+    monkeypatch.setattr(pg, "gpu_preview_enabled", lambda: True)
+    monkeypatch.setattr(pg, "GpuAsyncSubtitleRenderer", FakeNativePreviewRenderer)
+    graphics = PreviewGraphicsView()
+    try:
+        # 视口宽高比远大于 16:9 的输出画布：expanding fit 会让场景在竖直
+        # 方向溢出视口（mapped.top() < 0），子窗口必须只取可见部分。
+        graphics.set_output_size(1920, 1080)
+        graphics.resize(1200, 300)
+        graphics.show()
+        qapp.processEvents()
+        graphics._fit_scene_to_view()
+        graphics._refresh_async_target()  # noqa: SLF001
+
+        renderer = FakeNativePreviewRenderer.instances[-1]
+        parent_hwnd, win_x, win_y, win_w, win_h, src_x, src_y = (
+            renderer.native_targets[-1]
+        )
+        logical_w, logical_h, render_dpr = renderer.render_targets[-1]
+        physical_w, physical_h, _ = pg.preview_render_target_size(
+            logical_w, logical_h, render_dpr
+        )
+        dpr = graphics.window().devicePixelRatioF() or 1.0
+        viewport_rect = QRectF(graphics.viewport().rect())
+        mapped = graphics.mapFromScene(graphics.scene().sceneRect()).boundingRect()
+        # 前置：expanding fit 让场景在竖直方向两侧都溢出视口。
+        assert mapped.top() < 0 < mapped.bottom() - viewport_rect.height()
+        # 窗口矩形 = 视口可见区（两侧裁剪后只剩中间），不超出纹理。
+        assert win_w == min(int(round(viewport_rect.width() * dpr)), physical_w)
+        assert win_h == min(int(round(viewport_rect.height() * dpr)), physical_h)
+        assert win_h < physical_h
+        # 顶部被裁掉的部分通过源偏移补回（可见左上角在映射矩形内的偏移）。
+        expected_src_y = round((viewport_rect.top() - mapped.top()) * dpr)
+        assert abs(src_y - expected_src_y) <= 1
+        assert src_x == 0  # 水平方向铺满，无偏移
+        assert parent_hwnd == int(graphics.window().winId())
+    finally:
+        graphics.close()
+        graphics.deleteLater()
+        qapp.processEvents()
+
+
+def test_preview_graphics_g6_clears_native_target_when_hidden(qapp, monkeypatch):
+    """视图隐藏（切标签页/关播放窗）必须撤掉 DComp 子窗口，否则残留画面浮在别的 UI 上。"""
+    from krok_helper.subtitle_render.frontend.preview import preview_graphics as pg
+    from krok_helper.subtitle_render.frontend.preview.preview_graphics import PreviewGraphicsView
+
+    class FakeSignal:
+        def connect(self, *args, **kwargs):
+            pass
+
+    class FakeNativePreviewRenderer:
+        instances = []
+
+        def __init__(self, width, height, parent=None):
+            self.frame_ready = FakeSignal()
+            self.frame_presented = FakeSignal()
+            self.fallback_occurred = FakeSignal()
+            self.uses_native_preview = True
+            self.render_targets = []
+            self.native_targets = []
+            self.cleared = 0
+            FakeNativePreviewRenderer.instances.append(self)
+
+        def set_render_target(self, width, height, device_pixel_ratio=1.0):
+            self.render_targets.append((width, height, device_pixel_ratio))
+
+        def set_native_target(self, parent_hwnd, x, y, width, height, src_x=0, src_y=0):
+            self.native_targets.append((parent_hwnd, x, y, width, height, src_x, src_y))
+
+        def clear_native_target(self):
+            self.cleared += 1
+
+        def set_state(self, *args, **kwargs):
+            pass
+
+        def request(self, t_ms):
+            pass
+
+        def set_playing(self, playing):
+            pass
+
+        def stop(self):
+            pass
+
+    monkeypatch.setattr(pg, "async_preview_enabled", lambda: True)
+    monkeypatch.setattr(pg, "gpu_preview_enabled", lambda: True)
+    monkeypatch.setattr(pg, "GpuAsyncSubtitleRenderer", FakeNativePreviewRenderer)
+    graphics = PreviewGraphicsView()
+    try:
+        graphics.resize(800, 500)
+        graphics.show()
+        qapp.processEvents()
+        graphics._refresh_async_target()  # noqa: SLF001
+        renderer = FakeNativePreviewRenderer.instances[-1]
+        assert renderer.native_targets  # 已建立子窗口目标
+
+        graphics.hide()
+        qapp.processEvents()
+        assert renderer.cleared >= 1  # 隐藏即撤掉
     finally:
         graphics.close()
         graphics.deleteLater()
@@ -1087,6 +1258,8 @@ def test_gpu_native_preview_presents_without_shared_memory_or_qimage(qapp, monke
                     "y": 5,
                     "width": 320,
                     "height": 180,
+                    "src_x": 0,
+                    "src_y": 0,
                     "force_warp": False,
                     "generation": 1,
                     "frame_index": 0,
@@ -1098,6 +1271,78 @@ def test_gpu_native_preview_presents_without_shared_memory_or_qimage(qapp, monke
         assert timings["present_ms"]["mean"] == 0.2
         assert timings["readback_ms"]["mean"] == 0.0
         assert renderer.stats_snapshot()["max_pending"] == 1
+    finally:
+        renderer.stop()
+
+
+def test_gpu_native_preview_closes_child_window_when_target_cleared(qapp, monkeypatch):
+    """clear_native_target（视图隐藏）后 worker 必须撤掉 sidecar 里的 DComp 子窗口。
+
+    子窗口挂在顶层窗口 HWND 上、不随视口隐藏；残留的话会一直浮在
+    其他 UI 上（2026-10 G6 定位返工时引入的显式撤销路径）。
+    """
+    from krok_helper.subtitle_render.frontend.preview import preview_async as pa
+    from krok_helper.subtitle_render.domain.models import Style, TimingTrack
+
+    presented_calls: list[int] = []
+    close_calls: list[bool] = []
+    first_present = threading.Event()
+    closed = threading.Event()
+
+    class FakeGpuProcess:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def start(self):
+            return {"ok": True, "event": "ready", "native_preview_protocol": 1}
+
+        def configure_gpu(self, *args, **kwargs):
+            return {"ok": True, "event": "gpu_configured", "native_preview": True}
+
+        def present_gpu_frame(self, t_ms, **kwargs):
+            presented_calls.append(int(t_ms))
+            first_present.set()
+            return {
+                "ok": True,
+                "event": "gpu_frame_presented",
+                "t_ms": int(t_ms),
+                "render_ms": 1.25,
+                "present_ms": 0.2,
+                "readback_ms": 0.0,
+                "transport": "direct_composition",
+            }
+
+        def render_gpu_frame(self, *args, **kwargs):
+            raise AssertionError("G6 native preview must not use shared-memory readback")
+
+        def close_gpu_preview(self, **kwargs):
+            close_calls.append(bool(kwargs.get("force_warp", False)))
+            closed.set()
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(pa, "gpu_native_preview_enabled", lambda: True)
+    monkeypatch.setattr(pa, "NativeRendererProcess", FakeGpuProcess)
+    renderer = pa.GpuAsyncSubtitleRenderer(320, 180)
+    try:
+        renderer.set_native_target(12345, 0, 0, 320, 180)
+        renderer.set_state(TimingTrack(), Style())
+        renderer.request(1_000)
+        assert first_present.wait(timeout=2.0)
+
+        renderer.clear_native_target()
+        # target 清空后 pending 已丢弃；worker 醒来后只应关闭子窗口，
+        # 不应再渲染/呈现任何帧。
+        assert renderer._native_target is None  # noqa: SLF001
+        assert closed.wait(timeout=2.0)
+        assert close_calls
+        presented_after_clear = len(presented_calls)
+        deadline = time.monotonic() + 0.3
+        while time.monotonic() < deadline:
+            qapp.processEvents()
+            time.sleep(0.01)
+        assert len(presented_calls) == presented_after_clear
     finally:
         renderer.stop()
 
