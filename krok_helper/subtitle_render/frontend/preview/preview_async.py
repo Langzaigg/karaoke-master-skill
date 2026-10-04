@@ -672,6 +672,12 @@ class GpuAsyncSubtitleRenderer(QObject):
         self._retry_after = 0.0
         self._force_warp = _env_enabled("KROK_SUBTITLE_GPU_FORCE_WARP", "0")
         self._native_preview = gpu_native_preview_enabled()
+        self._g6_present_count = 0
+        if self._native_preview:
+            print(
+                "[GPU 预览] 渲染器启动: G6 DirectComposition 直画模式",
+                flush=True,
+            )
         # G6 连续失败计数：达到阈值后永久降级到 G5（本渲染器生命周期内），
         # 不再重试 G6（避免在不支持 DComp 的机器上无限重启循环）。
         # G6/G5 共用的连续失败判定阈值：能出帧说明显卡在正常工作，
@@ -1296,6 +1302,20 @@ class GpuAsyncSubtitleRenderer(QObject):
                         if self._may_emit(t_ms, generation):
                             self._note("frames_emitted")
                             self.frame_presented.emit(int(t_ms))
+                            self._g6_present_count += 1
+                            if self._g6_present_count == 1:
+                                print(
+                                    f"[GPU 预览] G6 首帧直画成功 "
+                                    f"present={event.get('present_ms', '?')}ms "
+                                    f"render={event.get('render_ms', '?')}ms",
+                                    flush=True,
+                                )
+                            elif self._g6_present_count % 60 == 0:
+                                print(
+                                    f"[GPU 预览] G6 已直画 "
+                                    f"{self._g6_present_count} 帧",
+                                    flush=True,
+                                )
                         else:
                             self._note("stale_frames_dropped")
                         continue
@@ -1373,6 +1393,11 @@ class GpuAsyncSubtitleRenderer(QObject):
                         if (self._native_preview_failures
                                 >= self._consecutive_failure_limit):
                             self._native_preview = False
+                            print(
+                                f"[GPU 预览] G6 连续失败 "
+                                f"{self._native_preview_failures} 次，已降级 G5",
+                                flush=True,
+                            )
                             self._close_renderer()
                             self._report_fallback(
                                 "GPU 直画上屏连续失败，已回退到 "

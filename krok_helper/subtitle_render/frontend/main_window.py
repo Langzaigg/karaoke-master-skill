@@ -6649,15 +6649,40 @@ class SubtitleRenderWindow(QWidget):
             return False
 
     def _on_gpu_direct_present_changed(self, enabled: bool) -> None:
-        """GPU 直画上屏（G6）：持久化 + 热切换预览渲染器。"""
-        # 持久化由 _save_persisted_state（gpu_direct_present 字段）完成。
-        # G6 依赖 GPU 预览开着（G5 是它的回退基座）
+        """GPU 直画上屏（G6）：立即生效 + 持久化 + 控制台提示。"""
+        import os as _os
+
+        # ① 立即设 env 让新渲染器构造时读到（_save_persisted_state 是防抖的，
+        #    渲染器重建发生在落盘之前，只靠设置文件会读到旧值）。
+        if enabled:
+            _os.environ["KROK_SUBTITLE_GPU_NATIVE_PREVIEW"] = "1"
+        else:
+            _os.environ.pop("KROK_SUBTITLE_GPU_NATIVE_PREVIEW", None)
+
+        # ② G6 依赖 GPU 预览开着（G5 是它的回退基座）
         if enabled and not self._gpu_preview_check.isChecked():
             self._gpu_preview_check.setChecked(True)
-        # 热切换：停掉当前渲染器，下一次 request 会按新设置重建
+
+        # ③ 热切换渲染器
         self._preview_panel.set_gpu_preview_enabled(
             self._gpu_preview_check.isChecked()
         )
+
+        # ④ 控制台提示
+        from krok_helper.subtitle_render.frontend.preview.preview_async import (
+            gpu_native_preview_enabled,
+        )
+        actual = gpu_native_preview_enabled()
+        renderer = getattr(self._preview_panel, "_async_renderer", None)
+        mode = "G6 DirectComposition 直画" if (
+            actual and renderer and getattr(renderer, "uses_native_preview", False)
+        ) else "G5 shared-memory/QImage"
+        print(
+            f"[GPU 直画] 开关={enabled} → 实际模式={mode} "
+            f"(env={_os.environ.get('KROK_SUBTITLE_GPU_NATIVE_PREVIEW', '未设')})",
+            flush=True,
+        )
+
         self._save_persisted_state()
 
     def _warn_gpu_preview_unavailable(self) -> None:
