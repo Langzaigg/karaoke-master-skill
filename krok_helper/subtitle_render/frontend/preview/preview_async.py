@@ -672,6 +672,9 @@ class GpuAsyncSubtitleRenderer(QObject):
         self._retry_after = 0.0
         self._force_warp = _env_enabled("KROK_SUBTITLE_GPU_FORCE_WARP", "0")
         self._native_preview = gpu_native_preview_enabled()
+        # G6 连续失败计数：达到阈值后永久降级到 G5（本渲染器生命周期内），
+        # 不再重试 G6（避免在不支持 DComp 的机器上无限重启循环）。
+        self._native_preview_failures = 0
         self._worker_count_requested = _env_int(
             "KROK_SUBTITLE_GPU_WORKERS", 2, minimum=1
         )
@@ -1357,6 +1360,18 @@ class GpuAsyncSubtitleRenderer(QObject):
                         continue
                     if not isinstance(exc, (NativeRendererError, RuntimeError)):
                         _log.exception("GPU 预览路径出现非预期异常")
+                    if self._native_preview:
+                        # G6 present 失败：连续 2 次后永久降级 G5。
+                        # 「持续回退」——不是等 1s 再试 G6，而是本渲染器
+                        # 剩余生命周期内不再进入 G6 路径。
+                        self._native_preview_failures += 1
+                        if self._native_preview_failures >= 2:
+                            self._native_preview = False
+                            self._close_renderer()
+                            self._report_fallback(
+                                "GPU 直画上屏连续失败，已回退到 "
+                                "shared-memory 路径（关闭再打开开关可重试）。"
+                            )
                     self._renderer_failed = True
                     self._retry_after = time.monotonic() + 1.0
                     with self._condition:
