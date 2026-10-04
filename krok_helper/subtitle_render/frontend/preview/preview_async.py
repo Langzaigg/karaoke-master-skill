@@ -281,12 +281,18 @@ def gpu_native_preview_enabled() -> bool:
 
     开启后 sidecar 在预览 viewport 下创建 DirectComposition 子窗口，
     字幕层直接上屏（零回读/零共享内存/零 QImage），roundtrip 从 ~55ms
-    降到 ~5ms。开关在导出页「使用 GPU 渲染字幕预览」下面；失败自动
-    回退 G5（shared-memory/QImage）。KROK_SUBTITLE_GPU_NATIVE_PREVIEW=1
-    也可强制开启（测试用）。
+    到 ~5ms。开关在导出页「使用 GPU 渲染字幕预览」下面；失败自动回退
+    G5（shared-memory/QImage）。
+
+    env ``KROK_SUBTITLE_GPU_NATIVE_PREVIEW`` **存在即权威**（"1"/"0"）：
+    开关处理器在重建渲染器前把它同步写成本次开关值——持久化偏好是防抖
+    落盘的，渲染器重建发生在落盘之前，若 env 只能单向强制开（"0" 按未设
+    处理回读磁盘），关闭开关会读到旧偏好导致 G6 关不掉（2026-10 实测）。
+    env 缺省时才读磁盘偏好（进程启动 / 外部未干预的正常路径）。
     """
-    if _env_enabled("KROK_SUBTITLE_GPU_NATIVE_PREVIEW", "0"):
-        return True
+    env_raw = os.environ.get("KROK_SUBTITLE_GPU_NATIVE_PREVIEW")
+    if env_raw is not None and env_raw.strip() != "":
+        return _env_enabled("KROK_SUBTITLE_GPU_NATIVE_PREVIEW", "0")
     return _gpu_direct_present_preference()
 
 
@@ -844,6 +850,12 @@ class GpuAsyncSubtitleRenderer(QObject):
     @property
     def uses_native_preview(self) -> bool:
         return self._native_preview
+
+    @property
+    def native_target_established(self) -> bool:
+        """DComp 子窗口目标是否已建立（预览画布可见且有几何）。"""
+        with self._condition:
+            return self._native_target is not None
 
     def set_native_target(
         self,

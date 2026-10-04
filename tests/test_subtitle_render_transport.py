@@ -548,7 +548,7 @@ def test_gpu_preview_defaults_to_g5_on_interactive_windows(monkeypatch):
 
 
 def test_gpu_native_preview_env_gate(monkeypatch):
-    """G6 直画上屏：env=1 强制开，env=0/缺省+偏好关 → 关（2026-10 重开）。"""
+    """G6 直画上屏：env 存在即权威（"1"开/"0"关），缺省才读磁盘偏好。"""
     from krok_helper.subtitle_render.frontend.preview import preview_async as pa
 
     monkeypatch.delenv("KROK_SUBTITLE_GPU_NATIVE_PREVIEW", raising=False)
@@ -560,6 +560,15 @@ def test_gpu_native_preview_env_gate(monkeypatch):
 
     monkeypatch.setenv("KROK_SUBTITLE_GPU_NATIVE_PREVIEW", "0")
     assert pa.gpu_native_preview_enabled() is False
+
+    # 回归（2026-10 实测 G6 关不掉）：开关关闭时 env 写 "0"，而磁盘偏好
+    # 是防抖落盘、此刻仍旧值 True——env 必须压过磁盘，否则渲染器重建后
+    # 仍按旧偏好进入 G6，实时关闭失效。
+    monkeypatch.setattr(pa, "_gpu_direct_present_preference", lambda: True)
+    monkeypatch.setenv("KROK_SUBTITLE_GPU_NATIVE_PREVIEW", "0")
+    assert pa.gpu_native_preview_enabled() is False
+    monkeypatch.delenv("KROK_SUBTITLE_GPU_NATIVE_PREVIEW", raising=False)
+    assert pa.gpu_native_preview_enabled() is True  # env 缺省时磁盘说了算
 
 
 def test_gpu_renderer_enters_g6_with_env_opt_in(qapp, monkeypatch):
@@ -1104,6 +1113,76 @@ def test_preview_graphics_g6_clears_native_target_when_hidden(qapp, monkeypatch)
         graphics.hide()
         qapp.processEvents()
         assert renderer.cleared >= 1  # 隐藏即撤掉
+    finally:
+        graphics.close()
+        graphics.deleteLater()
+        qapp.processEvents()
+
+
+def test_preview_graphics_g6_toggle_while_hidden_engages_on_show(qapp, monkeypatch):
+    """实时切换的完整链路：开关在导出页触发时预览画布隐藏——G6 模式已选定
+    但子窗口不建立（没有可见画布）；回到预览页（showEvent）后必须建立。"""
+    from krok_helper.subtitle_render.frontend.preview import preview_graphics as pg
+    from krok_helper.subtitle_render.frontend.preview.preview_graphics import (
+        PreviewGraphicsView,
+    )
+
+    class FakeSignal:
+        def connect(self, *args, **kwargs):
+            pass
+
+    class FakeGpuRenderer:
+        instances = []
+
+        def __init__(self, width, height, parent=None):
+            self.frame_ready = FakeSignal()
+            self.frame_presented = FakeSignal()
+            self.fallback_occurred = FakeSignal()
+            self.uses_native_preview = True
+            self.render_targets = []
+            self.native_targets = []
+            self.cleared = 0
+            FakeGpuRenderer.instances.append(self)
+
+        def set_render_target(self, width, height, device_pixel_ratio=1.0):
+            self.render_targets.append((width, height, device_pixel_ratio))
+
+        def set_native_target(self, parent_hwnd, x, y, width, height, src_x=0, src_y=0):
+            self.native_targets.append((parent_hwnd, x, y, width, height, src_x, src_y))
+
+        def clear_native_target(self):
+            self.cleared += 1
+
+        def set_state(self, *args, **kwargs):
+            pass
+
+        def request(self, t_ms):
+            pass
+
+        def set_playing(self, playing):
+            pass
+
+        def stop(self):
+            pass
+
+    monkeypatch.setattr(pg, "async_preview_enabled", lambda: True)
+    monkeypatch.setattr(pg, "gpu_preview_enabled", lambda: True)
+    monkeypatch.setattr(pg, "GpuAsyncSubtitleRenderer", FakeGpuRenderer)
+    monkeypatch.setenv("KROK_SUBTITLE_GPU_NATIVE_PREVIEW", "1")
+    graphics = PreviewGraphicsView()
+    try:
+        # 画布隐藏时切换（等价于在导出页点开 GPU 直画开关）
+        graphics.set_gpu_preview_enabled(True)
+        renderer = FakeGpuRenderer.instances[-1]
+        assert renderer.uses_native_preview is True
+        assert renderer.native_targets == []  # 隐藏：不建立子窗口
+
+        graphics.show()
+        qapp.processEvents()
+        # 回到预览页：showEvent → _refresh_async_target → 建立直画目标
+        assert renderer.native_targets
+        parent_hwnd = renderer.native_targets[-1][0]
+        assert parent_hwnd == int(graphics.window().winId())
     finally:
         graphics.close()
         graphics.deleteLater()

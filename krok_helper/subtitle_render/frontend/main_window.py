@@ -6652,12 +6652,10 @@ class SubtitleRenderWindow(QWidget):
         """GPU 直画上屏（G6）：立即生效 + 持久化 + 控制台提示。"""
         import os as _os
 
-        # ① 立即设 env 让新渲染器构造时读到（_save_persisted_state 是防抖的，
-        #    渲染器重建发生在落盘之前，只靠设置文件会读到旧值）。
-        if enabled:
-            _os.environ["KROK_SUBTITLE_GPU_NATIVE_PREVIEW"] = "1"
-        else:
-            _os.environ.pop("KROK_SUBTITLE_GPU_NATIVE_PREVIEW", None)
+        # ① 立即把 env 写成本次开关值（"1"/"0"，不 pop）：渲染器重建发生在
+        #    防抖落盘之前，gpu_native_preview_enabled() 以 env 为会话内权威，
+        #    否则关闭方向会读到磁盘上的旧偏好 → G6 关不掉（2026-10 实测）。
+        _os.environ["KROK_SUBTITLE_GPU_NATIVE_PREVIEW"] = "1" if enabled else "0"
 
         # ② G6 依赖 GPU 预览开着（G5 是它的回退基座）
         if enabled and not self._gpu_preview_check.isChecked():
@@ -6682,6 +6680,13 @@ class SubtitleRenderWindow(QWidget):
             renderer = getattr(self._preview_panel, "_async_renderer", None)
             native = bool(renderer and getattr(renderer, "uses_native_preview", False))
             mode = "G6 DirectComposition 直画" if native else "G5 shared-memory/QImage"
+            if native:
+                established = bool(
+                    renderer and getattr(renderer, "native_target_established", False)
+                )
+                # 开关在导出页，预览画布此刻多半隐藏：G6 已选定，子窗口要等
+                # 画布可见（showEvent）才建立——不是切换失败。
+                mode += "（直画已建立）" if established else "（待预览画布可见后直画）"
             print(
                 f"[GPU 直画] 开关={enabled} → 实际模式={mode} "
                 f"(env={_os.environ.get('KROK_SUBTITLE_GPU_NATIVE_PREVIEW', '未设')} "
