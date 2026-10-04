@@ -281,6 +281,11 @@ ProbeResult Direct2DGpuBackend::renderProbe(const ProbeOptions &options) {
     const double renderMs = elapsedMs(renderStart);
 
     const auto readbackStart = Clock::now();
+    // 回读独占 immediate context（多线程并发使用是 D3D11 UB，详见
+    // D2DDeviceResources::immediateContextMutex 注释）。
+    const std::lock_guard<std::mutex> immediateContextLock(
+        device_.immediateContextMutex()
+    );
     D3D11_TEXTURE2D_DESC stagingDesc = targetDesc;
     stagingDesc.Usage = D3D11_USAGE_STAGING;
     stagingDesc.BindFlags = 0;

@@ -332,6 +332,17 @@ std::optional<QJsonObject> handleRenderGpuFrame(
         }
     );
     if (!accepted) {
+        if (pool->submitStalled()) {
+            // 不是流控：in-flight 槽被卡死的 native worker 永久占据（设备级
+            // 楔死）。返回错误让宿主走失败/重启链；若仍回 queue_full，宿主的
+            // 退避循环会永远等不到完成事件（2026-10 拖大楔死新变体）。
+            QJsonObject out = response(false, QStringLiteral("gpu_pool_stalled"));
+            out.insert(QStringLiteral("error"), QStringLiteral(
+                "GPU preview pool stalled: in-flight slot held by a dead worker"));
+            out.insert(QStringLiteral("generation"), generation);
+            out.insert(QStringLiteral("request_serial"), requestSerial);
+            return out;
+        }
         QJsonObject out = response(false, QStringLiteral("gpu_queue_full"));
         out.insert(QStringLiteral("error"), QStringLiteral("GPU preview in-flight limit reached"));
         out.insert(QStringLiteral("generation"), generation);

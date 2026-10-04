@@ -43,6 +43,16 @@ from krok_helper.subtitle_render.native.protocol import (
 from krok_helper.subtitle_render.engine.render.render_ir import build_style_patch_ir
 
 
+class _ConfigPhaseError(NativeRendererError):
+    """configure/resize/start 阶段的失败标记。
+
+    这类失败最常见的形态是 sidecar native 楔死（共享 D3D 并发把渲染任务
+    卡死、pause 排空超时后主循环全哑），重发到死进程只会每轮白等一个
+    超时；帧级温和重试（连续 5 次才重启）会把恢复拖到分钟级。配置阶段
+    失败必须立即进失败链杀进程重建（2026-10 拖大后永久卡死根因）。
+    """
+
+
 _log = logging.getLogger(__name__)
 
 
@@ -1396,25 +1406,28 @@ class GpuAsyncSubtitleRenderer(QObject):
                                     self.renderProgress.emit,
                                 )
                             ):
-                                configured = renderer.configure_gpu(
-                                    track,
-                                    style,
-                                    width=width,
-                                    height=height,
-                                    fps=60,
-                                    dpr=dpr,
-                                    force_warp=force_warp,
-                                    extra_tracks=extra_tracks,
-                                    duration_ms=duration_ms,
-                                    prewarm_t_ms=t_ms,
-                                    worker_count=self._worker_request_for_mode(),
-                                    defer_followers=True,
-                                    defer_realizations_until_first_frame=True,
-                                    relayout_scope=relayout_scope,
-                                    progress=lambda: self.renderProgress.emit(
-                                        80, "场景构建"
-                                    ),
-                                )
+                                try:
+                                    configured = renderer.configure_gpu(
+                                        track,
+                                        style,
+                                        width=width,
+                                        height=height,
+                                        fps=60,
+                                        dpr=dpr,
+                                        force_warp=force_warp,
+                                        extra_tracks=extra_tracks,
+                                        duration_ms=duration_ms,
+                                        prewarm_t_ms=t_ms,
+                                        worker_count=self._worker_request_for_mode(),
+                                        defer_followers=True,
+                                        defer_realizations_until_first_frame=True,
+                                        relayout_scope=relayout_scope,
+                                        progress=lambda: self.renderProgress.emit(
+                                            80, "场景构建"
+                                        ),
+                                    )
+                                except NativeRendererError as exc:
+                                    raise _ConfigPhaseError(str(exc)) from exc
                                 self._active_worker_count = max(
                                     1, min(int(configured.get("worker_count", 1)), 8)
                                 )
@@ -1432,24 +1445,27 @@ class GpuAsyncSubtitleRenderer(QObject):
                                     and dedicated_vram < min_multiworker_vram
                                 ):
                                     self._worker_count_requested = 1
-                                    configured = renderer.configure_gpu(
-                                        track,
-                                        style,
-                                        width=width,
-                                        height=height,
-                                        fps=60,
-                                        dpr=dpr,
-                                        force_warp=force_warp,
-                                        extra_tracks=extra_tracks,
-                                        duration_ms=duration_ms,
-                                        prewarm_t_ms=t_ms,
-                                        worker_count=1,
-                                        defer_followers=True,
-                                        defer_realizations_until_first_frame=True,
-                                        progress=lambda: self.renderProgress.emit(
-                                            80, "场景构建"
-                                        ),
-                                    )
+                                    try:
+                                        configured = renderer.configure_gpu(
+                                            track,
+                                            style,
+                                            width=width,
+                                            height=height,
+                                            fps=60,
+                                            dpr=dpr,
+                                            force_warp=force_warp,
+                                            extra_tracks=extra_tracks,
+                                            duration_ms=duration_ms,
+                                            prewarm_t_ms=t_ms,
+                                            worker_count=1,
+                                            defer_followers=True,
+                                            defer_realizations_until_first_frame=True,
+                                            progress=lambda: self.renderProgress.emit(
+                                                80, "场景构建"
+                                            ),
+                                        )
+                                    except NativeRendererError as exc:
+                                        raise _ConfigPhaseError(str(exc)) from exc
                                     self._active_worker_count = 1
                                 with self._stats_lock:
                                     self._stats["worker_count"] = self._active_worker_count
@@ -1464,18 +1480,21 @@ class GpuAsyncSubtitleRenderer(QObject):
                             dpr,
                             _RENDER_TARGET_MAX_DIMENSION / max(int(width), int(height)),
                         )
-                        configured = renderer.resize_gpu_target(
-                            width=width,
-                            height=height,
-                            dpr=dpr,
-                            force_warp=force_warp,
-                            prewarm_t_ms=t_ms,
-                            # native（直画）必须 worker=1：多 worker 走池化
-                            # 路径只配置池的后备 worker，主后端（direct 渲染
-                            # 执行者）不会被 configure（2026-10 热切换连败
-                            # 根因）。WARP 一并压 1。
-                            worker_count=self._worker_request_for_mode(),
-                        )
+                        try:
+                            configured = renderer.resize_gpu_target(
+                                width=width,
+                                height=height,
+                                dpr=dpr,
+                                force_warp=force_warp,
+                                prewarm_t_ms=t_ms,
+                                # native（直画）必须 worker=1：多 worker 走池化
+                                # 路径只配置池的后备 worker，主后端（direct 渲染
+                                # 执行者）不会被 configure（2026-10 热切换连败
+                                # 根因）。WARP 一并压 1。
+                                worker_count=self._worker_request_for_mode(),
+                            )
+                        except NativeRendererError as exc:
+                            raise _ConfigPhaseError(str(exc)) from exc
                         self._active_worker_count = max(
                             1, min(int(configured.get("worker_count", 1)), 8)
                         )
@@ -1719,6 +1738,13 @@ class GpuAsyncSubtitleRenderer(QObject):
                         continue
                     if (
                         isinstance(exc, NativeRendererError)
+                        # configure/resize 阶段的失败不做帧级温和重试：
+                        # 这类失败最常见的形态是 sidecar native 楔死（共享
+                        # D3D 并发把渲染任务卡死、pause 排空超时后主循环
+                        # 全哑），重发到死进程只会每轮白等一个超时；必须
+                        # 立即杀进程重建（2026-10 拖大后永久卡死根因：
+                        # 30s 超时 ×5 次温和重试 = 150s 无恢复）。
+                        and not isinstance(exc, _ConfigPhaseError)
                         and self._frame_error_streak + 1
                         < self._consecutive_failure_limit
                     ):
@@ -2132,6 +2158,10 @@ class GpuAsyncSubtitleRenderer(QObject):
         rendered_queue: list[tuple[int, int]] = []  # native: (key, t_ms) 递增
         # 读回（G5）连续饱和提交的在途表：wire serial → 填充目标时间戳。
         inflight: dict[int, int] = {}
+        # 在途失速看门狗的锚点（最近一次完成时刻）。
+        last_completion_wall = time.monotonic()
+        # queue_full 持续起点（None=当前未处于被拒状态）。
+        queue_full_since: Optional[float] = None
         cpu_mode = cpu_render is not None
 
         while True:
@@ -2239,11 +2269,23 @@ class GpuAsyncSubtitleRenderer(QObject):
 
                 # a) 收割一帧完成（小超时等待，避免空转轮询烧 CPU）。
                 if inflight:
+                    if time.monotonic() - last_completion_wall > 8.0:
+                        # 在途失速看门狗：sidecar native 楔死（设备级毒化，
+                        # 连池重建都救不回）时异步发布永远不来、也不会有
+                        # 任何异常——必须主动制造失败走杀进程重启链，
+                        # 否则播放永久冻结（2026-10 拖大楔死的最后一块）。
+                        raise NativeRendererError(
+                            f"render stall watchdog: {len(inflight)} in-flight, "
+                            f"no completion for "
+                            f"{time.monotonic() - last_completion_wall:.1f}s"
+                        )
                     try:
                         event = renderer.try_finish_render_gpu_frame(0.002)
                     except NativeQueueFullError:
                         # 流控：sidecar in-flight 池满。短暂退避后同批重提。
                         self._note("queue_full_backpressure")
+                        if queue_full_since is None:
+                            queue_full_since = time.monotonic()
                         with self._condition:
                             self._condition.wait(timeout=0.004)
                         event = None
@@ -2252,6 +2294,19 @@ class GpuAsyncSubtitleRenderer(QObject):
                         fill_t = inflight.pop(done_serial, None)
                         self._absorb_readback_event(
                             event, fill_t, generation, dpr
+                        )
+                        last_completion_wall = time.monotonic()
+                        queue_full_since = None
+                elif queue_full_since is not None:
+                    # inflight 已空但仍在持续 queue_full：卡死的 native worker
+                    # 永久占用 in-flight 槽，每次提交都被拒——退避循环永无
+                    # 完成事件，上方看门狗（依赖 inflight 非空）永远不触发。
+                    # 持续超阈值即判定渲染器死亡，走杀进程重启链。
+                    stalled = time.monotonic() - queue_full_since
+                    if stalled > 5.0:
+                        raise NativeRendererError(
+                            f"submit rejected (in-flight occupied) for "
+                            f"{stalled:.1f}s: native pool has a dead worker"
                         )
                 # b) 补提：worker 有空位且窗口内有缺失键 → 立刻提交，
                 #    在途上限 = active worker 数，缓存槽位同步预留。

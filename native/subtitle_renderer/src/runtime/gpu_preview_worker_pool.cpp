@@ -89,7 +89,31 @@ public:
             if (outstanding_ == 0) {
                 drained_.notify_all();
             }
-            drained_.wait(lock, [this]() { return outstanding_ == 0; });
+            // 有界排空等待：并发使用共享 D3D 立即上下文的 UB 可能把某个
+            // 渲染任务永久卡死（2026-10 拖大复现：worker 卡在 renderFrame
+            // 内，pause 无限等 outstanding → resize 主循环全哑 → 宿主只能
+            // 靠进程级超时重启）。超时后放弃等待并标记不健康：调用方
+            // （configureGpuPreviewPool）会废弃本池重建，卡死的线程随
+            // abandon() detach、资源随进程退出回收。
+            if (!drained_.wait_for(
+                    lock,
+                    std::chrono::seconds(2),
+                    [this]() { return outstanding_ == 0; }
+                )) {
+                pauseTimedOut_ = true;
+                nativeTrace(
+                    "pool pause DRAIN TIMEOUT outstanding=%d",
+                    outstanding_
+                );
+                // 不健康直接返回：下方 follower join 与 cancelRealization-
+                // Prewarm 在此状态下会永久等待——cancelRealizationPrewarm
+                // join 各 backend 的 realization 预热线程，而预热线程等
+                // 着被卡死 worker 持有的 realizationMutex（worker 又卡在
+                // GPU 内），三层等待链把主线程（命令循环）一并拖死、
+                // sidecar 全哑（2026-10 拖大楔死的主线程侧根因）。调用方
+                // 对不健康池走 abandon+重建，本池剩余线程随进程退出回收。
+                return;
+            }
         }
         if (followerConfigureThread_.joinable()) {
             followerConfigureThread_.join();
@@ -97,6 +121,40 @@ public:
         for (auto &backend : backends_) {
             backend->cancelRealizationPrewarm();
         }
+    }
+
+    bool healthy() const {
+        std::lock_guard<std::mutex> lock(mutex_);
+        return !pauseTimedOut_;
+    }
+
+    void abandon() noexcept {
+        // 不健康池的终局处置：卡死的 worker 线程无法安全 join（会拖死
+        // 调用方），也无法安全析构（std::thread joinable → terminate；
+        // backends_ 释放后卡死线程醒来 → UAF）。detach 全部线程并整体
+        // 泄漏 Impl：对象永不析构，卡死线程引用的内存始终有效，泄漏
+        // 存活到进程退出（宿主随后会重启本进程）。
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            stopping_ = true;
+            cancelFollowerConfigure_ = true;
+            outstanding_ = 0;
+            queue_.clear();
+            ready_.notify_all();
+            drained_.notify_all();
+            followerReady_.notify_all();
+        }
+        if (followerConfigureThread_.joinable()) {
+            followerConfigureThread_.detach();
+        }
+        for (auto &worker : workers_) {
+            if (worker.joinable()) {
+                worker.detach();
+            }
+        }
+        workers_.clear();
+        abandoned_ = true;
+        nativeTrace("pool ABANDONED (leaked until process exit)");
     }
 
     void resume(
@@ -218,6 +276,17 @@ public:
     int outstanding() const noexcept {
         std::lock_guard<std::mutex> lock(mutex_);
         return outstanding_;
+    }
+
+    bool submitStalled() const {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (lastCompletionMs_ == 0 || outstanding_ <= 0) {
+            return false;
+        }
+        const auto nowMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now().time_since_epoch()
+        ).count();
+        return nowMs - lastCompletionMs_ > 4000;
     }
     krok::subtitle::native::BackendCaps capabilities() const {
         return backends_.front()->capabilities();
@@ -356,6 +425,9 @@ private:
             {
                 std::lock_guard<std::mutex> lock(mutex_);
                 --outstanding_;
+                lastCompletionMs_ = std::chrono::duration_cast<std::chrono::milliseconds>(
+                    std::chrono::steady_clock::now().time_since_epoch()
+                ).count();
                 firstFrameDelivered_ = true;
                 followerReady_.notify_all();
                 if (outstanding_ == 0) {
@@ -390,9 +462,14 @@ private:
     bool accepting_ = false;
     bool cancelFollowerConfigure_ = false;
     bool firstFrameDelivered_ = false;
+    bool pauseTimedOut_ = false;
+    bool abandoned_ = false;
     int readyWorkerCount_ = 0;
     int outstanding_ = 0;
     int maxOutstanding_ = 0;
+    // 最近一次任务完成时刻（steady 毫秒）。submit 被拒时若距它超过阈值，
+    // 说明 in-flight 槽被永久卡死的 worker 占据——是池死亡信号而非流控。
+    long long lastCompletionMs_ = 0;
     std::thread followerConfigureThread_;
     Publish publish_;
 };
@@ -414,6 +491,19 @@ GpuPreviewWorkerPool::~GpuPreviewWorkerPool() = default;
 
 void GpuPreviewWorkerPool::pause() {
     impl_->pause();
+}
+
+bool GpuPreviewWorkerPool::healthy() const noexcept {
+    return impl_ != nullptr && impl_->healthy();
+}
+
+void GpuPreviewWorkerPool::abandon() noexcept {
+    // 整体泄漏 Impl：卡死线程仍引用其内存，析构即 UAF/terminate。
+    if (impl_ == nullptr) {
+        return;
+    }
+    impl_->abandon();
+    impl_.release();
 }
 
 void GpuPreviewWorkerPool::resume(
@@ -453,6 +543,10 @@ int GpuPreviewWorkerPool::maxOutstanding() const noexcept {
 
 int GpuPreviewWorkerPool::outstanding() const noexcept {
     return impl_->outstanding();
+}
+
+bool GpuPreviewWorkerPool::submitStalled() const {
+    return impl_ != nullptr && impl_->submitStalled();
 }
 
 BackendCaps GpuPreviewWorkerPool::capabilities() const {

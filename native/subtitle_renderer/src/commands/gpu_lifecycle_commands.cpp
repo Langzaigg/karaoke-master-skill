@@ -1,4 +1,5 @@
 #include "gpu_lifecycle_commands.h"
+#include "../diagnostics/native_trace.h"
 
 
 #include "../backends/qt/qt_render_cache.h"
@@ -23,6 +24,8 @@
 #include <vector>
 
 namespace krok::subtitle::native::commands {
+
+using diagnostics::nativeTrace;
 
 using diagnostics::appendGpuDiagnostics;
 using diagnostics::backendCapsJson;
@@ -143,6 +146,7 @@ QJsonObject handleConfigureGpu(
     if (workerCount > 1) {
         QElapsedTimer timer;
         timer.start();
+        nativeTrace("handleConfigureGpu pooled begin workers=%d resize=%d", workerCount, targetResize ? 1 : 0);
         try {
             auto scene = gpuSceneFromConfig(*config);
             scene.prewarmTimeMs = std::max(
@@ -171,6 +175,7 @@ QJsonObject handleConfigureGpu(
                 throw std::runtime_error("GPU preview pool is unavailable");
             }
             markGpuConfigured(runtime, false);
+            nativeTrace("handleConfigureGpu pooled done ready=%d ms=%.0f", pool->readyWorkerCount(), static_cast<double>(timer.nsecsElapsed()) / 1000000.0);
             QJsonObject out = response(true, QStringLiteral("gpu_configured"));
             out.insert(QStringLiteral("width"), scene.width);
             out.insert(QStringLiteral("height"), scene.height);

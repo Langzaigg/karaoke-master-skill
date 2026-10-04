@@ -9,6 +9,7 @@
 #include <wrl/client.h>
 
 #include <memory>
+#include <mutex>
 
 namespace krok::subtitle::native {
 
@@ -21,6 +22,11 @@ struct D2DDeviceResources {
     Microsoft::WRL::ComPtr<ID2D1Factory1> d2dFactory;
     Microsoft::WRL::ComPtr<ID2D1Device> d2dDevice;
     Microsoft::WRL::ComPtr<IDWriteFactory> dwriteFactory;
+    // ID3D11DeviceContext(immediate)按 D3D11 规则全设备唯一、仅单线程可用。
+    // 多 worker 的回读（staging Copy/Map/Unmap、event query）与 G6 present 的
+    // 拷贝都走它：并发使用是未定义行为，驱动可在调用内永久死锁（2026-10
+    // 拖大后 G5/G6 双模式楔死根因）。所有 immediate context 使用点必须持此锁。
+    mutable std::mutex immediateContextMutex;
 };
 
 class D2DDevice {
@@ -37,6 +43,9 @@ public:
     IDWriteFactory *dwriteFactory() const noexcept { return resources_->dwriteFactory.Get(); }
     std::shared_ptr<D2DDeviceResources> sharedResources() const noexcept {
         return resources_;
+    }
+    std::mutex &immediateContextMutex() const noexcept {
+        return resources_->immediateContextMutex;
     }
     void appendVideoMemoryDiagnostics(BackendDiagnostics *diagnostics) const noexcept;
     std::string deviceRemovedReason() const;

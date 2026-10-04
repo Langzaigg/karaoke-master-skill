@@ -766,6 +766,11 @@ class NativeRendererProcess:
         self.startup_timeout_s = self._resolved_timeout(startup_timeout_s)
         self.configure_timeout_s = self._resolved_timeout(configure_timeout_s)
         self.gpu_configure_timeout_s = self._resolved_timeout(gpu_configure_timeout_s)
+        # 轻量 resize（正常 1ms 量级、含 follower 延迟配置也就秒级）用独立
+        # 短超时：sidecar native 楔死时（pause 排空超时→主循环全哑），30s
+        # 的全量 configure 超时会让宿主每轮白等半分钟（2026-10 拖大后
+        # 永久卡死的恢复延迟放大器）。
+        self.gpu_resize_timeout_s = min(self.gpu_configure_timeout_s, 10.0)
         self.close_timeout_s = max(0.1, float(close_timeout_s))
         self._process: subprocess.Popen[str] | None = None
         self._stdout_queue: queue.Queue[str | None] = queue.Queue()
@@ -1081,7 +1086,7 @@ class NativeRendererProcess:
         return self._expect_ok(
             self._read_until_event(
                 "gpu_configured",
-                timeout_s=self.gpu_configure_timeout_s,
+                timeout_s=self.gpu_resize_timeout_s,
             )
         )
 

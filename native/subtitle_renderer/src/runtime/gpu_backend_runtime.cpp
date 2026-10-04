@@ -2,6 +2,7 @@
 
 #include "render_runtime.h"
 #include "../backends/direct2d/d2d_backend.h"
+#include "../diagnostics/native_trace.h"
 
 #include <QtCore/QString>
 
@@ -12,6 +13,8 @@
 #include <mutex>
 
 namespace krok::subtitle::native::runtime {
+
+using diagnostics::nativeTrace;
 
 struct GpuPreviewPoolCacheEntry {
     QString key;
@@ -159,6 +162,22 @@ GpuPreviewPoolConfiguration configureGpuPreviewPool(
     auto &pool = state->hardwarePreviewPool;
     auto &poolKey = state->hardwarePreviewPoolKey;
     auto &poolCache = state->hardwarePreviewPoolCache;
+    // 不健康池（pause 排空超时 = 内有被设备并发卡死的 worker）不可复用
+    // 也不可析构：abandon（detach 线程 + 泄漏实现对象）后强制重建。缓存
+    // 里的池同样可能带卡死线程，一并废弃。
+    if (pool != nullptr && !pool->healthy()) {
+        nativeTrace("configureGpuPreviewPool: active pool unhealthy -> abandon & rebuild");
+        pool->abandon();
+        pool.release();
+        poolKey.clear();
+        for (auto &entry : poolCache) {
+            if (entry.pool != nullptr && !entry.pool->healthy()) {
+                entry.pool->abandon();
+                entry.pool.release();
+            }
+        }
+        poolCache.clear();
+    }
     const QString targetKey = QStringLiteral("%1x%2@%3:w%4:s%5:r%6")
         .arg(scene.width)
         .arg(scene.height)
@@ -167,10 +186,16 @@ GpuPreviewPoolConfiguration configureGpuPreviewPool(
         .arg(sharedResources ? 1 : 0)
         .arg(scene.realizationEnabled ? 1 : 0);
     bool targetCacheHit = false;
+    nativeTrace(
+        "configureGpuPreviewPool enter w=%d h=%d workers=%d resize=%d pool=%d",
+        scene.width, scene.height, workerCount, targetResize ? 1 : 0,
+        pool != nullptr ? 1 : 0);
     if (targetResize && pool != nullptr && poolKey == targetKey) {
         targetCacheHit = true;
     } else if (targetResize && pool != nullptr && !poolKey.isEmpty()) {
+        nativeTrace("configureGpuPreviewPool: pausing old pool");
         pool->pause();
+        nativeTrace("configureGpuPreviewPool: old pool paused healthy=%d", pool->healthy() ? 1 : 0);
         poolCache.erase(
             std::remove_if(
                 poolCache.begin(), poolCache.end(),
@@ -204,7 +229,9 @@ GpuPreviewPoolConfiguration configureGpuPreviewPool(
         );
     }
     if (!targetCacheHit) {
+        nativeTrace("configureGpuPreviewPool: configuring pool w=%d h=%d", scene.width, scene.height);
         pool->configure(scene, waitRealizations, deferFollowers);
+        nativeTrace("configureGpuPreviewPool: pool configured");
     }
     poolKey = targetKey;
     return {pool.get(), targetCacheHit};

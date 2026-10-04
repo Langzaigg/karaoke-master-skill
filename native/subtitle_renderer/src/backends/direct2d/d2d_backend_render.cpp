@@ -1,4 +1,5 @@
 #include "d2d_backend.h"
+#include "../../diagnostics/native_trace.h"
 #include "d2d_backend_internal.h"
 #include "d2d_fx.h"
 #include "d2d_geometry_resources.h"
@@ -21,6 +22,8 @@
 #include <tuple>
 
 namespace krok::subtitle::native {
+
+using diagnostics::nativeTrace;
 
 using Clock = direct2d::RuntimeClock;
 using direct2d::burstParticlesAt;
@@ -8177,6 +8180,7 @@ ProbeResult Direct2DGpuBackend::renderFrameInternal(
     context->SetTarget(nullptr);
     context->SetTransform(D2D1::Matrix3x2F::Identity());
     const double renderMs = elapsedMs(renderStart);
+    nativeTrace("frame %d phase draws done render=%.1fms", tMs, renderMs);
 
     if (!readback) {
         ProbeResult result;
@@ -8242,6 +8246,15 @@ ProbeResult Direct2DGpuBackend::renderFrameInternal(
         finalizeDiagnostics(result);
         return result;
     }
+    // 回读整段（staging 拷贝 + event query + Map + Unmap）独占 immediate
+    // context：多 worker 并发回读是 D3D11 未定义行为，实测可在驱动内
+    // 永久死锁（2026-10 拖大后 G5 播放楔死根因，重启新进程也必现）。
+    // 典型 Map ≤1ms，锁竞争对吞吐影响有限；G2D 渲染本身不受影响。
+    nativeTrace("frame %d phase readback-lock wait", tMs);
+    const std::lock_guard<std::mutex> immediateContextLock(
+        device_.immediateContextMutex()
+    );
+    nativeTrace("frame %d phase readback-lock held", tMs);
     if (compactBands) {
         int packedTop = 0;
         for (const auto &[top, bottom] : mergedIntervals) {
@@ -8309,6 +8322,7 @@ ProbeResult Direct2DGpuBackend::renderFrameInternal(
     }
     D3D11_MAPPED_SUBRESOURCE mapped{};
     const auto gpuWaitStart = Clock::now();
+    nativeTrace("frame %d phase staging copied, gpu-wait begin", tMs);
     // 有界回读等待：Map(staging, READ, 0) 会阻塞到 GPU 完成，设备级停顿
     // （多 worker 各自持有独立 D3D 设备时的驱动级 wedge）会让它无限挂死整
     // 个 worker 线程，宿主只看到 2s 协议超时然后整进程重启（2026-10 预览
@@ -8375,11 +8389,13 @@ ProbeResult Direct2DGpuBackend::renderFrameInternal(
             );
         }
     }
+    nativeTrace("frame %d phase map begin", tMs);
     checkHr(
         device_.d3dContext()->Map(stagingTexture, 0, D3D11_MAP_READ, 0, &mapped),
         "ID3D11DeviceContext::Map(frame)",
         device_
     );
+    nativeTrace("frame %d phase map done", tMs);
     frameDiagnostics.gpuWaitMs = elapsedMs(gpuWaitStart);
 
     ProbeResult result;
@@ -8427,6 +8443,10 @@ NativePreviewResult Direct2DGpuBackend::presentFrame(
     const NativePreviewTarget &target
 ) {
     const auto rendered = renderFrameInternal(tMs, false, false);
+    // present 的 backbuffer 拷贝走 immediate context，与回读互斥。
+    const std::lock_guard<std::mutex> immediateContextLock(
+        device_.immediateContextMutex()
+    );
     return previewSurface_.present(
         device_.d3dDevice(),
         device_.d3dContext(),
@@ -8454,6 +8474,10 @@ NativeRenderOnlyResult Direct2DGpuBackend::renderFrameOnly(int tMs) {
 NativePreviewResult Direct2DGpuBackend::presentRendered(
     const NativePreviewTarget &target
 ) {
+    // present 的 backbuffer 拷贝走 immediate context，与回读互斥。
+    const std::lock_guard<std::mutex> immediateContextLock(
+        device_.immediateContextMutex()
+    );
     return previewSurface_.present(
         device_.d3dDevice(),
         device_.d3dContext(),

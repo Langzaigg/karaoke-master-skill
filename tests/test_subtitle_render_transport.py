@@ -2533,9 +2533,10 @@ def test_gpu_async_renderer_surfaces_changed_fallback_reason(qapp, monkeypatch):
             time.sleep(0.05)
 
         assert len(fallbacks) >= 2
-        # 连续失败阈值 5（2026-10）：前 5 次静默重试，首个上报是第 6 次
-        assert "injected failure #4" in fallbacks[0]
-        assert any("injected failure #5" in message for message in fallbacks[1:])
+        # configure 阶段失败 2026-10 起不做帧级温和重试（sidecar native 楔死
+        # 时重发只会白等超时）：第一次失败即上报、立即进重启链。
+        assert "injected failure #0" in fallbacks[0]
+        assert any("injected failure #1" in message for message in fallbacks[1:])
     finally:
         renderer.stop()
 
