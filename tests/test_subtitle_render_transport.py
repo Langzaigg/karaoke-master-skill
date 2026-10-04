@@ -1609,6 +1609,73 @@ def test_gpu_native_preview_idle_pumps_while_paused(qapp, monkeypatch):
         renderer.stop()
 
 
+def test_gpu_native_preview_schedules_at_capacity_rate_without_waste(qapp, monkeypatch):
+    """按当前吞吐调度（2026-10 用户问询的实证）：模拟 45ms/帧的慢机，
+    以 60Hz 请求节拍打 1 秒——渲染数应 ≈ 1s/45ms ≈ 22（不是请求数 60），
+    且每次渲染的帧键互不相同（无效帧为零）。
+    """
+    from krok_helper.subtitle_render.frontend.preview import preview_async as pa
+    from krok_helper.subtitle_render.domain.models import Style, TimingTrack
+
+    presented_keys: list[int] = []
+    lock = threading.Lock()
+
+    class FakeGpuProcess:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def start(self):
+            return {"ok": True, "event": "ready", "native_preview_protocol": 1}
+
+        def configure_gpu(self, *args, **kwargs):
+            return {"ok": True, "event": "gpu_configured", "native_preview": True}
+
+        def present_gpu_frame(self, t_ms, **kwargs):
+            time.sleep(0.045)  # 模拟慢机：一帧 45ms（≈22fps 吞吐）
+            with lock:
+                presented_keys.append(int(t_ms))
+            return {
+                "ok": True,
+                "event": "gpu_frame_presented",
+                "t_ms": int(t_ms),
+                "render_ms": 45.0,
+                "present_ms": 0.2,
+                "readback_ms": 0.0,
+                "transport": "direct_composition",
+            }
+
+        def render_gpu_frame(self, *args, **kwargs):
+            raise AssertionError("G6 native preview must not use shared-memory readback")
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(pa, "gpu_native_preview_enabled", lambda: True)
+    monkeypatch.setattr(pa, "NativeRendererProcess", FakeGpuProcess)
+    renderer = pa.GpuAsyncSubtitleRenderer(320, 180)
+    try:
+        renderer.set_native_target(12345, 0, 0, 320, 180)
+        renderer.set_state(TimingTrack(), Style())
+        renderer.set_playing(True)
+        # 60Hz 请求节拍打 ~1.05 秒（模拟媒体时钟）
+        for i in range(63):
+            renderer.request(60_000 + i * 16)
+            qapp.processEvents()
+            time.sleep(0.0167)
+        # 等最后一个在途渲染完成
+        time.sleep(0.2)
+        qapp.processEvents()
+
+        keys = [renderer._frame_cache.key_for(t) for t in presented_keys]  # noqa: SLF001
+        render_count = len(presented_keys)
+        # 渲染数≈吞吐率（1.05s/45ms≈23），远小于请求数 63
+        assert 16 <= render_count <= 30, f"渲染数 {render_count} 应≈吞吐率而非请求率"
+        # 每次渲染的帧键互不相同：没有一帧浪费在已上屏内容上
+        assert len(set(keys)) == len(keys), f"出现重复帧键: {keys}"
+    finally:
+        renderer.stop()
+
+
 def test_gpu_native_mode_hot_switch_keeps_sidecar_and_flips_transport(qapp, monkeypatch):
     """G6↔G5 热切换：同一 sidecar 内翻转直画/读回，进程不重建。
 

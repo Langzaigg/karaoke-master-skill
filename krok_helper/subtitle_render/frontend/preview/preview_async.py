@@ -1772,13 +1772,19 @@ class GpuAsyncSubtitleRenderer(QObject):
         目标帧率**永远是项目帧率**（一般 60）：这里不做任何限速，只在吞吐
         暂时跟不上时，按「拾取年龄 + 渲染耗时 EMA」让每一帧落地即当前
         （当前 22fps 就按 22fps 出有效帧），渲染变快 EMA 回落、投喂自动
-        回到逐帧节奏。上限 3 个帧键（≈50ms@60fps）防 EMA 尖峰过冲。
-        暂停态禁止前移——GUI 侧要求精确匹配当前请求戳。
+        回到逐帧节奏。
+
+        前移量天花板取**过期容忍窗**（_STALE_TOLERANCE_MS=120ms）而非
+        固定帧数（2026-10 用户指出：EMA 多采样本身已抑制尖峰，固定 3 帧
+        键≈50ms 会把慢机的合法补偿砍掉——别的电脑真要 120ms/帧时应全额
+        前移）。天花板只兜 EMA 高估的尖峰过冲（字幕最多早一个容忍窗），
+        对 120ms 内的渲染耗时永不生效。暂停态禁止前移——GUI 侧要求精确
+        匹配当前请求戳。
         """
         if not self._playing or not self._native_project_ahead:
             return int(t_ms)
         age_ms = max(0.0, (time.monotonic() - float(submitted_at)) * 1000.0)
-        ahead_ms = min(age_ms + float(ema_ms or 0.0), 3.0 * 1000.0 / 60.0)
+        ahead_ms = min(age_ms + float(ema_ms or 0.0), self._STALE_TOLERANCE_MS)
         if ahead_ms < 1.0:
             return int(t_ms)
         projected_key = self._frame_cache.key_for(int(t_ms) + int(ahead_ms))
