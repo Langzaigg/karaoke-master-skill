@@ -62,13 +62,36 @@ bool SharedFrameRingBuffer::ensure(
         sharedMemory_->detach();
     }
     sharedMemory_ = std::make_unique<QSharedMemory>(key);
-    if (!sharedMemory_->create(totalBytes)) {
-        if (error != nullptr) {
-            *error = sharedMemory_->errorString();
+    bool created = sharedMemory_->create(totalBytes);
+    if (!created) {
+        // The GUI process ring reader may still hold this key attached, so
+        // the named object outlives our detach and create() reports "already
+        // exists" (a mode switch re-ensured one key with a different slot
+        // count / geometry). Fall back to attach + capacity check instead of
+        // failing every subsequent frame.
+        const QString createError = sharedMemory_->errorString();
+        if (!sharedMemory_->attach()) {
+            if (error != nullptr) {
+                *error = QStringLiteral("create failed (%1); attach fallback failed (%2)")
+                             .arg(createError, sharedMemory_->errorString());
+            }
+            sharedMemory_.reset();
+            return false;
         }
-        sharedMemory_.reset();
-        return false;
+        if (sharedMemory_->size() < totalBytes) {
+            if (error != nullptr) {
+                *error = QStringLiteral(
+                    "existing shared segment %1 is smaller than requested (%2 < %3 bytes)")
+                             .arg(key)
+                             .arg(sharedMemory_->size())
+                             .arg(totalBytes);
+            }
+            sharedMemory_->detach();
+            sharedMemory_.reset();
+            return false;
+        }
     }
+    const int segmentBytes = static_cast<int>(sharedMemory_->size());
     ring_ = SharedFrameRing{
         key,
         safeSlots,
@@ -78,10 +101,13 @@ bool SharedFrameRingBuffer::ensure(
         pixelBytes,
         headerBytes,
         slotBytes,
-        totalBytes,
+        segmentBytes,
         QStringLiteral("rgba8888"),
     };
-    if (sharedMemory_->lock()) {
+    if (created && sharedMemory_->lock()) {
+        // Only zero a freshly created segment: a reused segment may be mapped
+        // by the GUI reader right now. Reads are pinned to event-validated
+        // slot headers, so stale bytes in unwritten slots are never consumed.
         std::memset(sharedMemory_->data(), 0, static_cast<std::size_t>(totalBytes));
         sharedMemory_->unlock();
     }

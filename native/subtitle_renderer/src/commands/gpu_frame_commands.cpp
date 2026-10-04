@@ -69,8 +69,11 @@ QJsonObject renderGpuFrameWithBackend(
     const int tMs = intValue(request, QStringLiteral("t_ms"), 0);
     // G7 export pipelining: with slot_count > 1 the consumer may still be
     // expanding frame N while this call renders frame N+1 into another slot.
+    // Upper bound must cover the preview ring size (lookahead + 2, ~8): all
+    // ensure() calls sharing one shm key must see an identical slot count, or
+    // the ring gets torn down and re-created under the GUI reader's attach.
     const int slotCount = std::clamp(
-        intValue(request, QStringLiteral("slot_count"), 1), 1, 4
+        intValue(request, QStringLiteral("slot_count"), 1), 1, 32
     );
     const int slotIndex = ((frameIndex % slotCount) + slotCount) % slotCount;
     const bool packedRgba = request.value(

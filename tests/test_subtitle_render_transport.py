@@ -2574,6 +2574,156 @@ def test_gpu_async_renderer_resize_rotates_shared_memory_generation(qapp):
         renderer.stop()
 
 
+def test_gpu_native_hot_switch_rotates_ring_key_and_restores_workers(qapp, monkeypatch):
+    """G6→G5 热切换的环/池参数回归（2026-10 G5 死亡链）。
+
+    死亡链：G6 建立的渲染器切回 G5 后，同 key 以新几何（G6 用未钳制显示
+    缩放、G5 用质量钳制 DPR）重建共享环；GUI 进程的 ring reader 仍 attach
+    着旧段，Windows 命名对象不销毁 → sidecar create() 报 already exists →
+    每帧失败 → G5 永不出帧。修复要点：
+    1. set_native_mode 双向轮换 _shm_key；
+    2. resize 成功也轮换 key（几何口径随模式变）；
+    3. _worker_count_requested 不在 __init__ 冻结，切回 G5 的 resize 按
+       模式取满额 worker（native/WARP 才压 1）；
+    4. 单帧读回的 slot_count 与池化 ring_slots 一致（同 key 下 ensure
+       参数必须恒定）。
+    """
+    from PyQt6.QtGui import QImage
+
+    from krok_helper.subtitle_render.frontend.preview import preview_async as pa
+    from krok_helper.subtitle_render.domain.models import Style, TimingTrack
+
+    render_calls: list[dict] = []
+    present_calls: list[int] = []
+    resize_calls: list[dict] = []
+    configure_calls: list[dict] = []
+    step = threading.Event()
+
+    class FakeReader:
+        @classmethod
+        def from_event(cls, event):
+            return cls()
+
+        def read_qimage(self, event):
+            return QImage(4, 4, QImage.Format.Format_ARGB32_Premultiplied)
+
+        @property
+        def shm_key(self):
+            return "fake"
+
+        def close(self):
+            pass
+
+    class FakeGpuProcess:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def start(self):
+            return {"ok": True, "event": "ready", "native_preview_protocol": 1}
+
+        def configure_gpu(self, *args, **kwargs):
+            configure_calls.append(kwargs)
+            return {"ok": True, "event": "gpu_configured", "worker_count": 1}
+
+        def resize_gpu_target(self, *args, **kwargs):
+            resize_calls.append(kwargs)
+            return {"ok": True, "event": "gpu_configured", "worker_count": 1}
+
+        def render_gpu_frame_direct(self, t_ms, **kwargs):
+            present_calls.append(int(t_ms))
+            step.set()
+            return {
+                "ok": True,
+                "event": "gpu_frame_rendered_direct",
+                "t_ms": int(t_ms),
+                "render_ms": 5.0,
+                "present_ms": 0.2,
+                "readback_ms": 0.0,
+                "transport": "direct_composition",
+            }
+
+        def present_rendered_gpu_frame(self, **kwargs):
+            return {
+                "ok": True,
+                "event": "gpu_frame_presented",
+                "t_ms": int(kwargs.get("t_ms", 0)),
+                "render_ms": 0.0,
+                "present_ms": 0.2,
+                "readback_ms": 0.0,
+                "child_hwnd": 4321,
+                "transport": "direct_composition",
+            }
+
+        def render_gpu_frame(self, t_ms, **kwargs):
+            render_calls.append({"t_ms": int(t_ms), **kwargs})
+            step.set()
+            return {
+                "ok": True,
+                "event": "gpu_frame_rendered",
+                "t_ms": int(t_ms),
+                "render_ms": 5.0,
+                "readback_ms": 1.0,
+                "shm_key": "fake",
+                "readback_bands": [],
+            }
+
+        def close_gpu_preview(self, **kwargs):
+            return {"ok": True, "event": "gpu_preview_closed"}
+
+        def close(self):
+            pass
+
+    monkeypatch.setenv("KROK_SUBTITLE_GPU_WORKERS", "2")
+    monkeypatch.setattr(pa, "gpu_native_preview_enabled", lambda: True)
+    monkeypatch.setattr(pa, "NativeRendererProcess", FakeGpuProcess)
+    monkeypatch.setattr(pa, "SharedFrameRingReader", FakeReader)
+    renderer = pa.GpuAsyncSubtitleRenderer(320, 180)
+    try:
+        assert renderer.uses_native_preview is True
+        # native 建立的渲染器不再把 env 申请的 worker 数冻结成 1：
+        # 模式约束在调用点生效。
+        assert renderer._worker_count_requested == 2
+        renderer.set_native_target(12345, 0, 0, 320, 180)
+        renderer.set_state(TimingTrack(), Style())
+        renderer.request(1_000)
+        assert step.wait(timeout=2.0)
+        step.clear()
+        deadline = time.monotonic() + 2.0
+        while len(present_calls) < 1 and time.monotonic() < deadline:
+            qapp.processEvents()
+            time.sleep(0.01)
+        assert present_calls, "G6 模式应走 present 直画"
+        # G6 下的 configure/resize 都必须压 worker=1（直画渲染走主后端，
+        # 多 worker 池化 configure 不会配置主后端）。
+        assert configure_calls and all(c.get("worker_count") == 1 for c in configure_calls)
+
+        key_before_switch = renderer._shm_key
+        assert renderer.set_native_mode(False) is True
+        assert renderer._shm_key != key_before_switch, "切回 G5 必须轮换共享环 key"
+
+        renderer.request(2_000)
+        deadline = time.monotonic() + 2.0
+        while len(render_calls) < 1 and time.monotonic() < deadline:
+            qapp.processEvents()
+            time.sleep(0.01)
+        assert render_calls, "热切 G5 后应走 render_gpu_frame 读回"
+        # 切回 G5 的 resize 恢复满额 worker；单帧读回的 slot_count 与
+        # ring_slots 同值（同 key 下 ensure 参数恒定）。
+        assert resize_calls, "热切换应触发强制 resize"
+        assert any(c.get("worker_count") == 2 for c in resize_calls), (
+            "G6→G5 后 resize 应申请满额 worker（不再被 init 冻结成 1）"
+        )
+        assert all(c["slot_count"] == renderer._readback_slot_count() for c in render_calls), (
+            "单帧读回的 slot_count 必须与池化 begin 的环槽位数同值"
+        )
+
+        key_before_back = renderer._shm_key
+        assert renderer.set_native_mode(True) is True
+        assert renderer._shm_key != key_before_back, "切回 G6 也必须轮换共享环 key"
+    finally:
+        renderer.stop()
+
+
 def test_gpu_async_renderer_uses_target_resize_after_initial_scene(qapp, monkeypatch):
     from krok_helper.subtitle_render.frontend.preview import preview_async as pa
     from krok_helper.subtitle_render.domain.models import Style, TimingTrack

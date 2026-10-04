@@ -724,8 +724,10 @@ class GpuAsyncSubtitleRenderer(QObject):
             "KROK_SUBTITLE_GPU_WORKERS", 2, minimum=1
         )
         self._worker_count_requested = min(self._worker_count_requested, 8)
-        if self._force_warp or self._native_preview:
-            self._worker_count_requested = 1
+        # 注意：这里不再按 native 模式把 _worker_count_requested 冻结成 1。
+        # 冻结会让「G6 建立的渲染器热切换回 G5」永远单 worker。native 需要
+        # worker=1 是模式约束（直画渲染走主后端），由 _worker_request_for_mode
+        # 在 configure/resize 调用点按当前模式取值，切回 G5 即恢复多 worker。
         self._active_worker_count = 1
         self._native_target: Optional[
             tuple[int, int, int, int, int, int, int]
@@ -907,6 +909,28 @@ class GpuAsyncSubtitleRenderer(QObject):
         with self._condition:
             return self._native_target is not None
 
+    def _worker_request_for_mode(self) -> int:
+        """当前模式下应向 sidecar 申请的 worker 数。
+
+        native（G6 直画）必须 1：多 worker 的池化 configure 只配置池的后备
+        worker，主后端（direct 渲染的执行者）不会被 configure。WARP 同理
+        压到 1。G5 读回用满额 _worker_count_requested（env 派生，不再在
+        __init__ 冻结，热切换回 G5 才能恢复多 worker 吞吐）。
+        """
+        if self._force_warp or self._native_preview:
+            return 1
+        return self._worker_count_requested
+
+    def _readback_slot_count(self) -> int:
+        """读回环的槽位数（同 key 下所有 ensure 调用的唯一合法值）。
+
+        ring 的 (key, slots, 宽高) 任一参数变化都会触发 sidecar detach+
+        create；GUI 进程的 ring reader 若仍 attach 着旧段，Windows 命名
+        对象不销毁，create 报 already exists → 之后每帧失败。因此单帧
+        路径、填缝循环、池化 begin 三处必须传同一个值。
+        """
+        return 1 if self._force_warp else self._worker_count_requested
+
     def set_native_mode(self, enabled: bool) -> bool:
         """G6↔G5 热切换：同一 sidecar 内翻转直画/读回，不重建进程与场景。
 
@@ -943,6 +967,14 @@ class GpuAsyncSubtitleRenderer(QObject):
                 )
             self._pending = None
             self._frame_cache.clear()
+            # 读回环 key 必须随模式切换轮换：环按 (key, 槽位数, 物理宽高)
+            # 创建，而 G6/G5 的物理几何不同（未钳制的显示缩放 vs 质量钳制
+            # 的场景 DPR），切回 G5 后 sidecar 会对同 key 以新几何重建环。
+            # 但 GUI 进程的 SharedFrameRingReader 可能仍 attach 着旧段，
+            # Windows 上命名对象因此不销毁，create() 报 "already exists"，
+            # 之后每一帧都失败——G5 永久不出帧（2026-10 热切换死亡链）。
+            # 换新 key 让切换后的创建落在全新段上，读端按 key 失配重连。
+            self._shm_key = f"krok-gpu-preview-{os.getpid()}-{uuid.uuid4().hex}"
             self._condition.notify_all()
         return True
 
@@ -1326,7 +1358,7 @@ class GpuAsyncSubtitleRenderer(QObject):
                                     ),
                                     force_warp=force_warp,
                                     prewarm_t_ms=t_ms,
-                                    worker_count=self._worker_count_requested,
+                                    worker_count=self._worker_request_for_mode(),
                                     defer_followers=True,
                                     defer_realizations_until_first_frame=True,
                                 )
@@ -1353,7 +1385,7 @@ class GpuAsyncSubtitleRenderer(QObject):
                                     extra_tracks=extra_tracks,
                                     duration_ms=duration_ms,
                                     prewarm_t_ms=t_ms,
-                                    worker_count=self._worker_count_requested,
+                                    worker_count=self._worker_request_for_mode(),
                                     defer_followers=True,
                                     defer_realizations_until_first_frame=True,
                                     relayout_scope=relayout_scope,
@@ -1419,18 +1451,25 @@ class GpuAsyncSubtitleRenderer(QObject):
                             # native（直画）必须 worker=1：多 worker 走池化
                             # 路径只配置池的后备 worker，主后端（direct 渲染
                             # 执行者）不会被 configure（2026-10 热切换连败
-                            # 根因）。
-                            worker_count=(
-                                1
-                                if self._native_preview
-                                else self._worker_count_requested
-                            ),
+                            # 根因）。WARP 一并压 1。
+                            worker_count=self._worker_request_for_mode(),
                         )
                         self._active_worker_count = max(
                             1, min(int(configured.get("worker_count", 1)), 8)
                         )
                         with self._stats_lock:
                             self._stats["worker_count"] = self._active_worker_count
+                        # resize 可能改变物理几何（G6↔G5 的 dpr 口径不同、
+                        # 或外部强制 resize）：同 key 以新几何重建环会被
+                        # GUI 读端的附着卡死（create already exists），随
+                        # resize 成功一并轮换 key，保证环参数随 key 单调。
+                        self._shm_key = (
+                            f"krok-gpu-preview-{os.getpid()}-{uuid.uuid4().hex}"
+                        )
+                        # 快照在 _take_next_request 里取的是旧 key，轮换后
+                        # 同步刷新局部量，否则调度器/暂停态首帧仍会拿旧
+                        # key 以新几何 ensure。
+                        shm_key = self._shm_key
                         self._note("configure_count")
                         scene_configured = True
                         self._style_patch_key = current_patch_key
@@ -1541,9 +1580,10 @@ class GpuAsyncSubtitleRenderer(QObject):
                             shm_key=shm_key,
                             include_checksum=False,
                             readback_bands=True,
-                            slot_count=(
-                                1 if force_warp else self._worker_count_requested
-                            ),
+                            # 槽位数与池化路径保持同值：同 key 下 ensure 的
+                            # (slots, 宽高) 必须恒定，否则参数一变就 detach+
+                            # create，被 GUI 读端的附着卡成 already exists。
+                            slot_count=self._readback_slot_count(),
                         )
                     ready_workers = max(
                         1,
@@ -1795,7 +1835,7 @@ class GpuAsyncSubtitleRenderer(QObject):
                 # shared-memory mapping when the pool grows from one ready
                 # worker to its final size. Reserve the stable ring capacity
                 # from the very first frame instead.
-                slot_count=(1 if force_warp else self._worker_count_requested),
+                slot_count=self._readback_slot_count(),
             )
         with self._stats_lock:
             self._stats["max_in_flight"] = max(
@@ -2198,7 +2238,9 @@ class GpuAsyncSubtitleRenderer(QObject):
                             shm_key=shm_key,
                             include_checksum=False,
                             readback_bands=True,
-                            slot_count=1,
+                            # 与池化路径同槽位数（同 key 下 ensure 参数必须
+                            # 恒定，理由见 _readback_slot_count）。
+                            slot_count=self._readback_slot_count(),
                         )
                         self._frame_index += 1
                         render_ms = float(event.get("render_ms") or 0.0)
