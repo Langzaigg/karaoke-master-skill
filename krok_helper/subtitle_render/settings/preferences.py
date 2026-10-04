@@ -64,6 +64,19 @@ PROJECT_ONLY_STYLE_FIELDS = frozenset(
         "hidden_builtin_layout_ids",
     }
 )
+SIGNAL_MODULE_STYLE_FIELDS: frozenset[str] = frozenset(
+    field.name
+    for field in fields(Style)
+    if field.name.startswith(("lit_", "volume_", "signals_"))
+)
+"""指示灯/音量柱（SignalsLits 模块）的全部 :class:`Style` 字段。
+
+这些字段是「改一次就一直沿用」的用户习惯（与标题同一口径）：只经
+``_remember_style_preferences`` 的编辑差分写进应用默认样式，不随随手
+打开的工程经 :func:`merge_common_style_preferences` 覆盖——否则打开任
+何音量柱/指示灯关闭的旧工程，习惯立刻被冲回出厂。按字段前缀动态推导，
+将来 SignalsLits 加新字段自动归队。
+"""
 APP_STYLE_EXPLICIT_DEFAULT_FIELDS = (
     BUILTIN_SCHEME_STYLE_FIELDS
     | LAYOUT_DEFAULT_STYLE_FIELDS
@@ -72,6 +85,7 @@ APP_STYLE_EXPLICIT_DEFAULT_FIELDS = (
     # 行数→布局映射属于软件级选择（「保存为软件默认布局」按行数写入），
     # 不能被随手打开的工程经 merge_common_style_preferences 覆盖。
     | frozenset({"default_layout_by_row_count"})
+    | SIGNAL_MODULE_STYLE_FIELDS
 )
 APP_LOCAL_ONLY_OUTPUT_FIELDS = frozenset(
     {
