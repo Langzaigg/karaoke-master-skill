@@ -2485,9 +2485,12 @@ def test_gpu_async_renderer_one_frame_lookahead_uses_bounded_cache(qapp, monkeyp
         renderer.set_playing(False)
         renderer.request(1_017)
 
-        assert rendered == [1_017]
+        # 填缝调度语义：窗口帧预渲入缓存（受缓存容量约束、无重渲
+        # 抖动），暂停请求 1017 时缓存命中。
+        assert 1_017 in rendered
+        assert len(rendered) <= 24, f"出现窗口重渲抖动: {len(rendered)} 次"
         stats = renderer.stats_snapshot()
-        assert stats["future_frames_cached"] == 1
+        assert stats["future_frames_cached"] >= 1
         assert stats["frames_emitted"] == 1
         assert stats["cache_hits"] == 1
         assert stats["max_pending"] == 1
@@ -2750,7 +2753,7 @@ def test_gpu_async_renderer_pooled_batch_accepts_out_of_order_completion(qapp, m
         stats = renderer.stats_snapshot()
         assert stats["worker_count"] == 2
         assert stats["max_in_flight"] == 2
-        assert stats["future_frames_cached"] == 2
+        assert stats["future_frames_cached"] >= 2
     finally:
         renderer.stop()
 
@@ -2843,7 +2846,9 @@ def test_gpu_async_renderer_reserves_final_ring_before_deferred_follower(qapp, m
         while len(slot_counts) < 3 and time.monotonic() < deadline:
             time.sleep(0.01)
 
-        assert slot_counts == [2, 2, 2]
+        # 填缝调度器会持续补批（窗口随媒体时钟推进），取前三个断言
+        # 「首批即按终容量预留共享环」的语义。
+        assert slot_counts[:3] == [2, 2, 2]
     finally:
         renderer.stop()
 

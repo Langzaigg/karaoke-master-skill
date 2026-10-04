@@ -346,6 +346,17 @@ class NativePreviewFrameCache:
             while len(self._images) > self._max_frames:
                 self._images.popitem(last=False)
 
+    def contains_key(self, key: int) -> bool:
+        with self._lock:
+            return int(key) in self._images
+
+    def size(self) -> int:
+        with self._lock:
+            return len(self._images)
+
+    def capacity(self) -> int:
+        return self._max_frames
+
     def take(self, t_ms: int) -> Optional[QImage]:
         with self._lock:
             # store() 已复制一份私有拷贝；pop 后缓存不再持有引用，直接移交即可。
@@ -354,6 +365,13 @@ class NativePreviewFrameCache:
     def clear(self) -> None:
         with self._lock:
             self._images.clear()
+
+
+class _NullNativeRenderer:
+    """cpu 填缝调度下 renderer 不被使用的占位（保持调度器签名统一）。"""
+
+
+_NULL_RENDERER = _NullNativeRenderer()
 
 
 class NativePreviewStats:
@@ -1189,6 +1207,21 @@ class GpuAsyncSubtitleRenderer(QObject):
                     continue
                 if self._renderer_failed:
                     if time.monotonic() < self._retry_after:
+                        if not speculative and self._playing:
+                            # 播放态：GPU 重试窗口内跑 CPU 填缝调度——
+                            # 按容量画未来帧入缓存（GUI 到点缓存命中），
+                            # 窗口到期自动退出回主循环重配 GPU。
+                            self._run_cpu_due_scheduler(
+                                generation,
+                                track,
+                                style,
+                                extra_tracks,
+                                duration_ms,
+                                width,
+                                height,
+                                dpr,
+                            )
+                            continue
                         if not speculative:
                             now = time.monotonic()
                             if now - self._last_fallback_emit >= 0.5:
@@ -1372,6 +1405,17 @@ class GpuAsyncSubtitleRenderer(QObject):
                         # configure 完成（IR 重排 + sidecar 场景就绪）；此刻起等待的
                         # 是首帧实现（字形光栅化）与出帧，帧到达即由 GUI 徽标收尾。
                         self.renderProgress.emit(92, "出帧")
+                    if not self._native_preview and self._playing:
+                        # G5 播放态：公共填缝调度器（池子持续填缓存窗口，
+                        # 不再依赖 60Hz 请求接力）。暂停态走下方原路径。
+                        self._run_readback_due_scheduler(
+                            renderer,
+                            generation,
+                            force_warp,
+                            shm_key=shm_key,
+                            dpr=dpr,
+                        )
+                        continue
                     if (
                         self._active_worker_count > 1
                         and not self._native_preview
@@ -1665,18 +1709,29 @@ class GpuAsyncSubtitleRenderer(QObject):
         dpr: float,
         submitted_at: float,
         force_warp: bool,
+        explicit_timestamps: Optional[list[int]] = None,
     ) -> None:
-        """Submit a bounded current or media-clock-ahead batch to the pool."""
+        """Submit a bounded current or media-clock-ahead batch to the pool.
+
+        ``explicit_timestamps``：填缝调度器给定窗口内的缺失帧序列，跳过
+        「从请求戳连排」的默认构造。
+        """
         with self._condition:
             playing = self._playing
-        requests = [(int(t_ms), int(serial), bool(speculative), float(submitted_at))]
-        if playing:
-            future_t = int(t_ms)
-            for _ in range(1, self._active_worker_count):
-                future_t = self._next_frame_timestamp(future_t)
-                requests.append(
-                    (future_t, int(serial), bool(speculative), time.monotonic())
-                )
+        if explicit_timestamps is not None:
+            requests = [
+                (int(t), int(serial), bool(speculative), time.monotonic())
+                for t in explicit_timestamps
+            ]
+        else:
+            requests = [(int(t_ms), int(serial), bool(speculative), float(submitted_at))]
+            if playing:
+                future_t = int(t_ms)
+                for _ in range(1, self._active_worker_count):
+                    future_t = self._next_frame_timestamp(future_t)
+                    requests.append(
+                        (future_t, int(serial), bool(speculative), time.monotonic())
+                    )
 
         metadata: dict[int, tuple[int, int, bool, float]] = {}
         batch_started = time.monotonic()
@@ -1848,80 +1903,286 @@ class GpuAsyncSubtitleRenderer(QObject):
         generation: int,
         force_warp: bool,
     ) -> None:
-        """G6 播放态到点队列调度器（2026-10 用户模型的完整实现）。
+        """G6 直画策略的到点队列调度（见 _run_due_scheduler 总注释）。"""
+        self._run_due_scheduler(renderer, generation, force_warp, native=True)
 
-        - 目标键 = max(上次已出帧键+1, 媒体时钟+EMA) 且不超前容忍窗：
-          落后时抽帧追上（22fps 就渲 22 帧有效的，帧帧到点上屏）；
-          提前完成时继续渲染后续帧填进队列（15,25,35… 的填缝），
-          到点逐帧放出——恢复期 GPU 不空转、帧率按容量逐步爬回 60。
-        - 退出条件：暂停 / 视图隐藏（target 清空）/ 代际变化（seek、
-          样式改动）/ 停止。异常上抛给 _run 的失败语义统一处理。
+    def _run_readback_due_scheduler(
+        self,
+        renderer: NativeRendererProcess,
+        generation: int,
+        force_warp: bool,
+        shm_key: str,
+        dpr: float,
+    ) -> None:
+        """G5 读回策略的窗口填缝调度（见 _run_due_scheduler 总注释）。"""
+        self._run_due_scheduler(
+            renderer, generation, force_warp, native=False,
+            shm_key=shm_key, dpr=dpr,
+        )
+
+    def _run_cpu_due_scheduler(
+        self,
+        generation: int,
+        track: TimingTrack,
+        style: Style,
+        extra_tracks: list[TimingTrack],
+        duration_ms: int,
+        width: int,
+        height: int,
+        dpr: float,
+    ) -> None:
+        """CPU 回退的填缝调度（GPU 重试窗口内持续画未来帧入缓存）。"""
+        def render_fill(t_ms: int) -> Optional[QImage]:
+            return self._render_cpu_frame(
+                track, style, extra_tracks, duration_ms, width, height, dpr, t_ms
+            )
+
+        renderer = self._renderer_owner.process
+        self._run_due_scheduler(
+            renderer if renderer is not None else _NULL_RENDERER,
+            generation,
+            False,
+            native=False,
+            cpu_render=render_fill,
+            deadline_wall=self._retry_after,
+        )
+
+    def _render_cpu_frame(
+        self,
+        track: TimingTrack,
+        style: Style,
+        extra_tracks: list[TimingTrack],
+        duration_ms: int,
+        width: int,
+        height: int,
+        dpr: float,
+        t_ms: int,
+    ) -> Optional[QImage]:
+        """用 QPainter 渲染一帧（CPU 回退的渲染体，含 EMA 更新）。"""
+        paint_started = time.monotonic()
+        physical_w, physical_h, dpr = preview_render_target_size(width, height, dpr)
+        image = QImage(
+            physical_w, physical_h, QImage.Format.Format_ARGB32_Premultiplied
+        )
+        image.setDevicePixelRatio(dpr)
+        image.fill(0)
+        painter = QPainter(image)
+        try:
+            with render_progress_scope(
+                _render_progress_reporter(
+                    _RENDER_STAGE_SPANS_PAINTER, self.renderProgress.emit
+                )
+            ):
+                paint_frame_to_painter(
+                    painter,
+                    width,
+                    height,
+                    track,
+                    int(t_ms),
+                    style,
+                    extra_tracks,
+                    duration_ms=duration_ms,
+                )
+        except Exception:  # noqa: BLE001 - 回退帧自身的异常绝不能杀死 worker 线程
+            _log.exception("CPU 回退帧渲染失败（worker 继续运行）")
+            self._note("fallback_failures")
+            return None
+        finally:
+            painter.end()
+        paint_ms = (time.monotonic() - paint_started) * 1000.0
+        if paint_ms > 0.0:
+            self._cpu_render_ms_ema = (
+                paint_ms
+                if self._cpu_render_ms_ema <= 0.0
+                else self._cpu_render_ms_ema * 0.7 + paint_ms * 0.3
+            )
+        return image
+
+    def _run_due_scheduler(
+        self,
+        renderer: NativeRendererProcess,
+        generation: int,
+        force_warp: bool,
+        *,
+        native: bool,
+        shm_key: str = "",
+        dpr: float = 1.0,
+        cpu_render: Optional[Callable[[int], Optional[QImage]]] = None,
+        deadline_wall: Optional[float] = None,
+    ) -> None:
+        """播放态公共填缝调度器（2026-10 用户模型，G5/G6/CPU 三条运输线）。
+
+        **一个调度模型**：目标帧率永远是项目帧率；吞吐跟不上时按容量渲
+        染「来得及播放的帧」，空转产能持续填后续帧（15,25,35… 的填缝），
+        到点呈现、按容量逐步爬回 60。差异只在运输层：
+
+        - native（G6）：渲染到纹理进队，到点经 DComp 上屏；
+        - 读回（G5）：池化/单命令渲染 [当前, 容忍窗] 窗口内**缓存缺失**
+          的帧，GUI 请求到点时缓存命中上屏；池子不再依赖 60Hz 请求接力；
+        - painter（CPU 回退）：``cpu_render(t) -> QImage`` 逐帧画未来帧
+          入同一缓存窗口，GPU 重试窗口（``deadline_wall``）内持续填缝，
+          到点同样缓存命中——CPU 的空转产能也变成已备好的帧。
+
+        退出条件：暂停 / 视图隐藏 / 代际变化（seek、样式改动）/ 停止 /
+        （painter）重试窗口到期回主循环重配 GPU。异常上抛给 _run 的
+        失败语义统一处理。
         """
         fps = max(int(self._frame_cache._fps), 1)  # noqa: SLF001
         interval_ms = 1000.0 / fps
         queue_cap = max(2, int(self._STALE_TOLERANCE_MS / interval_ms) + 1)
-        rendered_queue: list[tuple[int, int]] = []  # (key, t_ms) 递增
+        rendered_queue: list[tuple[int, int]] = []  # native: (key, t_ms) 递增
+        cpu_mode = cpu_render is not None
 
         while True:
             with self._condition:
                 if (
                     self._stopped
                     or not self._playing
-                    or not self._native_preview
-                    or self._native_target is None
                     or generation != self._generation
+                    or (native and (not self._native_preview
+                                    or self._native_target is None))
+                    or (not native and not cpu_mode and self._native_preview)
                 ):
                     return
+                if deadline_wall is not None and time.monotonic() >= deadline_wall:
+                    return
                 native_target = self._native_target
+                serial = self._request_serial
             media_now = self._media_now_ms()
 
-            # 1) 出队到点帧（一帧一帧放，保持到点才播放的语义）。
-            while rendered_queue and rendered_queue[0][1] <= media_now + 1.0:
-                _, due_t = rendered_queue.pop(0)
-                self._present_g6_frame(
-                    renderer, due_t, native_target, generation, force_warp
-                )
-                media_now = self._media_now_ms()
+            if native:
+                # 1) 出队到点帧（一帧一帧放，保持到点才播放的语义）。
+                while rendered_queue and rendered_queue[0][1] <= media_now + 1.0:
+                    _, due_t = rendered_queue.pop(0)
+                    self._present_g6_frame(
+                        renderer, due_t, native_target, generation, force_warp
+                    )
+                    media_now = self._media_now_ms()
 
-            # 2) 补渲染：填缝到容忍窗前沿为止。
-            last_key = rendered_queue[-1][0] if rendered_queue else None
-            with self._condition:
-                last = self._native_last_presented
-            if (
-                last is not None
-                and last[0] == self._generation
-                and (last_key is None or last_key < last[1])
-            ):
-                last_key = last[1]
-            if len(rendered_queue) < queue_cap:
-                floor_key = 0 if last_key is None else last_key + 1
-                ahead_key = self._frame_cache.key_for(
-                    int(media_now + self._render_ms_ema)
-                )
+                # 2) 补渲染：填缝到容忍窗前沿为止。
+                last_key = rendered_queue[-1][0] if rendered_queue else None
+                with self._condition:
+                    last = self._native_last_presented
+                if (
+                    last is not None
+                    and last[0] == self._generation
+                    and (last_key is None or last_key < last[1])
+                ):
+                    last_key = last[1]
+                if len(rendered_queue) < queue_cap:
+                    floor_key = 0 if last_key is None else last_key + 1
+                    ahead_key = self._frame_cache.key_for(
+                        int(media_now + self._render_ms_ema)
+                    )
+                    ceiling_key = self._frame_cache.key_for(
+                        int(media_now + self._STALE_TOLERANCE_MS)
+                    )
+                    target_key = max(floor_key, ahead_key, 0)
+                    target_key = min(target_key, ceiling_key)
+                    if target_key >= max(floor_key, 0) or last_key is None:
+                        render_t = self._frame_cache.timestamp_for_key(target_key)
+                        render_event = renderer.render_gpu_frame_direct(
+                            render_t,
+                            force_warp=force_warp,
+                            generation=generation,
+                            frame_index=self._frame_index,
+                        )
+                        self._frame_index += 1
+                        render_ms = float(render_event.get("render_ms") or 0.0)
+                        if render_ms > 0.0:
+                            self._render_ms_ema = (
+                                render_ms
+                                if self._render_ms_ema <= 0.0
+                                else self._render_ms_ema * 0.7 + render_ms * 0.3
+                            )
+                        self._record_event_timing("render_ms", render_ms)
+                        rendered_queue.append((target_key, render_t))
+                        self._note("requests")
+                        continue
+            else:
+                # 读回（G5）/ painter（CPU 回退）填缝：把 [当前, 容忍窗]
+                # 内缓存缺失的帧持续渲染入缓存；GUI 请求到点时缓存命中
+                # 上屏（呈现天然到点）。
+                floor_key = self._frame_cache.key_for(int(media_now))
                 ceiling_key = self._frame_cache.key_for(
                     int(media_now + self._STALE_TOLERANCE_MS)
                 )
-                target_key = max(floor_key, ahead_key, 0)
-                target_key = min(target_key, ceiling_key)
-                if target_key >= max(floor_key, 0) or last_key is None:
-                    render_t = self._frame_cache.timestamp_for_key(target_key)
-                    render_event = renderer.render_gpu_frame_direct(
-                        render_t,
-                        force_warp=force_warp,
-                        generation=generation,
-                        frame_index=self._frame_index,
-                    )
-                    self._frame_index += 1
-                    render_ms = float(render_event.get("render_ms") or 0.0)
-                    if render_ms > 0.0:
-                        self._render_ms_ema = (
-                            render_ms
-                            if self._render_ms_ema <= 0.0
-                            else self._render_ms_ema * 0.7 + render_ms * 0.3
+                cache = self._frame_cache
+                # 填缝受缓存容量约束：窗口超出容量时，最老帧被逐出→
+                # 又变"缺失"→无限重渲同一窗口（2026-10 实测 130 次重复）。
+                ceiling_key = min(
+                    ceiling_key, floor_key + cache.capacity() - 1
+                )
+                free_slots = cache.capacity() - cache.size()
+                render_cap = 1 if cpu_mode else max(1, self._active_worker_count)
+                render_cap = max(min(render_cap, free_slots), 0)
+                batch: list[int] = []
+                key = floor_key
+                while key <= ceiling_key and len(batch) < render_cap:
+                    if not cache.contains_key(key):
+                        batch.append(cache.timestamp_for_key(key))
+                    key += 1
+                if batch and cpu_mode:
+                    for fill_t in batch:
+                        image = cpu_render(fill_t)
+                        if image is None:
+                            continue
+                        self._note("fallback_frames")
+                        self._cache_speculative(image, fill_t, generation)
+                    continue
+                if batch and self._active_worker_count > 1:
+                    try:
+                        self._render_pooled_batch(
+                            renderer,
+                            t_ms=batch[0],
+                            serial=serial,
+                            speculative=True,
+                            generation=generation,
+                            shm_key=shm_key,
+                            dpr=dpr,
+                            submitted_at=time.monotonic(),
+                            force_warp=force_warp,
+                            explicit_timestamps=batch,
                         )
-                    self._record_event_timing("render_ms", render_ms)
-                    rendered_queue.append((target_key, render_t))
-                    self._note("requests")
+                    except NativeQueueFullError:
+                        self._note("queue_full_backpressure")
+                        with self._condition:
+                            self._condition.wait(timeout=0.004)
+                    continue
+                if batch:
+                    # 单 worker（含 WARP）：单命令逐帧渲染入缓存，等价语义
+                    # 但少一半协议往返。
+                    for fill_t in batch:
+                        event = renderer.render_gpu_frame(
+                            fill_t,
+                            force_warp=force_warp,
+                            generation=generation,
+                            frame_index=self._frame_index,
+                            shm_key=shm_key,
+                            include_checksum=False,
+                            readback_bands=True,
+                            slot_count=1,
+                        )
+                        self._frame_index += 1
+                        render_ms = float(event.get("render_ms") or 0.0)
+                        if render_ms > 0.0:
+                            self._render_ms_ema = (
+                                render_ms
+                                if self._render_ms_ema <= 0.0
+                                else self._render_ms_ema * 0.7 + render_ms * 0.3
+                            )
+                        self._record_event_timing("render_ms", render_ms)
+                        event_key = str(event.get("shm_key") or "")
+                        if (
+                            self._reader is None
+                            or self._reader.shm_key != event_key
+                        ):
+                            if self._reader is not None:
+                                self._reader.close()
+                            self._reader = SharedFrameRingReader.from_event(event)
+                        image = self._reader.read_qimage(event)
+                        image.setDevicePixelRatio(dpr)
+                        self._cache_speculative(image, fill_t, generation)
                     continue
 
             # 3) 队列满/填到前沿：等到点或新事件（唤醒即重评）。
