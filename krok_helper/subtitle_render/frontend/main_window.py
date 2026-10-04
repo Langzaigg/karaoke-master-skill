@@ -6671,20 +6671,25 @@ class SubtitleRenderWindow(QWidget):
             self._gpu_preview_check.isChecked()
         )
 
-        # ④ 控制台提示
-        from krok_helper.subtitle_render.frontend.preview.preview_async import (
-            gpu_native_preview_enabled,
-        )
-        actual = gpu_native_preview_enabled()
-        renderer = getattr(self._preview_panel, "_async_renderer", None)
-        mode = "G6 DirectComposition 直画" if (
-            actual and renderer and getattr(renderer, "uses_native_preview", False)
-        ) else "G5 shared-memory/QImage"
-        print(
-            f"[GPU 直画] 开关={enabled} → 实际模式={mode} "
-            f"(env={_os.environ.get('KROK_SUBTITLE_GPU_NATIVE_PREVIEW', '未设')})",
-            flush=True,
-        )
+        # ④ 控制台提示（延迟一拍：渲染器刚重建，等下一个事件循环读最终态）
+        from PyQt6.QtCore import QTimer as _QTimer
+
+        def _report_mode():
+            from krok_helper.subtitle_render.frontend.preview.preview_async import (
+                gpu_native_preview_enabled,
+            )
+            actual = gpu_native_preview_enabled()
+            renderer = getattr(self._preview_panel, "_async_renderer", None)
+            native = bool(renderer and getattr(renderer, "uses_native_preview", False))
+            mode = "G6 DirectComposition 直画" if native else "G5 shared-memory/QImage"
+            print(
+                f"[GPU 直画] 开关={enabled} → 实际模式={mode} "
+                f"(env={_os.environ.get('KROK_SUBTITLE_GPU_NATIVE_PREVIEW', '未设')} "
+                f"偏好={actual})",
+                flush=True,
+            )
+
+        _QTimer.singleShot(100, _report_mode)
 
         self._save_persisted_state()
 
