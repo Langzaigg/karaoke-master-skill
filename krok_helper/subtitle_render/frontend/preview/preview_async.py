@@ -685,7 +685,6 @@ class GpuAsyncSubtitleRenderer(QObject):
         # 成功出帧即清零；连续达到阈值才降级/重启（2026-10 用户拍板）。
         self._consecutive_failure_limit = 5
         self._native_preview_failures = 0
-        self._g6_retry_after = 0.0
         self._worker_count_requested = _env_int(
             "KROK_SUBTITLE_GPU_WORKERS", 2, minimum=1
         )
@@ -1041,20 +1040,6 @@ class GpuAsyncSubtitleRenderer(QObject):
                             duration_ms,
                         )
                     continue
-                # G6 自动重试：降级满 60 秒后，下一次重启链拉起时
-                # 重新进入 G6 模式
-                if (
-                    not self._native_preview
-                    and getattr(self, "_g6_retry_after", 0) > 0
-                    and time.monotonic() >= self._g6_retry_after
-                ):
-                    self._native_preview = True
-                    self._native_preview_failures = 0
-                    self._g6_retry_after = 0
-                    print(
-                        "[GPU 预览] G6 自动重试：重新进入直画模式",
-                        flush=True,
-                    )
                 if self._renderer_failed:
                     if time.monotonic() < self._retry_after:
                         if not speculative:
@@ -1326,9 +1311,21 @@ class GpuAsyncSubtitleRenderer(QObject):
                                     flush=True,
                                 )
                             elif self._g6_present_count % 60 == 0:
+                                import subprocess as _sp
+                                try:
+                                    _r = _sp.run(
+                                        ["nvidia-smi",
+                                         "--query-gpu=memory.used,memory.total",
+                                         "--format=csv,noheader,nounits"],
+                                        capture_output=True, text=True,
+                                        timeout=2)
+                                    _vram = _r.stdout.strip().split(",")[0].strip()
+                                    _vram = f" 显存={_vram}MiB"
+                                except Exception:
+                                    _vram = ""
                                 print(
                                     f"[GPU 预览] G6 已直画 "
-                                    f"{self._g6_present_count} 帧",
+                                    f"{self._g6_present_count} 帧{_vram}",
                                     flush=True,
                                 )
                         else:
@@ -1407,16 +1404,12 @@ class GpuAsyncSubtitleRenderer(QObject):
                         self._native_preview_failures += 1
                         if (self._native_preview_failures
                                 >= self._consecutive_failure_limit):
-                            # 降级到 G5，但不是永久放弃：60 秒后自动重试 G6。
-                            # 「能播放说明显卡问题不大」——偶发 D2D 停顿
-                            # （10-60 秒）不应永久关闭 G6（实测 present
-                            # 0.59ms vs G5 55ms）。
+                            # 永久降级 G5（2026-10 用户拍板：连续失败
+                            # 5 次确实要永久降级，不自动重试）。
                             self._native_preview = False
-                            self._g6_retry_after = time.monotonic() + 60.0
                             print(
                                 f"[GPU 预览] G6 连续失败 "
-                                f"{self._native_preview_failures} 次，降级 G5，"
-                                f"60 秒后自动重试 G6",
+                                f"{self._native_preview_failures} 次，永久降级 G5",
                                 flush=True,
                             )
                             self._close_renderer()
