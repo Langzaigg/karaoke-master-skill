@@ -745,6 +745,7 @@ def prepare_app_preferences(
             preview_quality=output.preview_quality,
             gpu_export_enabled=output.gpu_export_enabled,
             gpu_export_default_version=output.gpu_export_default_version,
+            gpu_direct_present=output.gpu_direct_present,
             directory_mode=output.directory_mode,
             custom_directory=output.custom_directory,
             name_template=output.name_template,
