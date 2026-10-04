@@ -1262,9 +1262,10 @@ def test_gpu_async_renderer_frame_error_retries_once_before_restart(
 
         stats = renderer.stats_snapshot()
         assert attempts["render"] >= 2
-        assert stats["frame_error_retries"] == 1
+        # 连续失败阈值 5（2026-10）：前 4 次重试，第 5 次进重启链
+        assert stats["frame_error_retries"] == 4
         assert stats["renderer_failures"] == 1
-        assert "injected frame failure #2" in fallbacks[0]
+        assert "injected frame failure #5" in fallbacks[0]
     finally:
         renderer.stop()
 
@@ -1425,10 +1426,9 @@ def test_gpu_async_renderer_surfaces_changed_fallback_reason(qapp, monkeypatch):
             time.sleep(0.05)
 
         assert len(fallbacks) >= 2
-        # 2026-10 帧级错误重试：首个瞬时失败静默重试一次（不上报），首个
-        # 被上报的原因是第二次失败；其后原因变化仍必须再次上报。
-        assert "injected failure #1" in fallbacks[0]
-        assert any("injected failure #2" in message for message in fallbacks[1:])
+        # 连续失败阈值 5（2026-10）：前 5 次静默重试，首个上报是第 6 次
+        assert "injected failure #4" in fallbacks[0]
+        assert any("injected failure #5" in message for message in fallbacks[1:])
     finally:
         renderer.stop()
 
@@ -3054,9 +3054,10 @@ def test_preview_graphics_backend_label_follows_gpu_failure_and_recovery(
         def start(self):
             nonlocal start_attempts
             start_attempts += 1
-            if start_attempts <= 2:
-                # 前两次拉起失败（模拟 GPU 访问异常 / 显存爆）。第一次会被
-                # 帧级错误重试静默吸收，第二次进入失败链出 CPU 回退帧。
+            if start_attempts <= 5:
+                # 前五次拉起失败（模拟 GPU 访问异常 / 显存爆）。
+                # 连续失败阈值 5（2026-10）：前四次被帧级重试静默吸收，
+                # 第五次进入失败链出 CPU 回退帧 → 标签 CPU。
                 raise NativeRendererError("flaky sidecar first start fails")
             return {"ok": True, "event": "ready"}
 
@@ -3110,7 +3111,7 @@ def test_preview_graphics_backend_label_follows_gpu_failure_and_recovery(
             qapp.processEvents()
             time.sleep(0.01)
         assert graphics.render_backend_label() == "CPU"
-        assert start_attempts == 2
+        assert start_attempts == 5
 
         # 冷却结束后新请求 → 自动重试拉起 sidecar（这次成功）→ 标签 GPU。
         graphics._async_renderer._retry_after = 0.0
@@ -3120,7 +3121,7 @@ def test_preview_graphics_backend_label_follows_gpu_failure_and_recovery(
             qapp.processEvents()
             time.sleep(0.01)
         assert graphics.render_backend_label() == "GPU"
-        assert start_attempts == 3
+        assert start_attempts == 6
     finally:
         graphics.close()
         graphics.deleteLater()

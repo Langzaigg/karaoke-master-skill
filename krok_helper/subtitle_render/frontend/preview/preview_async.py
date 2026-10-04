@@ -674,6 +674,10 @@ class GpuAsyncSubtitleRenderer(QObject):
         self._native_preview = gpu_native_preview_enabled()
         # G6 连续失败计数：达到阈值后永久降级到 G5（本渲染器生命周期内），
         # 不再重试 G6（避免在不支持 DComp 的机器上无限重启循环）。
+        # G6/G5 共用的连续失败判定阈值：能出帧说明显卡在正常工作，
+        # 偶发超时（驱动电源切换/别的进程抢占）不应触发重启或降级。
+        # 成功出帧即清零；连续达到阈值才降级/重启（2026-10 用户拍板）。
+        self._consecutive_failure_limit = 5
         self._native_preview_failures = 0
         self._worker_count_requested = _env_int(
             "KROK_SUBTITLE_GPU_WORKERS", 2, minimum=1
@@ -1278,6 +1282,7 @@ class GpuAsyncSubtitleRenderer(QObject):
                         continue
                     completed_at = time.monotonic()
                     self._frame_error_streak = 0
+                    self._native_preview_failures = 0
                     self._record_timing("roundtrip_ms", (completed_at - work_started) * 1000.0)
                     self._adapt_pipeline_lookahead()
                     self._record_event_timing("render_ms", event.get("render_ms"))
@@ -1337,14 +1342,14 @@ class GpuAsyncSubtitleRenderer(QObject):
                         continue
                     if (
                         isinstance(exc, NativeRendererError)
-                        and self._frame_error_streak == 0
+                        and self._frame_error_streak + 1
+                        < self._consecutive_failure_limit
                     ):
-                        # 帧级错误（有界回读超时、瞬时设备停顿）先原样重试一次：
-                        # 直接杀进程重启会丢掉整个已配置场景，且 1s 退避窗口内
-                        # 每个请求都要 CPU 补一帧（重特效下 ~300ms/帧）。把本请求
-                        # 重新注回 pending（不覆盖更新的请求，保持 latest-wins），
-                        # 播放中即等于立即重试；连续第二次失败才走重启链。
-                        self._frame_error_streak = 1
+                        # 帧级错误（有界回读超时、瞬时设备停顿）：只要中间有
+                        # 成功出帧（streak 被清零），说明显卡在正常工作。
+                        # 原样重试（把请求注回 pending），连续达到 5 次才
+                        # 走重启链——直接杀进程会丢掉整个已配置场景。
+                        self._frame_error_streak += 1
                         self._note("frame_error_retries")
                         with self._condition:
                             # 本轮消费掉的 configure/resize 标志若未成功应用
@@ -1361,11 +1366,12 @@ class GpuAsyncSubtitleRenderer(QObject):
                     if not isinstance(exc, (NativeRendererError, RuntimeError)):
                         _log.exception("GPU 预览路径出现非预期异常")
                     if self._native_preview:
-                        # G6 present 失败：连续 2 次后永久降级 G5。
-                        # 「持续回退」——不是等 1s 再试 G6，而是本渲染器
-                        # 剩余生命周期内不再进入 G6 路径。
+                        # G6 present 失败：与 G5 同一判定口径——成功出帧
+                        # 即清零（见上方 streak=0 赋值处），连续 5 次才
+                        # 永久降级 G5。能播放说明显卡问题不大。
                         self._native_preview_failures += 1
-                        if self._native_preview_failures >= 2:
+                        if (self._native_preview_failures
+                                >= self._consecutive_failure_limit):
                             self._native_preview = False
                             self._close_renderer()
                             self._report_fallback(
