@@ -289,7 +289,9 @@ def test_gpu_g6_direct_composition_child_window_has_zero_readback(qapp, monkeypa
         except BaseException as exc:  # pragma: no cover - surfaced on the GUI thread
             failures.append(exc)
 
-    worker = threading.Thread(target=render, name="g6-native-preview-smoke")
+    worker = threading.Thread(
+        target=render, name="g6-native-preview-smoke", daemon=True
+    )
     worker.start()
     deadline = time.monotonic() + 30.0
     while not presented.is_set() and worker.is_alive() and time.monotonic() < deadline:
@@ -314,10 +316,32 @@ def test_gpu_g6_direct_composition_child_window_has_zero_readback(qapp, monkeypa
     WM_LBUTTONDOWN = 0x0201
     MK_LBUTTON = 0x0001
     # 子窗口在父客户区 (16,8) 起；RecordingWidget 中心 (160, 90) →
-    # 子窗口客户坐标 (144, 82)。
-    user32.SendMessageW(child_hwnd, WM_MOUSEMOVE, 0, (82 << 16) | 144)
-    user32.SendMessageW(child_hwnd, WM_LBUTTONDOWN, MK_LBUTTON, (82 << 16) | 144)
-    qapp.processEvents()
+    # 子窗口客户坐标 (144, 82)。跨进程 SendMessage 需要目标线程泵消息
+    # （worker 心跳驱动），从辅助线程发送并限时等待，主线程持续泵事件。
+    send_done = threading.Event()
+
+    def send_input() -> None:
+        lp = (82 << 16) | 144
+        user32.SendMessageW(child_hwnd, WM_MOUSEMOVE, 0, lp)
+        user32.SendMessageW(child_hwnd, WM_LBUTTONDOWN, MK_LBUTTON, lp)
+        send_done.set()
+
+    sender = threading.Thread(target=send_input, daemon=True)
+    sender.start()
+    send_deadline = time.monotonic() + 5.0
+    while not send_done.is_set() and time.monotonic() < send_deadline:
+        qapp.processEvents()
+        time.sleep(0.005)
+    assert send_done.is_set(), "跨进程 SendMessage 应在心跳泵周期内送达"
+    # 转发是 PostMessage：送进父窗口队列后要若干事件循环周期落定
+    # （move/press 两条的到达时机略有先后），有界轮询等待。
+    settle_deadline = time.monotonic() + 2.0
+    while (
+        not (recording.moves and recording.presses)
+        and time.monotonic() < settle_deadline
+    ):
+        qapp.processEvents()
+        time.sleep(0.02)
     assert recording.moves, "子窗口必须把 mouse move 转发给父窗口"
     assert recording.presses, "子窗口必须把点击转发给父窗口"
     assert result["pumped"]["event"] == "native_preview_pumped"
@@ -330,7 +354,13 @@ def test_gpu_g6_direct_composition_child_window_has_zero_readback(qapp, monkeypa
     parent.deleteLater()
     qapp.processEvents()
 
-    assert not worker.is_alive()
+    close_deadline = time.monotonic() + 10.0
+    while worker.is_alive() and time.monotonic() < close_deadline:
+        time.sleep(0.01)
+    # sidecar 走「先应答 shutdown 再自行退出」的优雅关闭链路（防共享内存
+    # 系统信号量死锁，见 backend._await_exit），合法耗时可达数秒——只要求
+    # 在时限内退出，不做即时断言。
+    assert not worker.is_alive(), "worker 应在优雅关闭时限内退出"
     assert failures == []
     assert result["configured"]["native_preview"] is True
     assert result["event"]["event"] == "gpu_frame_presented"

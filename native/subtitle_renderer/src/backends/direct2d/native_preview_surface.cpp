@@ -156,11 +156,12 @@ void NativePreviewSurface::ensureWindow(const NativePreviewTarget &target) {
         // 但 BitBlt/PrintWindow 等截图 API 依赖重定向表面——没有它 PrtScn
         // 和第三方截图工具会失效甚至卡死（2026-10 用户实测）。DComp 直画
         // 不需要此标志；保留重定向表面的 ~15MB 开销换截图兼容性。
-        // 不用 WS_EX_NOACTIVATE 以外的扩展样式参与输入：穿透靠窗口过程
-        // 转发（见 previewWindowProc），WS_EX_TRANSPARENT 无 WS_EX_LAYERED
-        // 配合时对命中测试无效、只会误导（DComp 目标窗口不支持 layered）。
+        // WS_EX_TRANSPARENT（非 layered 时仅影响绘制序/合成路径，不参与
+        // 命中测试——穿透靠窗口过程转发）：2026-10 实测缺少它时，父窗口里
+        // Qt Multimedia 的视频呈现层会被 DWM 长时间冻结（解码照常出帧但
+        // 屏幕不更新，A/B 复现 G5 9/10 vs G6 4/10）。
         window_ = CreateWindowExW(
-            WS_EX_NOACTIVATE,
+            WS_EX_NOACTIVATE | WS_EX_TRANSPARENT,
             kWindowClassName,
             L"",
             WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS,

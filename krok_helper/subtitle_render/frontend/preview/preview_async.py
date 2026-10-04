@@ -710,14 +710,19 @@ class GpuAsyncSubtitleRenderer(QObject):
         # hover/点击。
         self._NATIVE_IDLE_PUMP_S = 0.03
         # 同键去重 + 时延感知投喂（2026-10 用户提议的追帧/降无效帧方案）。
+        # _render_ms_ema 服务 GPU 直渲/读回路径；CPU 回退帧量级差一个数量
+        # 级，单独一条 EMA。
         self._native_last_presented: Optional[tuple[int, int]] = None
-        self._native_render_ms_ema = 0.0
+        self._render_ms_ema = 0.0
+        self._cpu_render_ms_ema = 0.0
         self._native_project_ahead = _env_enabled(
             "KROK_SUBTITLE_G6_PROJECT_AHEAD", "1"
         )
         self._lookahead_frames = _env_int(
             "KROK_SUBTITLE_GPU_LOOKAHEAD_FRAMES", 12, minimum=0
         )
+        # 热切换（set_native_mode）G6→G5 时恢复的配置值。
+        self._configured_lookahead_frames = self._lookahead_frames
         if self._native_preview:
             self._lookahead_frames = 0
         self._max_lookahead_frames = max(
@@ -782,6 +787,7 @@ class GpuAsyncSubtitleRenderer(QObject):
             "native_preview_closed": 0,
             "native_redundant_frames_skipped": 0,
             "native_idle_pumps": 0,
+            "native_mode_switches": 0,
         }
         self._timings: dict[str, deque[float]] = {
             "render_ms": deque(maxlen=4096),
@@ -868,6 +874,38 @@ class GpuAsyncSubtitleRenderer(QObject):
         """DComp 子窗口目标是否已建立（预览画布可见且有几何）。"""
         with self._condition:
             return self._native_target is not None
+
+    def set_native_mode(self, enabled: bool) -> bool:
+        """G6↔G5 热切换：同一 sidecar 内翻转直画/读回，不重建进程与场景。
+
+        每次切换都杀进程重建会把重特效场景的 configure 成本（秒级）全部
+        重付一遍，用户观感就是「多切几次后越来越慢」（2026-10 泄漏探针
+        显示进程/显存本就干净，变慢的根源是冷启动）。返回 False 表示无
+        变化，调用方走完整重建路径。
+        """
+        with self._condition:
+            if self._stopped or bool(enabled) == self._native_preview:
+                return False
+            self._native_preview = bool(enabled)
+            self._note("native_mode_switches")
+            if enabled:
+                # G5→G6：直画模式不用投机缓存（pending 跟随请求戳 + 投喂
+                # 前移），lookahead 冻结为 0。
+                self._lookahead_frames = 0
+            else:
+                # G6→G5：撤掉 DComp 子窗口（close 哨兵），恢复投机前瞻。
+                self._native_target = None
+                self._native_close_requested = self._native_child_open
+                self._lookahead_frames = self._configured_lookahead_frames
+            self._effective_lookahead_frames = self._lookahead_frames
+            with self._stats_lock:
+                self._stats["pipeline_lead_frames"] = (
+                    self._effective_lookahead_frames
+                )
+            self._pending = None
+            self._frame_cache.clear()
+            self._condition.notify_all()
+        return True
 
     def set_native_target(
         self,
@@ -1437,6 +1475,10 @@ class GpuAsyncSubtitleRenderer(QObject):
                         if self._may_emit(t_ms, generation):
                             self._note("frames_emitted")
                             self.frame_presented.emit(int(t_ms))
+                            # G6 出帧同样要翻转实际后端指示（GPU渲染中/
+                            # CPU渲染中标签跟随真实出帧状态；此前只在 G5
+                            # 缓存命中路径标记，G6 下标签永不更新）。
+                            self._note_backend_mode("gpu")
                             self._g6_present_count += 1
                             if self._g6_present_count == 1:
                                 print(
@@ -1719,8 +1761,29 @@ class GpuAsyncSubtitleRenderer(QObject):
             # 进程随子窗口一起销毁；新进程的渲染耗时基准也重新采样。
             self._native_child_open = False
             self._native_last_presented = None
-            self._native_render_ms_ema = 0.0
+            self._render_ms_ema = 0.0
         self._renderer_owner.close()
+
+    def _project_playback_timestamp(
+        self, t_ms: int, submitted_at: float, ema_ms: float
+    ) -> int:
+        """播放态把渲染目标戳前移到预计完成时刻（2026-10 用户提议的追帧）。
+
+        目标帧率**永远是项目帧率**（一般 60）：这里不做任何限速，只在吞吐
+        暂时跟不上时，按「拾取年龄 + 渲染耗时 EMA」让每一帧落地即当前
+        （当前 22fps 就按 22fps 出有效帧），渲染变快 EMA 回落、投喂自动
+        回到逐帧节奏。上限 3 个帧键（≈50ms@60fps）防 EMA 尖峰过冲。
+        暂停态禁止前移——GUI 侧要求精确匹配当前请求戳。
+        """
+        if not self._playing or not self._native_project_ahead:
+            return int(t_ms)
+        age_ms = max(0.0, (time.monotonic() - float(submitted_at)) * 1000.0)
+        ahead_ms = min(age_ms + float(ema_ms or 0.0), 3.0 * 1000.0 / 60.0)
+        if ahead_ms < 1.0:
+            return int(t_ms)
+        projected_key = self._frame_cache.key_for(int(t_ms) + int(ahead_ms))
+        key = max(self._frame_cache.key_for(int(t_ms)), projected_key)
+        return self._frame_cache.timestamp_for_key(key)
 
     def _native_render_timestamp(
         self,
@@ -1730,11 +1793,8 @@ class GpuAsyncSubtitleRenderer(QObject):
     ) -> Optional[int]:
         """决定本周期直画的时间戳；与已上屏帧同键时返回 ``None``（跳过）。
 
-        播放态做**时延感知投喂**（2026-10 用户提议的追帧方案）：按
-        「拾取年龄 + EMA 渲染耗时」把目标戳前移到预计完成时刻，帧落地即
-        当前，把迟到压到≈0；上限 3 个帧键，防 EMA 尖峰过冲。实际吞吐
-        （22FPS 就按 22FPS 的节奏出帧）由同键去重天然保证——只有新帧键
-        才值得渲。
+        同键去重保证实际吞吐自适应：只有新帧键才值得渲（媒体时钟在帧键
+        内抖动的重复请求直接跳过，见 stats native_redundant_frames_skipped）。
         """
         key = self._frame_cache.key_for(int(t_ms))
         if content_changed:
@@ -1743,13 +1803,9 @@ class GpuAsyncSubtitleRenderer(QObject):
             last = self._native_last_presented
             if last is not None and last[0] == self._generation and last[1] == key:
                 return None
-        if self._playing and self._native_project_ahead:
-            age_ms = max(0.0, (time.monotonic() - float(submitted_at)) * 1000.0)
-            ahead_ms = min(age_ms + self._native_render_ms_ema, 3.0 * 1000.0 / 60.0)
-            if ahead_ms >= 1.0:
-                projected_key = self._frame_cache.key_for(int(t_ms) + int(ahead_ms))
-                key = max(key, projected_key)
-        return self._frame_cache.timestamp_for_key(key)
+        return self._project_playback_timestamp(
+            t_ms, submitted_at, self._render_ms_ema
+        )
 
     def _native_note_presented(
         self, generation: int, t_ms: int, event: dict
@@ -1761,10 +1817,10 @@ class GpuAsyncSubtitleRenderer(QObject):
             )
         render_ms = float(event.get("render_ms") or 0.0)
         if render_ms > 0.0:
-            self._native_render_ms_ema = (
+            self._render_ms_ema = (
                 render_ms
-                if self._native_render_ms_ema <= 0.0
-                else self._native_render_ms_ema * 0.7 + render_ms * 0.3
+                if self._render_ms_ema <= 0.0
+                else self._render_ms_ema * 0.7 + render_ms * 0.3
             )
 
     def _may_emit(self, t_ms: int, generation: int) -> bool:

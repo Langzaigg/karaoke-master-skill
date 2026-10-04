@@ -6661,13 +6661,14 @@ class SubtitleRenderWindow(QWidget):
         if enabled and not self._gpu_preview_check.isChecked():
             self._gpu_preview_check.setChecked(True)
 
-        # ③ 强制重建渲染器：GPU 预览可能本来就已开启（类没变），
-        #    set_gpu_preview_enabled 会提前返回不重建 → G6 模式
-        #    永远不生效。先停再启，确保按新的 env 重建。
-        self._preview_panel.set_gpu_preview_enabled(False)
-        self._preview_panel.set_gpu_preview_enabled(
-            self._gpu_preview_check.isChecked()
-        )
+        # ③ 优先热切换：G5↔G6 共用同一 sidecar，翻转直画/读回即可，
+        #    不必杀进程重建（重特效场景 configure 秒级成本会让「多切几次
+        #    越来越慢」）。只有 Painter↔GPU 之间才需要完整重建。
+        if not self._preview_panel.set_native_preview_mode(enabled):
+            self._preview_panel.set_gpu_preview_enabled(False)
+            self._preview_panel.set_gpu_preview_enabled(
+                self._gpu_preview_check.isChecked()
+            )
 
         # ④ 控制台提示（延迟一拍：渲染器刚重建，等下一个事件循环读最终态）
         from PyQt6.QtCore import QTimer as _QTimer

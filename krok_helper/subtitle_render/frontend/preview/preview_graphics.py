@@ -483,6 +483,17 @@ class PreviewGraphicsView(QGraphicsView):
         self._subtitle_item.clear_async_image()
         self._refresh_async_state()
 
+    def set_native_preview_mode(self, enabled: bool) -> bool:
+        """G6↔G5 热切换（不重建渲染器/sidecar）。返回 False 走完整重建。"""
+        renderer = self._async_renderer
+        if not isinstance(renderer, GpuAsyncSubtitleRenderer):
+            return False
+        if not renderer.set_native_mode(enabled):
+            return False
+        # 渲染目标口径随模式变化（G6 用未钳制的屏幕物理口径）。
+        self._refresh_async_target()
+        return True
+
     def set_gpu_preview_enabled(self, enabled: bool) -> None:
         """Switch the subtitle worker between GPU and Painter at runtime."""
         target_cls = GpuAsyncSubtitleRenderer if enabled else AsyncSubtitleRenderer

@@ -541,7 +541,11 @@ class PreviewPlayerWindow(QWidget):
         if self._collapsed:
             self._top_controls.show()
             return
-        self.hide_controls(force=False)
+        # 空闲即隐藏，不再因「光标停在窗口内」（underMouse）而续期：
+        # G6 直画的输入转发修复后，光标悬停在视频上也持续有 mouse move
+        # 事件到达，underMouse 恒真会导致控件永不自动隐藏（2026-10 用户
+        # 实测）。任何移动都会经 eventFilter → show_controls 重新唤出。
+        self.hide_controls(force=True)
 
     def hide_controls(self, *, force: bool = False) -> None:
         if self._collapsed:

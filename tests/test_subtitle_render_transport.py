@@ -1609,6 +1609,122 @@ def test_gpu_native_preview_idle_pumps_while_paused(qapp, monkeypatch):
         renderer.stop()
 
 
+def test_gpu_native_mode_hot_switch_keeps_sidecar_and_flips_transport(qapp, monkeypatch):
+    """G6↔G5 热切换：同一 sidecar 内翻转直画/读回，进程不重建。
+
+    每次切换杀进程重建会重付重特效场景的秒级 configure 成本（用户观感
+    「多切几次越来越慢」的热切换根因——泄漏探针显示进程/显存本就干净）。
+    """
+    from PyQt6.QtGui import QImage
+
+    from krok_helper.subtitle_render.frontend.preview import preview_async as pa
+    from krok_helper.subtitle_render.domain.models import Style, TimingTrack
+
+    present_calls: list[int] = []
+    render_calls: list[int] = []
+    close_process_calls: list[str] = []
+    step = threading.Event()
+
+    class FakeReader:
+        @classmethod
+        def from_event(cls, event):
+            return cls()
+
+        def read_qimage(self, event):
+            return QImage(4, 4, QImage.Format.Format_ARGB32_Premultiplied)
+
+        @property
+        def shm_key(self):
+            return "fake"
+
+        def close(self):
+            pass
+
+    class FakeGpuProcess:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def start(self):
+            return {"ok": True, "event": "ready", "native_preview_protocol": 1}
+
+        def configure_gpu(self, *args, **kwargs):
+            return {"ok": True, "event": "gpu_configured", "native_preview": True}
+
+        def present_gpu_frame(self, t_ms, **kwargs):
+            present_calls.append(int(t_ms))
+            step.set()
+            return {
+                "ok": True,
+                "event": "gpu_frame_presented",
+                "t_ms": int(t_ms),
+                "render_ms": 5.0,
+                "present_ms": 0.2,
+                "readback_ms": 0.0,
+                "transport": "direct_composition",
+            }
+
+        def render_gpu_frame(self, t_ms, **kwargs):
+            render_calls.append(int(t_ms))
+            step.set()
+            return {
+                "ok": True,
+                "event": "gpu_frame_rendered",
+                "t_ms": int(t_ms),
+                "render_ms": 5.0,
+                "readback_ms": 1.0,
+                "shm_key": "fake",
+                "readback_bands": [],
+            }
+
+        def close_gpu_preview(self, **kwargs):
+            close_process_calls.append("gpu_preview")
+            return {"ok": True, "event": "gpu_preview_closed"}
+
+        def close(self):
+            close_process_calls.append("process")
+
+    monkeypatch.setattr(pa, "gpu_native_preview_enabled", lambda: True)
+    monkeypatch.setattr(pa, "NativeRendererProcess", FakeGpuProcess)
+    monkeypatch.setattr(pa, "SharedFrameRingReader", FakeReader)
+    renderer = pa.GpuAsyncSubtitleRenderer(320, 180)
+    try:
+        assert renderer.uses_native_preview is True
+        renderer.set_native_target(12345, 0, 0, 320, 180)
+        renderer.set_state(TimingTrack(), Style())
+        renderer.request(1_000)
+        assert step.wait(timeout=2.0)
+        step.clear()
+        deadline = time.monotonic() + 2.0
+        while len(present_calls) < 1 and time.monotonic() < deadline:
+            qapp.processEvents()
+            time.sleep(0.01)
+        assert present_calls, "G6 模式应走 present 直画"
+
+        # 热切 G5：进程保留，读回路径接管
+        assert renderer.set_native_mode(False) is True
+        assert renderer.uses_native_preview is False
+        renderer.request(2_000)
+        deadline = time.monotonic() + 2.0
+        while len(render_calls) < 1 and time.monotonic() < deadline:
+            qapp.processEvents()
+            time.sleep(0.01)
+        assert render_calls, "热切 G5 后应走 render_gpu_frame 读回"
+
+        # 热切回 G6：直画恢复，进程仍未重建
+        assert renderer.set_native_mode(True) is True
+        renderer.set_native_target(12345, 0, 0, 320, 180)
+        renderer.request(3_000)
+        deadline = time.monotonic() + 2.0
+        while len(present_calls) < 2 and time.monotonic() < deadline:
+            qapp.processEvents()
+            time.sleep(0.01)
+        assert len(present_calls) == 2, "热切回 G6 后应恢复 present"
+        assert "process" not in close_process_calls, "热切换不得杀进程"
+        assert renderer.stats_snapshot()["native_mode_switches"] == 2
+    finally:
+        renderer.stop()
+
+
 def test_finish_render_gpu_frame_raises_typed_queue_full_error():
     """gpu_queue_full 是流控信号：必须抛 NativeQueueFullError 而不是裸错误。
 
