@@ -77,8 +77,12 @@ void NativePreviewSurface::ensureWindow(const NativePreviewTarget &target) {
     }
     if (window_ == nullptr) {
         ensureWindowClass();
+        // 不用 WS_EX_NOREDIRECTIONBITMAP：它省掉一张重定向表面（省显存），
+        // 但 BitBlt/PrintWindow 等截图 API 依赖重定向表面——没有它 PrtScn
+        // 和第三方截图工具会失效甚至卡死（2026-10 用户实测）。DComp 直画
+        // 不需要此标志；保留重定向表面的 ~15MB 开销换截图兼容性。
         window_ = CreateWindowExW(
-            WS_EX_NOACTIVATE | WS_EX_TRANSPARENT | WS_EX_NOREDIRECTIONBITMAP,
+            WS_EX_NOACTIVATE | WS_EX_TRANSPARENT,
             kWindowClassName,
             L"",
             WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS,
