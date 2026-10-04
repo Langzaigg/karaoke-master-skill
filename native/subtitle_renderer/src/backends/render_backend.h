@@ -17,6 +17,8 @@ public:
         const NativePreviewTarget &target
     ) = 0;
     virtual void closeNativePreview() = 0;
+    // 空闲心跳：只派发 DComp 子窗口积压的鼠标转发消息。
+    virtual void pumpNativePreviewMessages() {}
 };
 
 }  // namespace krok::subtitle::native

@@ -1,5 +1,6 @@
 #include "gpu_lifecycle_commands.h"
 
+
 #include "../backends/qt/qt_render_cache.h"
 #include "../backends/render_backend.h"
 #include "../backends/qt/gpu_scene_projection.h"
@@ -330,6 +331,29 @@ QJsonObject handleCloseGpuPreview(
     }
     backend->closeNativePreview();
     return response(true, QStringLiteral("gpu_preview_closed"));
+}
+
+QJsonObject handlePumpNativePreview(
+    const QJsonObject &request,
+    RenderRuntime *runtime
+) {
+    // force_warp 必须与 configure/present 同源：ensureGpuBackend 按 warp
+    // 标志选后端，标志错了会新建另一个（空 surface 的）后端，泵不到真正
+    // 持有 DComp 子窗口的那个（2026-10 冒烟实测主线程卡死在 SendMessage）。
+    const bool forceWarp = request.value(QStringLiteral("force_warp")).toBool(false);
+    if (!gpuConfigured(runtime, forceWarp)) {
+        // 未配置 GPU = 没有 DComp 子窗口，无需泵。
+        return response(true, QStringLiteral("native_preview_pumped"));
+    }
+    QString error;
+    auto *backend = ensureGpuBackend(runtime, forceWarp, &error);
+    if (backend == nullptr) {
+        QJsonObject out = response(false, QStringLiteral("pump_native_preview"));
+        out.insert(QStringLiteral("error"), error);
+        return out;
+    }
+    backend->pumpNativePreviewMessages();
+    return response(true, QStringLiteral("native_preview_pumped"));
 }
 
 }  // namespace krok::subtitle::native::commands

@@ -1426,6 +1426,189 @@ def test_gpu_native_preview_closes_child_window_when_target_cleared(qapp, monkey
         renderer.stop()
 
 
+def test_gpu_native_preview_skips_redundant_same_key_frames(qapp, monkeypatch):
+    """G6 同键去重：暂停态重复请求同一帧键不重渲（无效帧），但 delivery 照常闭合。"""
+    from krok_helper.subtitle_render.frontend.preview import preview_async as pa
+    from krok_helper.subtitle_render.domain.models import Style, TimingTrack
+
+    presented: list[int] = []
+    emitted: list[int] = []
+    first_present = threading.Event()
+
+    class FakeGpuProcess:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def start(self):
+            return {"ok": True, "event": "ready", "native_preview_protocol": 1}
+
+        def configure_gpu(self, *args, **kwargs):
+            return {"ok": True, "event": "gpu_configured", "native_preview": True}
+
+        def present_gpu_frame(self, t_ms, **kwargs):
+            presented.append(int(t_ms))
+            if not presented[:-1]:
+                first_present.set()
+            return {
+                "ok": True,
+                "event": "gpu_frame_presented",
+                "t_ms": int(t_ms),
+                "render_ms": 5.0,
+                "present_ms": 0.2,
+                "readback_ms": 0.0,
+                "transport": "direct_composition",
+            }
+
+        def render_gpu_frame(self, *args, **kwargs):
+            raise AssertionError("G6 native preview must not use shared-memory readback")
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(pa, "gpu_native_preview_enabled", lambda: True)
+    monkeypatch.setattr(pa, "NativeRendererProcess", FakeGpuProcess)
+    renderer = pa.GpuAsyncSubtitleRenderer(320, 180)
+    renderer.frame_presented.connect(emitted.append)
+    try:
+        renderer.set_native_target(12345, 0, 0, 320, 180)
+        renderer.set_state(TimingTrack(), Style())
+        renderer.request(1_000)
+        assert first_present.wait(timeout=2.0)
+        qapp.processEvents()
+        time.sleep(0.05)
+        qapp.processEvents()
+        renderer.request(1_000)  # 同一帧键：去重
+        deadline = time.monotonic() + 2.0
+        while len(emitted) < 2 and time.monotonic() < deadline:
+            qapp.processEvents()
+            time.sleep(0.01)
+        assert len(presented) == 1  # GPU 只渲染了一次
+        assert len(emitted) == 2  # 两次请求都闭合了 delivery
+        assert renderer.stats_snapshot()["native_redundant_frames_skipped"] >= 1
+    finally:
+        renderer.stop()
+
+
+def test_gpu_native_preview_projects_ahead_by_render_latency(qapp, monkeypatch):
+    """播放态时延感知投喂：渲染耗时 EMA 生效后，直画目标戳前移（追帧）。"""
+    from krok_helper.subtitle_render.frontend.preview import preview_async as pa
+    from krok_helper.subtitle_render.domain.models import Style, TimingTrack
+
+    presented: list[tuple[int, int]] = []  # (requested, presented)
+    made = threading.Event()
+
+    class FakeGpuProcess:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def start(self):
+            return {"ok": True, "event": "ready", "native_preview_protocol": 1}
+
+        def configure_gpu(self, *args, **kwargs):
+            return {"ok": True, "event": "gpu_configured", "native_preview": True}
+
+        def present_gpu_frame(self, t_ms, **kwargs):
+            presented.append((int(kwargs.get("generation", 0)), int(t_ms)))
+            made.set()
+            return {
+                "ok": True,
+                "event": "gpu_frame_presented",
+                "t_ms": int(t_ms),
+                "render_ms": 40.0,
+                "present_ms": 0.2,
+                "readback_ms": 0.0,
+                "transport": "direct_composition",
+            }
+
+        def render_gpu_frame(self, *args, **kwargs):
+            raise AssertionError("G6 native preview must not use shared-memory readback")
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(pa, "gpu_native_preview_enabled", lambda: True)
+    monkeypatch.setattr(pa, "NativeRendererProcess", FakeGpuProcess)
+    renderer = pa.GpuAsyncSubtitleRenderer(320, 180)
+    try:
+        renderer.set_native_target(12345, 0, 0, 320, 180)
+        renderer.set_state(TimingTrack(), Style())
+        renderer.set_playing(True)
+        requests = [1_000, 2_000, 3_000, 4_000]
+        for i, t in enumerate(requests):
+            renderer.request(t)
+            if i == 0:
+                assert made.wait(timeout=2.0)
+                made.clear()
+            time.sleep(0.02)
+            qapp.processEvents()
+        deadline = time.monotonic() + 2.0
+        while len(presented) < 3 and time.monotonic() < deadline:
+            qapp.processEvents()
+            time.sleep(0.01)
+        # 首帧 EMA 未建立（0）→ 前移≈0；此后 EMA=40ms ≥2 个帧键 → 目标戳前移。
+        # 断言末次请求（4000ms）的直画戳明显前移（>8ms，即至少越过半个帧键）。
+        assert any(presented_t > 4_008 for _, presented_t in presented)
+    finally:
+        renderer.stop()
+
+
+def test_gpu_native_preview_idle_pumps_while_paused(qapp, monkeypatch):
+    """空闲心跳：暂停/无 present 时周期泵 sidecar 消息队列（投递鼠标转发消息）。"""
+    from krok_helper.subtitle_render.frontend.preview import preview_async as pa
+    from krok_helper.subtitle_render.domain.models import Style, TimingTrack
+
+    pumps: list[float] = []
+    first_present = threading.Event()
+
+    class FakeGpuProcess:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def start(self):
+            return {"ok": True, "event": "ready", "native_preview_protocol": 1}
+
+        def configure_gpu(self, *args, **kwargs):
+            return {"ok": True, "event": "gpu_configured", "native_preview": True}
+
+        def present_gpu_frame(self, t_ms, **kwargs):
+            first_present.set()
+            return {
+                "ok": True,
+                "event": "gpu_frame_presented",
+                "t_ms": int(t_ms),
+                "render_ms": 5.0,
+                "present_ms": 0.2,
+                "readback_ms": 0.0,
+                "transport": "direct_composition",
+            }
+
+        def pump_native_preview(self, **kwargs):
+            pumps.append(time.monotonic())
+
+        def render_gpu_frame(self, *args, **kwargs):
+            raise AssertionError("G6 native preview must not use shared-memory readback")
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(pa, "gpu_native_preview_enabled", lambda: True)
+    monkeypatch.setattr(pa, "NativeRendererProcess", FakeGpuProcess)
+    renderer = pa.GpuAsyncSubtitleRenderer(320, 180)
+    try:
+        renderer.set_native_target(12345, 0, 0, 320, 180)
+        renderer.set_state(TimingTrack(), Style())
+        renderer.request(1_000)
+        assert first_present.wait(timeout=2.0)
+        deadline = time.monotonic() + 1.5
+        while len(pumps) < 3 and time.monotonic() < deadline:
+            qapp.processEvents()
+            time.sleep(0.01)
+        assert len(pumps) >= 3  # ~30ms 间隔的空闲心跳
+        assert renderer.stats_snapshot()["native_idle_pumps"] >= 3
+    finally:
+        renderer.stop()
+
+
 def test_finish_render_gpu_frame_raises_typed_queue_full_error():
     """gpu_queue_full 是流控信号：必须抛 NativeQueueFullError 而不是裸错误。
 

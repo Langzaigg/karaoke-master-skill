@@ -47,4 +47,11 @@ QJsonObject handleCloseGpuPreview(
     runtime::RenderRuntime *runtime
 );
 
+// 泵 sidecar 线程的窗口消息队列：DComp 子窗口的鼠标转发消息在暂停/空闲
+// （无 present）时积压，由 Python worker 的空闲心跳驱动本命令周期投递。
+QJsonObject handlePumpNativePreview(
+    const QJsonObject &request,
+    runtime::RenderRuntime *runtime
+);
+
 }  // namespace krok::subtitle::native::commands

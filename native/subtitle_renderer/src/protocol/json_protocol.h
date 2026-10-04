@@ -25,6 +25,7 @@ enum class Command {
     GpuPresentFrame,
     GpuPreviewClose,
     GpuDiagnostics,
+    PumpNativePreview,
     Configure,
     RenderFrame,
     RenderFrameStats,

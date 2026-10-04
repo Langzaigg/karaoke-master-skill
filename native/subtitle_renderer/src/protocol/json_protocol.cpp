@@ -36,6 +36,9 @@ Command commandFromName(const QString &name) {
     if (name == QStringLiteral("gpu_diagnostics")) {
         return Command::GpuDiagnostics;
     }
+    if (name == QStringLiteral("pump_native_preview")) {
+        return Command::PumpNativePreview;
+    }
     if (name == QStringLiteral("configure")) {
         return Command::Configure;
     }

@@ -1216,6 +1216,15 @@ class NativeRendererProcess:
         self._send({"cmd": "gpu_preview_close", "force_warp": bool(force_warp)})
         return self._expect_ok(self._read_response())
 
+    def pump_native_preview(self, *, force_warp: bool = False) -> dict[str, Any]:
+        """Pump the sidecar's window message queue (deliver forwarded mouse input).
+
+        DComp 子窗口的鼠标转发消息在暂停/空闲（无 present）时积压在
+        sidecar 线程队列里；worker 空闲心跳周期性调用本命令把它投递出去。
+        """
+        self._send({"cmd": "pump_native_preview", "force_warp": bool(force_warp)})
+        return self._expect_ok(self._read_response())
+
     def gpu_diagnostics(self, *, force_warp: bool = False) -> dict[str, Any]:
         """Read cache and DXGI memory counters without entering the frame hot path."""
         self._send({"cmd": "gpu_diagnostics", "force_warp": bool(force_warp)})

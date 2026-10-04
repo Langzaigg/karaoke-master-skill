@@ -705,6 +705,16 @@ class GpuAsyncSubtitleRenderer(QObject):
         # worker 会通过 close 哨兵主动撤掉，避免隐藏视图后残留画面。
         self._native_child_open = False
         self._native_close_requested = False
+        # G6 空闲心跳间隔：暂停/空闲下没有 present 顺带泵消息，子窗口积压
+        # 的鼠标转发消息（→父窗口→Qt 控件）靠它周期投递，悬浮控件才有
+        # hover/点击。
+        self._NATIVE_IDLE_PUMP_S = 0.03
+        # 同键去重 + 时延感知投喂（2026-10 用户提议的追帧/降无效帧方案）。
+        self._native_last_presented: Optional[tuple[int, int]] = None
+        self._native_render_ms_ema = 0.0
+        self._native_project_ahead = _env_enabled(
+            "KROK_SUBTITLE_G6_PROJECT_AHEAD", "1"
+        )
         self._lookahead_frames = _env_int(
             "KROK_SUBTITLE_GPU_LOOKAHEAD_FRAMES", 12, minimum=0
         )
@@ -770,6 +780,8 @@ class GpuAsyncSubtitleRenderer(QObject):
             "style_patches": 0,
             "style_patch_fallbacks": 0,
             "native_preview_closed": 0,
+            "native_redundant_frames_skipped": 0,
+            "native_idle_pumps": 0,
         }
         self._timings: dict[str, deque[float]] = {
             "render_ms": deque(maxlen=4096),
@@ -1002,18 +1014,28 @@ class GpuAsyncSubtitleRenderer(QObject):
 
     def _take_next_request(self):
         with self._condition:
-            while (
-                not self._stopped
-                and self._pending is None
-                and not (self._native_close_requested and self._native_child_open)
-            ):
+            while True:
+                if self._stopped:
+                    return None
+                if self._pending is not None:
+                    break
+                if self._native_close_requested and self._native_child_open:
+                    # 只为关闭 DComp 子窗口醒来（视图隐藏，见 clear_native_target）。
+                    self._native_close_requested = False
+                    return "__close_native__"
+                if self._native_preview and self._native_child_open:
+                    # 子窗口在位但无事可做（暂停/空闲）：限时等待，超时让
+                    # _run 泵一次 sidecar 消息队列——DComp 子窗口的鼠标转发
+                    # 消息积压在 sidecar 线程里，没有 present 就没人投递，
+                    # 悬浮控件的 hover/点击会失效。
+                    self._condition.wait(timeout=self._NATIVE_IDLE_PUMP_S)
+                    if (
+                        self._pending is not None
+                        or (self._native_close_requested and self._native_child_open)
+                    ):
+                        continue
+                    return "__pump_native__"
                 self._condition.wait()
-            if self._stopped:
-                return None
-            if self._pending is None:
-                # 只为关闭 DComp 子窗口醒来（视图隐藏，见 clear_native_target）。
-                self._native_close_requested = False
-                return "__close_native__"
             t_ms, serial, speculative, submitted_at = self._pending
             self._pending = None
             needs_configure = self._needs_configure
@@ -1061,6 +1083,18 @@ class GpuAsyncSubtitleRenderer(QObject):
                             pass
                     with self._condition:
                         self._native_child_open = False
+                    continue
+                if snapshot == "__pump_native__":
+                    # 空闲心跳：投递 DComp 子窗口积压的鼠标转发消息。
+                    renderer = self._renderer_owner.process
+                    pump = getattr(renderer, "pump_native_preview", None)
+                    if callable(pump):
+                        try:
+                            pump(force_warp=self._force_warp)
+                            self._note("native_idle_pumps")
+                        except (NativeRendererError, RuntimeError):
+                            # 泵失败不影响渲染；下个心跳再试。
+                            pass
                     continue
                 (
                     track,
@@ -1321,8 +1355,25 @@ class GpuAsyncSubtitleRenderer(QObject):
                             src_x,
                             src_y,
                         ) = native_target
+                        render_t = self._native_render_timestamp(
+                            t_ms, submitted_at, needs_configure or needs_target_resize
+                        )
+                        if render_t is None:
+                            # 同键去重：请求落在已直画的帧键里（媒体时钟在
+                            # 帧键内抖动 / 暂停态重复请求），该帧已在屏上，
+                            # 重渲完全一致 → 跳过这次 GPU 工作（无效帧）。
+                            self._note("native_redundant_frames_skipped")
+                            settled_t = self._frame_cache.timestamp_for_key(
+                                self._frame_cache.key_for(t_ms)
+                            )
+                            if self._may_emit(settled_t, generation):
+                                # 帧已在屏上：仍闭合 GUI 的忙碌徽标区间，
+                                # 否则暂停态最后一次请求会被去重吞掉 delivery。
+                                self._note("frames_emitted")
+                                self.frame_presented.emit(int(settled_t))
+                            continue
                         event = renderer.present_gpu_frame(
-                            t_ms,
+                            render_t,
                             parent_hwnd=parent_hwnd,
                             x=target_x,
                             y=target_y,
@@ -1334,6 +1385,9 @@ class GpuAsyncSubtitleRenderer(QObject):
                             generation=generation,
                             frame_index=self._frame_index,
                         )
+                        self._native_note_presented(generation, render_t, event)
+                        # 后续记账/emit 一律用实际渲染的时间戳。
+                        t_ms = render_t
                     else:
                         event = renderer.render_gpu_frame(
                             t_ms,
@@ -1661,7 +1715,57 @@ class GpuAsyncSubtitleRenderer(QObject):
             self._reader = None
         # 新 sidecar 没有已解析的行数据，差分基准作废；首个请求自动走全量。
         self._style_patch_key = None
+        with self._condition:
+            # 进程随子窗口一起销毁；新进程的渲染耗时基准也重新采样。
+            self._native_child_open = False
+            self._native_last_presented = None
+            self._native_render_ms_ema = 0.0
         self._renderer_owner.close()
+
+    def _native_render_timestamp(
+        self,
+        t_ms: int,
+        submitted_at: float,
+        content_changed: bool,
+    ) -> Optional[int]:
+        """决定本周期直画的时间戳；与已上屏帧同键时返回 ``None``（跳过）。
+
+        播放态做**时延感知投喂**（2026-10 用户提议的追帧方案）：按
+        「拾取年龄 + EMA 渲染耗时」把目标戳前移到预计完成时刻，帧落地即
+        当前，把迟到压到≈0；上限 3 个帧键，防 EMA 尖峰过冲。实际吞吐
+        （22FPS 就按 22FPS 的节奏出帧）由同键去重天然保证——只有新帧键
+        才值得渲。
+        """
+        key = self._frame_cache.key_for(int(t_ms))
+        if content_changed:
+            return self._frame_cache.timestamp_for_key(key)
+        with self._condition:
+            last = self._native_last_presented
+            if last is not None and last[0] == self._generation and last[1] == key:
+                return None
+        if self._playing and self._native_project_ahead:
+            age_ms = max(0.0, (time.monotonic() - float(submitted_at)) * 1000.0)
+            ahead_ms = min(age_ms + self._native_render_ms_ema, 3.0 * 1000.0 / 60.0)
+            if ahead_ms >= 1.0:
+                projected_key = self._frame_cache.key_for(int(t_ms) + int(ahead_ms))
+                key = max(key, projected_key)
+        return self._frame_cache.timestamp_for_key(key)
+
+    def _native_note_presented(
+        self, generation: int, t_ms: int, event: dict
+    ) -> None:
+        with self._condition:
+            self._native_last_presented = (
+                int(generation),
+                self._frame_cache.key_for(int(t_ms)),
+            )
+        render_ms = float(event.get("render_ms") or 0.0)
+        if render_ms > 0.0:
+            self._native_render_ms_ema = (
+                render_ms
+                if self._native_render_ms_ema <= 0.0
+                else self._native_render_ms_ema * 0.7 + render_ms * 0.3
+            )
 
     def _may_emit(self, t_ms: int, generation: int) -> bool:
         with self._condition:

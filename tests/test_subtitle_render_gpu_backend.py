@@ -209,8 +209,25 @@ def test_gpu_g6_direct_composition_child_window_has_zero_readback(qapp, monkeypa
     renderer_path = _renderer_path()
     monkeypatch.setenv("KROK_SUBTITLE_NATIVE_RENDERER", str(renderer_path))
 
+    class RecordingWidget(QWidget):
+        """记录鼠标事件的占位控件：验证 DComp 子窗口的输入转发。"""
+
+        def __init__(self, parent: QWidget) -> None:
+            super().__init__(parent)
+            self.setMouseTracking(True)
+            self.moves: list[tuple[int, int]] = []
+            self.presses: list[tuple[int, int]] = []
+
+        def mouseMoveEvent(self, event) -> None:  # noqa: N802
+            self.moves.append((event.position().x(), event.position().y()))
+
+        def mousePressEvent(self, event) -> None:  # noqa: N802
+            self.presses.append((event.position().x(), event.position().y()))
+
     parent = QWidget()
     parent.resize(320, 180)
+    recording = RecordingWidget(parent)
+    recording.setGeometry(100, 60, 120, 60)  # 位于子窗口覆盖的视频区内
     parent.show()
     qapp.processEvents()
     parent_hwnd = int(parent.winId())
@@ -239,6 +256,9 @@ def test_gpu_g6_direct_composition_child_window_has_zero_readback(qapp, monkeypa
                     height=180,
                     force_warp=True,
                 )
+                # 空闲泵命令：暂停/无 present 时由 worker 心跳驱动，投递
+                # 子窗口积压的鼠标转发消息。
+                result["pumped"] = process.pump_native_preview(force_warp=True)
                 # 视口裁剪后的真实形态：子窗口小于渲染纹理，从纹理的
                 # (src_x, src_y) 起 1:1 拷贝窗口大小的区域（2026-10 G6
                 # 定位返工的新几何契约）。
@@ -256,7 +276,14 @@ def test_gpu_g6_direct_composition_child_window_has_zero_readback(qapp, monkeypa
                 result.update(configured=configured, event=event)
                 result["sub_rect_event"] = sub_rect_event
                 presented.set()
-                release.wait(timeout=5.0)
+                # 空闲心跳：真实链路里 worker 每 ~30ms 泵一次 sidecar 消息
+                # 队列（pump_native_preview），暂停/无 present 时子窗口的
+                # 鼠标转发消息靠它投递。这里模拟同样的心跳直到主线程放行。
+                while not release.wait(timeout=0.03):
+                    try:
+                        process.pump_native_preview(force_warp=True)
+                    except Exception:  # noqa: BLE001 - 心跳失败不影响断言
+                        pass
                 closed = process.close_gpu_preview(force_warp=True)
                 result["closed"] = closed
         except BaseException as exc:  # pragma: no cover - surfaced on the GUI thread
@@ -278,6 +305,22 @@ def test_gpu_g6_direct_composition_child_window_has_zero_readback(qapp, monkeypa
     # 第二次 present 已把子窗口改到裁剪子矩形几何。
     assert child_rect.right - child_rect.left == 288
     assert child_rect.bottom - child_rect.top == 164
+
+    # ---- 输入转发（2026-10 悬浮控件失效修复）----
+    # 子窗口覆盖视频区且属于 sidecar 进程：HTTRANSPARENT 跨线程无效，
+    # 鼠标消息必须由子窗口过程转发回父窗口，Qt 才能分发给底下（悬浮
+    # 传输条/视频面板）的控件。用 SendMessage 直达子窗口过程模拟。
+    WM_MOUSEMOVE = 0x0200
+    WM_LBUTTONDOWN = 0x0201
+    MK_LBUTTON = 0x0001
+    # 子窗口在父客户区 (16,8) 起；RecordingWidget 中心 (160, 90) →
+    # 子窗口客户坐标 (144, 82)。
+    user32.SendMessageW(child_hwnd, WM_MOUSEMOVE, 0, (82 << 16) | 144)
+    user32.SendMessageW(child_hwnd, WM_LBUTTONDOWN, MK_LBUTTON, (82 << 16) | 144)
+    qapp.processEvents()
+    assert recording.moves, "子窗口必须把 mouse move 转发给父窗口"
+    assert recording.presses, "子窗口必须把点击转发给父窗口"
+    assert result["pumped"]["event"] == "native_preview_pumped"
     release.set()
     while worker.is_alive() and time.monotonic() < deadline:
         qapp.processEvents()

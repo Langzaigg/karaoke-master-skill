@@ -8440,4 +8440,8 @@ void Direct2DGpuBackend::closeNativePreview() {
     previewSurface_.close();
 }
 
+void Direct2DGpuBackend::pumpNativePreviewMessages() {
+    previewSurface_.pumpMessages();
+}
+
 }  // namespace krok::subtitle::native

@@ -10,6 +10,10 @@
 
 namespace krok::subtitle::native {
 
+// pump_native_preview 命令的底层入口：只派发 DComp 子窗口自己的消息
+// （见 NativePreviewSurface::pumpMessages），暂停/空闲时由 Python worker
+// 心跳驱动。经 Direct2DGpuBackend::pumpNativePreviewMessages 调用。
+
 class NativePreviewSurface {
 public:
     NativePreviewSurface() = default;
@@ -22,6 +26,7 @@ public:
         double renderMs,
         const NativePreviewTarget &target
     );
+    void pumpMessages() noexcept;
     void close() noexcept;
 
 private:

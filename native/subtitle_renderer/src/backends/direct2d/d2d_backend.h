@@ -27,6 +27,7 @@ public:
         const NativePreviewTarget &target
     ) override;
     void closeNativePreview() override;
+    void pumpNativePreviewMessages() override;
 
     std::shared_ptr<D2DDeviceResources> sharedDeviceResources() const noexcept;
     void cancelRealizationPrewarm();

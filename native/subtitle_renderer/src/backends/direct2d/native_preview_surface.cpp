@@ -1,9 +1,12 @@
 #include "native_preview_surface.h"
 
+#include "../../diagnostics/native_trace.h"
+
 #include <chrono>
 #include <iomanip>
 #include <sstream>
 #include <stdexcept>
+#include <windowsx.h>
 
 namespace krok::subtitle::native {
 namespace {
@@ -23,9 +26,81 @@ void checkHr(HRESULT value, const char *operation) {
     }
 }
 
+bool isClientMouseMessage(UINT message) {
+    switch (message) {
+        case WM_MOUSEMOVE:
+        case WM_LBUTTONDOWN:
+        case WM_LBUTTONUP:
+        case WM_LBUTTONDBLCLK:
+        case WM_RBUTTONDOWN:
+        case WM_RBUTTONUP:
+        case WM_RBUTTONDBLCLK:
+        case WM_MBUTTONDOWN:
+        case WM_MBUTTONUP:
+        case WM_MBUTTONDBLCLK:
+        case WM_XBUTTONDOWN:
+        case WM_XBUTTONDBLCLK:
+        case WM_XBUTTONUP:
+            return true;
+        default:
+            return false;
+    }
+}
+
+bool isWheelMessage(UINT message) {
+    return message == WM_MOUSEWHEEL || message == WM_MOUSEHWHEEL;
+}
+
 LRESULT CALLBACK previewWindowProc(HWND window, UINT message, WPARAM wParam, LPARAM lParam) {
-    if (message == WM_NCHITTEST) {
-        return HTTRANSPARENT;
+    // 本窗口属于 sidecar 进程，而底下的顶层窗口在主进程：HTTRANSPARENT 的
+    // 穿透语义只在同线程窗口间成立，跨进程会让鼠标事件被整体丢弃——整个
+    // 视频区变成输入死区，悬浮传输条收不到 hover 也收不到点击（2026-10
+    // 用户实测，WindowFromPoint 直接命中本窗口）。改为把鼠标消息转发给
+    // 父窗口（主进程的 Qt 按控件栈正常分发，与没有 DComp 覆盖时一致）：
+    // 客户区消息的坐标换算到父窗口客户区；滚轮消息的 lParam 本就是屏幕
+    // 坐标，原样转发。按键按下后主窗口会捕获鼠标，后续消息直接路由给它，
+    // 不再经过本路径。
+    if (isClientMouseMessage(message)) {
+        if (HWND parent = GetAncestor(window, GA_PARENT)) {
+            POINT point{GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam)};
+            MapWindowPoints(window, parent, &point, 1);
+            diagnostics::nativeTrace(
+                "preview forward msg=%#x src=(%d,%d) dst=(%d,%d)",
+                static_cast<unsigned>(message),
+                static_cast<int>(GET_X_LPARAM(lParam)),
+                static_cast<int>(GET_Y_LPARAM(lParam)),
+                point.x,
+                point.y
+            );
+            PostMessageW(parent, message, wParam, MAKELPARAM(point.x, point.y));
+        }
+        return 0;
+    }
+    if (isWheelMessage(message)) {
+        if (HWND parent = GetAncestor(window, GA_PARENT)) {
+            PostMessageW(parent, message, wParam, lParam);
+        }
+        return 0;
+    }
+    if (message == WM_SETCURSOR) {
+        // 光标形状交给父窗口（hover 手型等）。必须用带超时的有限等待：
+        // 主线程可能正阻塞在自己的跨进程 SendMessageW(本窗口) 上不泵入站
+        // 消息，同步 SendMessage 会互相等死（2026-10 冒烟实测，物理光标
+        // 悬停在窗口上时必现）。
+        if (HWND parent = GetAncestor(window, GA_PARENT)) {
+            DWORD_PTR result = 0;
+            SendMessageTimeoutW(
+                parent,
+                message,
+                wParam,
+                lParam,
+                SMTO_ABORTIFHUNG | SMTO_BLOCK,
+                50,
+                &result
+            );
+            return static_cast<LRESULT>(TRUE);
+        }
+        return DefWindowProcW(window, message, wParam, lParam);
     }
     if (message == WM_ERASEBKGND) {
         return 1;
@@ -81,8 +156,11 @@ void NativePreviewSurface::ensureWindow(const NativePreviewTarget &target) {
         // 但 BitBlt/PrintWindow 等截图 API 依赖重定向表面——没有它 PrtScn
         // 和第三方截图工具会失效甚至卡死（2026-10 用户实测）。DComp 直画
         // 不需要此标志；保留重定向表面的 ~15MB 开销换截图兼容性。
+        // 不用 WS_EX_NOACTIVATE 以外的扩展样式参与输入：穿透靠窗口过程
+        // 转发（见 previewWindowProc），WS_EX_TRANSPARENT 无 WS_EX_LAYERED
+        // 配合时对命中测试无效、只会误导（DComp 目标窗口不支持 layered）。
         window_ = CreateWindowExW(
-            WS_EX_NOACTIVATE | WS_EX_TRANSPARENT,
+            WS_EX_NOACTIVATE,
             kWindowClassName,
             L"",
             WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS,
@@ -242,6 +320,14 @@ NativePreviewResult NativePreviewSurface::present(
     ).count();
     result.childWindow = reinterpret_cast<std::uintptr_t>(window_);
     return result;
+}
+
+void NativePreviewSurface::pumpMessages() noexcept {
+    // 无限制泵（与 present 内部的 pumpWindowMessages 同语义）：限定 HWND
+    // 的 PeekMessage 不投递挂起的跨线程 SENT 消息，SendMessage 进来的
+    // 鼠标事件将永远不被派发（2026-10 冒烟实测主线程卡死在 SendMessage）。
+    // present 每帧做同样的无限制派发，语义保持一致。
+    pumpWindowMessages();
 }
 
 void NativePreviewSurface::close() noexcept {
