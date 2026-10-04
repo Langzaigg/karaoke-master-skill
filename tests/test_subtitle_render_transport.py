@@ -1781,6 +1781,8 @@ def test_gpu_async_renderer_pooled_batch_accepts_out_of_order_completion(qapp, m
 
     monkeypatch.setattr(pa, "NativeRendererProcess", FakeGpuProcess)
     monkeypatch.setattr(pa, "SharedFrameRingReader", FakeGpuReader)
+    import os as _os
+    _os.environ.setdefault("KROK_SUBTITLE_PREVIEW_COMPRESSED_CACHE_MB", "0")
     renderer = pa.GpuAsyncSubtitleRenderer(320, 180)
     renderer.frame_ready.connect(lambda _image, t_ms: emitted.append(int(t_ms)))
     try:
