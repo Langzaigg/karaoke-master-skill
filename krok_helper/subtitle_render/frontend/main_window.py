@@ -6663,7 +6663,10 @@ class SubtitleRenderWindow(QWidget):
         if enabled and not self._gpu_preview_check.isChecked():
             self._gpu_preview_check.setChecked(True)
 
-        # ③ 热切换渲染器
+        # ③ 强制重建渲染器：GPU 预览可能本来就已开启（类没变），
+        #    set_gpu_preview_enabled 会提前返回不重建 → G6 模式
+        #    永远不生效。先停再启，确保按新的 env 重建。
+        self._preview_panel.set_gpu_preview_enabled(False)
         self._preview_panel.set_gpu_preview_enabled(
             self._gpu_preview_check.isChecked()
         )
