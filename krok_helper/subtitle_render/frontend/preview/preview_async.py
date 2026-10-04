@@ -16,7 +16,6 @@ from __future__ import annotations
 import logging
 import math
 import os
-import queue
 import threading
 import time
 import uuid
@@ -42,11 +41,6 @@ from krok_helper.subtitle_render.native.protocol import (
     gpu_unsupported_features,
 )
 from krok_helper.subtitle_render.engine.render.render_ir import build_style_patch_ir
-from krok_helper.subtitle_render.frontend.preview.compressed_frame_cache import (
-    CompressedFrameCache,
-    decode_frame,
-    encode_frame,
-)
 
 
 _log = logging.getLogger(__name__)
@@ -325,10 +319,6 @@ class NativePreviewFrameCache:
         with self._lock:
             # store() 已复制一份私有拷贝；pop 后缓存不再持有引用，直接移交即可。
             return self._images.pop(self._key(t_ms), None)
-
-    def has(self, t_ms: int) -> bool:
-        with self._lock:
-            return self._key(t_ms) in self._images
 
     def clear(self) -> None:
         with self._lock:
@@ -682,27 +672,6 @@ class GpuAsyncSubtitleRenderer(QObject):
         self._frame_cache = NativePreviewFrameCache(
             max(self._max_lookahead_frames + self._worker_count_requested + 1, 1)
         )
-        # ---- PR 式压缩预渲染回放（2026-10）----
-        # 播放/暂停空闲时预渲染未来帧 → LZ4 压缩入缓存；请求命中直接解码
-        # 出帧，绕开"渲染+回读+跨进程"。缓存跨跳变有效（帧内容是
-        # (t, 场景) 的纯函数），仅在场景身份变化（set_state/resize）时清空。
-        self._compressed_budget_mb = _env_int(
-            "KROK_SUBTITLE_PREVIEW_COMPRESSED_CACHE_MB",
-            512,
-            minimum=0,
-        )
-        self._compressed_cache = CompressedFrameCache(
-            self._compressed_budget_mb * 1024 * 1024
-        )
-        self._compressed_enabled = self._compressed_budget_mb > 0
-        # 预渲染追前游标（帧键）：播放空闲时从该键继续预渲染未来帧。
-        self._prerender_frontier_key: Optional[int] = None
-        # 编码线程：交付的帧入队，后台压缩入缓存（lz4/zlib 在 C 层释放 GIL）。
-        self._encode_queue: "queue.Queue[Optional[tuple[int, QImage]]]" = queue.Queue()
-        self._encode_thread = threading.Thread(
-            target=self._encode_loop, name="subtitle-preview-encode", daemon=True
-        )
-        self._encode_thread.start()
         self._renderer_owner = NativeRendererProcessOwner(
             process_factory=NativeRendererProcess,
             response_timeout_s=2.0,
@@ -739,9 +708,6 @@ class GpuAsyncSubtitleRenderer(QObject):
             "configure_count": 0,
             "renderer_failures": 0,
             "renderer_restarts": 0,
-            "compressed_hits": 0,
-            "compressed_stores": 0,
-            "prerender_frames": 0,
             "fallback_frames": 0,
             "fallback_failures": 0,
             "capability_fallbacks": 0,
@@ -795,7 +761,6 @@ class GpuAsyncSubtitleRenderer(QObject):
             self._needs_target_resize = False
             self._pending = None
             self._frame_cache.clear()
-            self._clear_compressed_cache()
             self._cancel_native_generation_locked(previous_generation)
             self._condition.notify_all()
 
@@ -824,7 +789,6 @@ class GpuAsyncSubtitleRenderer(QObject):
                     self._needs_target_resize = True
                 self._pending = None
                 self._frame_cache.clear()
-                self._clear_compressed_cache()
                 # QSharedMemory cannot resize an existing named segment. Give
                 # each render-target generation its own key while preserving
                 # the sidecar/GPU device across ordinary frame requests.
@@ -890,9 +854,6 @@ class GpuAsyncSubtitleRenderer(QObject):
                 self._generation += 1
                 self._pending = None
                 self._frame_cache.clear()
-                # 压缩缓存【不】清：帧内容是 (t, 场景) 的纯函数，跳变只会
-                # 让旧条目变远，LRU 自会驱逐；点击句子跳回访问过的位置
-                # 直接命中（PR 式回放的核心价值）。
                 cached = None
                 self._cancel_native_generation_locked(previous_generation)
             self._latest_t = requested_t
@@ -910,15 +871,7 @@ class GpuAsyncSubtitleRenderer(QObject):
                     self._pipeline_anchor_timestamp(requested_t), serial, True
                 )
             elif cached is None:
-                # 原始缓存未命中但压缩缓存命中：作为非投机请求入 pending，
-                # worker 侧命中路径解码出帧（GUI 线程零解码开销）。
                 self._replace_pending_locked(requested_t, serial, False)
-            if self._playing:
-                # 播放头推进后同步预渲染追前的下限（游标不落后于当前帧）。
-                current_key = self._frame_cache.key_for(requested_t)
-                if (self._prerender_frontier_key is None
-                        or self._prerender_frontier_key < current_key):
-                    self._prerender_frontier_key = current_key
             self._condition.notify()
 
     def set_playing(self, playing: bool) -> None:
@@ -926,14 +879,6 @@ class GpuAsyncSubtitleRenderer(QObject):
             self._playing = bool(playing)
             if not self._playing and self._pending is not None and self._pending[2]:
                 self._pending = None
-            if self._playing and self._latest_t is not None:
-                # 播放开始：只设追前游标下限，不抢占 pending——首帧仍由
-                # 正常请求路径渲染（播放态当前帧依赖 lookahead 回看命中，
-                # 追前由交付点驱动，避免饿死首帧）。
-                key = self._frame_cache.key_for(self._latest_t)
-                if (self._prerender_frontier_key is None
-                        or self._prerender_frontier_key < key):
-                    self._prerender_frontier_key = key
             self._condition.notify_all()
 
     def stop(self) -> None:
@@ -944,10 +889,6 @@ class GpuAsyncSubtitleRenderer(QObject):
             self._pending = None
             self._cancel_native_generation_locked(self._generation)
             self._condition.notify_all()
-        try:
-            self._encode_queue.put_nowait(None)
-        except queue.Full:
-            pass
         if not self._thread.join(timeout=3.0):
             # worker 卡在长渲染等待里（最坏 2s 帧超时 + 关闭握手 > join 窗口）：
             # 解释器退出时 daemon 线程的 finally 不会执行，sidecar 会变孤儿并
@@ -974,86 +915,6 @@ class GpuAsyncSubtitleRenderer(QObject):
             self._note("pending_replaced")
         self._pending = (int(t_ms), int(serial), bool(speculative), time.monotonic())
         self._note_max_pending(1)
-
-    def _encode_loop(self) -> None:
-        """后台编码线程：渲染帧 → LZ4 blob → 压缩缓存。"""
-        while True:
-            item = self._encode_queue.get()
-            if item is None:
-                return
-            t_ms, image = item
-            try:
-                blob = encode_frame(image)
-                self._compressed_cache.store(t_ms, blob)
-                self._note("compressed_stores")
-            except Exception:  # noqa: BLE001 - 编码失败丢帧不致命
-                pass
-
-    def _enqueue_encode(self, t_ms: int, image: QImage) -> None:
-        """交付的帧送编码队列（跳过已缓存的键，避免重复压缩）。"""
-        if not self._compressed_enabled:
-            return
-        if self._compressed_cache.has(t_ms):
-            return
-        try:
-            self._encode_queue.put_nowait((int(t_ms), image))
-        except queue.Full:
-            pass
-
-    def _clear_compressed_cache(self) -> None:
-        """场景身份变化（样式/轨道/画布尺寸）时整体作废。"""
-        self._compressed_cache.clear()
-        self._prerender_frontier_key = None
-        # 排空编码队列
-        while True:
-            try:
-                self._encode_queue.get_nowait()
-            except queue.Empty:
-                break
-
-    def _schedule_prerender_locked(self, current_key: int) -> None:
-        """播放空闲时预渲染未来帧（追前游标推进，填满空闲 pending）。
-
-        预渲染上限 = 压缩缓存预算能容纳的帧数（约 budget/帧blob），或
-        环境变量显式限制；游标每次从 current_key+1 起找未缓存键。
-        """
-        if (
-            not self._compressed_enabled
-            or not self._playing
-            or self._stopped
-            or self._renderer_failed
-        ):
-            return
-        if self._pending is not None:
-            pending_t = self._pending[0]
-            # pending 帧若已在压缩缓存里（lookahead 投机锚已渲染过），
-            # 追前可以占用该槽位而不损失任何工作。
-            if not (self._compressed_cache.has(pending_t)
-                    or self._frame_cache.has(pending_t)):
-                return
-        frontier = self._prerender_frontier_key
-        if frontier is None or frontier < current_key:
-            frontier = current_key
-        max_prerender = _env_int(
-            "KROK_SUBTITLE_PREVIEW_PRERENDER_FRAMES", 600, minimum=0
-        )
-        # 追前上界还要考虑原始帧缓存容量：追前跑太远会把播放头附近
-        # 的帧从原始缓存挤出（压缩缓存仍在，命中走解码路径——这正是
-        # 设计意图，所以原始缓存容量的约束其实不必要；600 帧上界已够）。
-        if frontier - current_key >= max_prerender:
-            return
-        target_key = frontier + 1
-        target_t = self._frame_cache.timestamp_for_key(target_key)
-        if self._compressed_cache.has(target_t) or self._frame_cache.has(target_t):
-            self._prerender_frontier_key = target_key
-            return
-        self._prerender_frontier_key = target_key
-        if self._pending is not None:
-            self._note("pending_replaced")
-        self._pending = (target_t, self._request_serial, True, time.monotonic())
-        self._note_max_pending(1)
-        self._note("prerender_frames")
-        self._condition.notify()
 
     def _take_next_request(self):
         with self._condition:
@@ -1116,31 +977,6 @@ class GpuAsyncSubtitleRenderer(QObject):
                 ) = snapshot
                 if track is None or style is None:
                     continue
-                # ---- 压缩缓存命中：解码出帧，零 sidecar 渲染 ----
-                if (
-                    self._compressed_enabled
-                    and not needs_configure
-                    and not needs_target_resize
-                    and not self._renderer_failed
-                ):
-                    blob = self._compressed_cache.fetch(t_ms)
-                    if blob is not None:
-                        image = decode_frame(blob)
-                        if image is not None:
-                            self._note("compressed_hits")
-                            self._note("frames_emitted")
-                            if self._may_emit(t_ms, generation):
-                                image.setDevicePixelRatio(dpr if dpr else 1.0)
-                                self.frame_ready.emit(image, int(t_ms))
-                            else:
-                                self._note("stale_frames_dropped")
-                            # 播放时维持追前：命中也推进游标
-                            with self._condition:
-                                self._schedule_prerender_locked(
-                                    self._frame_cache.key_for(t_ms)
-                                )
-                            continue
-
                 unsupported = gpu_unsupported_features(track, style, extra_tracks)
                 if unsupported:
                     # 能力回退期间（含投机请求被跳过的播放态）实际后端就是
@@ -1439,21 +1275,11 @@ class GpuAsyncSubtitleRenderer(QObject):
                     image.setDevicePixelRatio(dpr)
                     if speculative:
                         self._cache_speculative(image, t_ms, generation)
-                        self._enqueue_encode(t_ms, image)
-                        with self._condition:
-                            self._schedule_prerender_locked(
-                                self._frame_cache.key_for(t_ms)
-                            )
                     elif self._may_emit(t_ms, generation):
                         self._note("frames_emitted")
                         self.frame_ready.emit(image, int(t_ms))
                         self._schedule_lookahead(t_ms, serial, generation)
                         self._note_backend_mode("gpu")
-                        self._enqueue_encode(t_ms, image)
-                        with self._condition:
-                            self._schedule_prerender_locked(
-                                self._frame_cache.key_for(t_ms)
-                            )
                     else:
                         self._note("stale_frames_dropped")
                 except Exception as exc:  # noqa: BLE001 - worker 线程必须自愈
@@ -1564,30 +1390,6 @@ class GpuAsyncSubtitleRenderer(QObject):
                 requests.append(
                     (future_t, int(serial), bool(speculative), time.monotonic())
                 )
-        if self._compressed_enabled:
-            # 批内过滤：压缩缓存已覆盖的时间戳不再提交 sidecar 渲染，
-            # 改为解码交付（与普通帧同批消费），渲染槽位让给未覆盖帧。
-            surviving: list[tuple[int, int, bool, float]] = []
-            for item in requests:
-                if self._compressed_cache.fetch(item[0]) is not None:
-                    blob = self._compressed_cache.fetch(item[0])
-                    if blob is not None:
-                        image = decode_frame(blob)
-                        if image is not None:
-                            self._note("compressed_hits")
-                            self._note("frames_emitted")
-                            if self._may_emit(item[0], self._generation):
-                                image.setDevicePixelRatio(1.0)
-                                self.frame_ready.emit(image, int(item[0]))
-                            else:
-                                self._cache_speculative(
-                                    image, item[0], self._generation
-                                )
-                            continue
-                surviving.append(item)
-            requests = surviving
-            if not requests:
-                return
 
         metadata: dict[int, tuple[int, int, bool, float]] = {}
         batch_started = time.monotonic()
@@ -1674,20 +1476,10 @@ class GpuAsyncSubtitleRenderer(QObject):
             image.setDevicePixelRatio(dpr)
             if is_speculative:
                 self._cache_speculative(image, request_t, generation)
-                self._enqueue_encode(request_t, image)
-                with self._condition:
-                    self._schedule_prerender_locked(
-                        self._frame_cache.key_for(request_t)
-                    )
             elif self._may_emit(request_t, generation):
                 self._note("frames_emitted")
                 self.frame_ready.emit(image, request_t)
                 self._note_backend_mode("gpu")
-                self._enqueue_encode(request_t, image)
-                with self._condition:
-                    self._schedule_prerender_locked(
-                        self._frame_cache.key_for(request_t)
-                    )
             else:
                 self._note("stale_frames_dropped")
 
