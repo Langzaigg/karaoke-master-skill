@@ -975,6 +975,7 @@ class ExportWorkspaceView(QWidget):
             render_workers_combo=render_workers_combo,
             native_check=native_check,
             gpu_preview_check=gpu_preview_check,
+            gpu_direct_present_check=gpu_direct_present_check,
             gpu_export_check=gpu_export_check,
             monitor_card=monitor_card,
             monitor_layout=monitor_layout,
