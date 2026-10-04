@@ -547,6 +547,26 @@ def test_gpu_preview_defaults_to_g5_on_interactive_windows(monkeypatch):
     assert pa.gpu_preview_enabled() is False
 
 
+def test_preview_render_target_size_clamps_to_engine_limit():
+    """渲染目标单边不得超过 sidecar 的 8192 上限（按比例降 dpr）。
+
+    4K 工程 × 高 DPR 大窗口曾越限报错，触发「杀进程重启 + 全量 configure
+    2.5s/次 × 5 连败 ≈ 12 秒卡顿 + 降级弹窗」（2026-10 实测）。
+    """
+    from krok_helper.subtitle_render.frontend.preview.preview_async import (
+        preview_render_target_size,
+    )
+
+    w, h, dpr = preview_render_target_size(3840, 2160, 3.0)
+    assert max(w, h) <= 8192
+    assert (w, h) == (8192, 4608)
+    assert abs(dpr - 8192 / 3840) < 1e-6
+
+    # 常规尺寸不受影响
+    w2, h2, dpr2 = preview_render_target_size(1920, 1080, 2.0)
+    assert (w2, h2, dpr2) == (3840, 2160, 2.0)
+
+
 def test_gpu_native_preview_env_gate(monkeypatch):
     """G6 直画上屏：env 存在即权威（"1"开/"0"关），缺省才读磁盘偏好。"""
     from krok_helper.subtitle_render.frontend.preview import preview_async as pa

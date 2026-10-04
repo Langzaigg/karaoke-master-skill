@@ -425,6 +425,13 @@ class NativePreviewStats:
             self._values[key] += 1
 
 
+# sidecar 渲染纹理的单边硬上限（gpu_resize_target 的 1..8192 校验）。
+# 超限的尺寸在源头按比例降 dpr：预览显示像素数是窗口物理像素，本来就
+# 渲染不到更多（2026-10 实测：4K 工程 × 高 DPR 拖大窗口时越限报错 →
+# 杀进程重启链 2.5s/次 × 5 连败 ≈ 12 秒卡顿 + 降级弹窗）。
+_RENDER_TARGET_MAX_DIMENSION = 8192
+
+
 def preview_render_target_size(
     logical_width: int,
     logical_height: int,
@@ -434,6 +441,10 @@ def preview_render_target_size(
     logical_w = max(int(logical_width), 1)
     logical_h = max(int(logical_height), 1)
     dpr = max(float(device_pixel_ratio or 1.0), 0.01)
+    dpr = min(
+        dpr,
+        _RENDER_TARGET_MAX_DIMENSION / max(logical_w, logical_h),
+    )
     return (
         max(int(round(logical_w * dpr)), 1),
         max(int(round(logical_h * dpr)), 1),
@@ -1385,6 +1396,13 @@ class GpuAsyncSubtitleRenderer(QObject):
                         scene_configured = True
                         self._style_patch_key = current_patch_key
                     elif needs_target_resize:
+                        # 与 preview_render_target_size 同口径的防线：任何
+                        # 路径漏进来的超限 dpr 都钳到纹理上限内，避免
+                        # resize 报错进入杀进程重启链。
+                        dpr = min(
+                            dpr,
+                            _RENDER_TARGET_MAX_DIMENSION / max(int(width), int(height)),
+                        )
                         configured = renderer.resize_gpu_target(
                             width=width,
                             height=height,
