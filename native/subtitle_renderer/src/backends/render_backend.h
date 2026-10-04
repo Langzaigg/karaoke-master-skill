@@ -16,6 +16,8 @@ public:
         int tMs,
         const NativePreviewTarget &target
     ) = 0;
+    virtual NativeRenderOnlyResult renderFrameOnly(int tMs) = 0;
+    virtual NativePreviewResult presentRendered(const NativePreviewTarget &target) = 0;
     virtual void closeNativePreview() = 0;
     // 空闲心跳：只派发 DComp 子窗口积压的鼠标转发消息。
     virtual void pumpNativePreviewMessages() {}

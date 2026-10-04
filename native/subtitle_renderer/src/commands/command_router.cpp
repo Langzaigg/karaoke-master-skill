@@ -96,6 +96,14 @@ CommandDispatchResult CommandRouter::dispatch(const QJsonObject &request) {
         return output(handleCloseGpuPreview(request, &impl_->runtime));
     case Command::GpuDiagnostics:
         return output(handleGpuDiagnostics(request, &impl_->runtime));
+    case Command::GpuRenderFrameDirect:
+        return output(
+            handleRenderGpuFrameDirect(request, impl_->config, &impl_->runtime)
+        );
+    case Command::GpuPresentRendered:
+        return output(
+            handlePresentRenderedGpuFrame(request, impl_->config, &impl_->runtime)
+        );
     case Command::PumpNativePreview:
         return output(handlePumpNativePreview(request, &impl_->runtime));
     case Command::Configure:

@@ -417,6 +417,14 @@ class PreviewGraphicsView(QGraphicsView):
         # settles instead of rebuilding the native scene for every mouse move.
         self._resize_render_timer.start()
 
+    def moveEvent(self, event):  # noqa: N802
+        super().moveEvent(event)
+        # 高度变化时 AspectRatioBox/布局常只**移动**画布（尺寸不变，垂直
+        # 居中重摆），resizeEvent 不触发——DComp 子窗口挂在顶层 HWND 上，
+        # 不刷新就会整体偏移（2026-10 用户实测 x 向会重算、y 向不会）。
+        if getattr(self._async_renderer, "uses_native_preview", False):
+            self._resize_render_timer.start()
+
     def event(self, ev):  # noqa: N802
         # 窗口被拖到缩放比例（DPR）不同的显示器时不会触发 resizeEvent，
         # 若不刷新渲染目标，字幕层会按旧物理分辨率渲染再被拉伸 → 整体发虚。

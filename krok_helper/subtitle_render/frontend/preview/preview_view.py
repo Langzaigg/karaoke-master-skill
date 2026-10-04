@@ -545,6 +545,13 @@ class PreviewPanel(DropPanel):
         setter(bool(enabled))
         return True
 
+    def set_native_preview_mode(self, enabled: bool) -> bool:
+        """G6↔G5 热切换转发（canvas 实现）；画布不支持时返回 False。"""
+        setter = getattr(self._canvas, "set_native_preview_mode", None)
+        if setter is None:
+            return False
+        return setter(bool(enabled))
+
     def set_preview_quality(self, quality: object) -> None:
         setter = getattr(self._canvas, "set_preview_quality", None)
         if setter is not None:

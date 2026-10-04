@@ -52,27 +52,13 @@ bool isWheelMessage(UINT message) {
 }
 
 LRESULT CALLBACK previewWindowProc(HWND window, UINT message, WPARAM wParam, LPARAM lParam) {
-    // 本窗口属于 sidecar 进程，而底下的顶层窗口在主进程：HTTRANSPARENT 的
-    // 穿透语义只在同线程窗口间成立，跨进程会让鼠标事件被整体丢弃——整个
-    // 视频区变成输入死区，悬浮传输条收不到 hover 也收不到点击（2026-10
-    // 用户实测，WindowFromPoint 直接命中本窗口）。改为把鼠标消息转发给
-    // 父窗口（主进程的 Qt 按控件栈正常分发，与没有 DComp 覆盖时一致）：
-    // 客户区消息的坐标换算到父窗口客户区；滚轮消息的 lParam 本就是屏幕
-    // 坐标，原样转发。按键按下后主窗口会捕获鼠标，后续消息直接路由给它，
-    // 不再经过本路径。
     if (isClientMouseMessage(message)) {
         if (HWND parent = GetAncestor(window, GA_PARENT)) {
             POINT point{GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam)};
             MapWindowPoints(window, parent, &point, 1);
-            diagnostics::nativeTrace(
-                "preview forward msg=%#x src=(%d,%d) dst=(%d,%d)",
-                static_cast<unsigned>(message),
-                static_cast<int>(GET_X_LPARAM(lParam)),
-                static_cast<int>(GET_Y_LPARAM(lParam)),
-                point.x,
-                point.y
+            const BOOL posted = PostMessageW(
+                parent, message, wParam, MAKELPARAM(point.x, point.y)
             );
-            PostMessageW(parent, message, wParam, MAKELPARAM(point.x, point.y));
         }
         return 0;
     }
@@ -160,6 +146,13 @@ void NativePreviewSurface::ensureWindow(const NativePreviewTarget &target) {
         // 命中测试——穿透靠窗口过程转发）：2026-10 实测缺少它时，父窗口里
         // Qt Multimedia 的视频呈现层会被 DWM 长时间冻结（解码照常出帧但
         // 屏幕不更新，A/B 复现 G5 9/10 vs G6 4/10）。
+        // WS_EX_LAYERED|WS_EX_TRANSPARENT（创建时即带，事后加样式对子窗口
+        // 无效）：layered+transparent 是唯一 OS 级跨进程命中豁免——路由层
+        // 直接跳过本窗口，真实鼠标事件落到主进程的 Qt（HTTRANSPARENT 的
+        // 穿透只在同线程窗口间成立，跨进程是输入黑洞，2026-10 实测
+        // SendInput 后子窗口过程收不到任何 0x200/0x201）。layered 子窗口
+        // 必须调一次 SetLayeredWindowAttributes 才会显示（alpha=255 不改
+        // 变 DComp 视觉的逐像素透明）。
         window_ = CreateWindowExW(
             WS_EX_NOACTIVATE | WS_EX_TRANSPARENT,
             kWindowClassName,

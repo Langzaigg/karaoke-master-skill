@@ -42,6 +42,12 @@ struct NativePreviewTarget {
     int srcY = 0;
 };
 
+// G6 拆分路径第一步：只渲染到纹理（不上屏），Python 侧到点后调
+// gpu_present_rendered 上屏——「渲染可提前，播放必须到点」。
+struct NativeRenderOnlyResult {
+    double renderMs = 0.0;
+};
+
 struct NativePreviewResult {
     double renderMs = 0.0;
     double presentMs = 0.0;

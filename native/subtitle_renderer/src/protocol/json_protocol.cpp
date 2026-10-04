@@ -39,6 +39,12 @@ Command commandFromName(const QString &name) {
     if (name == QStringLiteral("pump_native_preview")) {
         return Command::PumpNativePreview;
     }
+    if (name == QStringLiteral("gpu_render_frame_direct")) {
+        return Command::GpuRenderFrameDirect;
+    }
+    if (name == QStringLiteral("gpu_present_rendered")) {
+        return Command::GpuPresentRendered;
+    }
     if (name == QStringLiteral("configure")) {
         return Command::Configure;
     }

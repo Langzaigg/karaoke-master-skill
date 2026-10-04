@@ -1211,6 +1211,63 @@ class NativeRendererProcess:
         )
         return self._expect_ok(self._read_response())
 
+    def render_gpu_frame_direct(
+        self,
+        t_ms: int,
+        *,
+        force_warp: bool = False,
+        generation: int = 0,
+        frame_index: int = 0,
+    ) -> dict[str, Any]:
+        """Render one GPU frame to the sidecar texture WITHOUT presenting.
+
+        「渲染可提前，播放必须到点」（2026-10 用户拍板）的第一步：渲染
+        结果留在 sidecar 纹理里，由宿主在到点后调 present_rendered_gpu_frame
+        上屏，持有等待用**真实渲染耗时**校准。
+        """
+        self._send(
+            {
+                "cmd": "gpu_render_frame_direct",
+                "t_ms": int(t_ms),
+                "force_warp": bool(force_warp),
+                "generation": int(generation),
+                "frame_index": int(frame_index),
+            }
+        )
+        return self._expect_ok(self._read_response())
+
+    def present_rendered_gpu_frame(
+        self,
+        *,
+        parent_hwnd: int,
+        x: int,
+        y: int,
+        width: int,
+        height: int,
+        src_x: int = 0,
+        src_y: int = 0,
+        t_ms: int = 0,
+        force_warp: bool = False,
+        generation: int = 0,
+    ) -> dict[str, Any]:
+        """Present the last direct-rendered texture in the DComp child window."""
+        self._send(
+            {
+                "cmd": "gpu_present_rendered",
+                "t_ms": int(t_ms),
+                "force_warp": bool(force_warp),
+                "generation": int(generation),
+                "parent_hwnd": str(int(parent_hwnd)),
+                "x": int(x),
+                "y": int(y),
+                "width": int(width),
+                "height": int(height),
+                "src_x": int(src_x),
+                "src_y": int(src_y),
+            }
+        )
+        return self._expect_ok(self._read_response())
+
     def close_gpu_preview(self, *, force_warp: bool = False) -> dict[str, Any]:
         """Destroy the sidecar-owned native preview child window."""
         self._send({"cmd": "gpu_preview_close", "force_warp": bool(force_warp)})

@@ -421,4 +421,113 @@ QJsonObject handlePresentGpuFrame(
     }
 }
 
+QJsonObject handleRenderGpuFrameDirect(
+    const QJsonObject &request,
+    const std::optional<RenderConfig> &config,
+    RenderRuntime *runtime
+) {
+    if (!config.has_value()) {
+        QJsonObject out = response(false, QStringLiteral("gpu_render_frame_direct"));
+        out.insert(QStringLiteral("error"), QStringLiteral("renderer is not configured"));
+        return out;
+    }
+    const bool forceWarp = request.value(QStringLiteral("force_warp")).toBool(false);
+    if (!gpuConfigured(runtime, forceWarp)) {
+        QJsonObject out = response(false, QStringLiteral("gpu_render_frame_direct"));
+        out.insert(QStringLiteral("error"), QStringLiteral("GPU backend is not configured"));
+        return out;
+    }
+    QString error;
+    auto *backend = ensureGpuBackend(runtime, forceWarp, &error);
+    if (backend == nullptr) {
+        QJsonObject out = response(false, QStringLiteral("gpu_render_frame_direct"));
+        out.insert(QStringLiteral("error"), error);
+        return out;
+    }
+    try {
+        const int tMs = intValue(request, QStringLiteral("t_ms"), 0);
+        const auto result = backend->renderFrameOnly(tMs);
+        QJsonObject out = response(true, QStringLiteral("gpu_frame_rendered_direct"));
+        out.insert(QStringLiteral("generation"), intValue(request, QStringLiteral("generation"), 0));
+        out.insert(QStringLiteral("t_ms"), tMs);
+        out.insert(QStringLiteral("render_ms"), result.renderMs);
+        return out;
+    } catch (const std::exception &exception) {
+        QJsonObject out = response(false, QStringLiteral("gpu_render_frame_direct"));
+        out.insert(QStringLiteral("error"), QString::fromUtf8(exception.what()));
+        return out;
+    }
+}
+
+QJsonObject handlePresentRenderedGpuFrame(
+    const QJsonObject &request,
+    const std::optional<RenderConfig> &config,
+    RenderRuntime *runtime
+) {
+    if (!config.has_value()) {
+        QJsonObject out = response(false, QStringLiteral("gpu_present_rendered"));
+        out.insert(QStringLiteral("error"), QStringLiteral("renderer is not configured"));
+        return out;
+    }
+    const bool forceWarp = request.value(QStringLiteral("force_warp")).toBool(false);
+    if (!gpuConfigured(runtime, forceWarp)) {
+        QJsonObject out = response(false, QStringLiteral("gpu_present_rendered"));
+        out.insert(QStringLiteral("error"), QStringLiteral("GPU backend is not configured"));
+        return out;
+    }
+    QString error;
+    auto *backend = ensureGpuBackend(runtime, forceWarp, &error);
+    if (backend == nullptr) {
+        QJsonObject out = response(false, QStringLiteral("gpu_present_rendered"));
+        out.insert(QStringLiteral("error"), error);
+        return out;
+    }
+    bool parentOk = false;
+    const qulonglong parentWindow = stringValue(
+        request, QStringLiteral("parent_hwnd")
+    ).toULongLong(&parentOk, 10);
+    if (!parentOk || parentWindow == 0) {
+        QJsonObject out = response(false, QStringLiteral("gpu_present_rendered"));
+        out.insert(QStringLiteral("error"), QStringLiteral("parent_hwnd must be a non-zero decimal string"));
+        return out;
+    }
+    krok::subtitle::native::NativePreviewTarget target;
+    target.parentWindow = static_cast<std::uintptr_t>(parentWindow);
+    target.x = intValue(request, QStringLiteral("x"), 0);
+    target.y = intValue(request, QStringLiteral("y"), 0);
+    target.width = intValue(request, QStringLiteral("width"), 0);
+    target.height = intValue(request, QStringLiteral("height"), 0);
+    target.srcX = intValue(request, QStringLiteral("src_x"), 0);
+    target.srcY = intValue(request, QStringLiteral("src_y"), 0);
+    if (target.width <= 0 || target.height <= 0) {
+        QJsonObject out = response(false, QStringLiteral("gpu_present_rendered"));
+        out.insert(QStringLiteral("error"), QStringLiteral("native preview dimensions must be positive"));
+        return out;
+    }
+    if (target.srcX < 0 || target.srcY < 0
+        || target.srcX + target.width > config->physicalWidth()
+        || target.srcY + target.height > config->physicalHeight()) {
+        QJsonObject out = response(false, QStringLiteral("gpu_present_rendered"));
+        out.insert(QStringLiteral("error"), QStringLiteral("native preview source region exceeds the configured render target"));
+        return out;
+    }
+    try {
+        const int tMs = intValue(request, QStringLiteral("t_ms"), 0);
+        const auto result = backend->presentRendered(target);
+        QJsonObject out = response(true, QStringLiteral("gpu_frame_presented"));
+        out.insert(QStringLiteral("generation"), intValue(request, QStringLiteral("generation"), 0));
+        out.insert(QStringLiteral("t_ms"), tMs);
+        out.insert(QStringLiteral("render_ms"), 0.0);
+        out.insert(QStringLiteral("present_ms"), result.presentMs);
+        out.insert(QStringLiteral("readback_ms"), 0.0);
+        out.insert(QStringLiteral("child_hwnd"), QString::number(result.childWindow));
+        out.insert(QStringLiteral("transport"), QStringLiteral("direct_composition"));
+        return out;
+    } catch (const std::exception &exception) {
+        QJsonObject out = response(false, QStringLiteral("gpu_present_rendered"));
+        out.insert(QStringLiteral("error"), QString::fromUtf8(exception.what()));
+        return out;
+    }
+}
+
 }  // namespace krok::subtitle::native::commands

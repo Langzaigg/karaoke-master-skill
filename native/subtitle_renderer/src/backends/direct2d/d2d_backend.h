@@ -28,6 +28,8 @@ public:
     ) override;
     void closeNativePreview() override;
     void pumpNativePreviewMessages() override;
+    NativeRenderOnlyResult renderFrameOnly(int tMs) override;
+    NativePreviewResult presentRendered(const NativePreviewTarget &target) override;
 
     std::shared_ptr<D2DDeviceResources> sharedDeviceResources() const noexcept;
     void cancelRealizationPrewarm();

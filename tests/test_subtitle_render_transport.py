@@ -1288,16 +1288,25 @@ def test_gpu_native_preview_presents_without_shared_memory_or_qimage(qapp, monke
         def configure_gpu(self, *args, **kwargs):
             return {"ok": True, "event": "gpu_configured", "native_preview": True}
 
-        def present_gpu_frame(self, t_ms, **kwargs):
+        def render_gpu_frame_direct(self, t_ms, **kwargs):
             presented_calls.append((int(t_ms), dict(kwargs)))
             finished.set()
             return {
                 "ok": True,
-                "event": "gpu_frame_presented",
+                "event": "gpu_frame_rendered_direct",
                 "t_ms": int(t_ms),
                 "render_ms": 1.25,
+            }
+
+        def present_rendered_gpu_frame(self, **kwargs):
+            return {
+                "ok": True,
+                "event": "gpu_frame_presented",
+                "t_ms": int(kwargs.get("t_ms", 0)),
+                "render_ms": 0.0,
                 "present_ms": 0.2,
                 "readback_ms": 0.0,
+                "child_hwnd": 4321,
                 "transport": "direct_composition",
             }
 
@@ -1332,13 +1341,6 @@ def test_gpu_native_preview_presents_without_shared_memory_or_qimage(qapp, monke
             (
                 1_000,
                 {
-                    "parent_hwnd": 12345,
-                    "x": -10,
-                    "y": 5,
-                    "width": 320,
-                    "height": 180,
-                    "src_x": 0,
-                    "src_y": 0,
                     "force_warp": False,
                     "generation": 1,
                     "frame_index": 0,
@@ -1378,16 +1380,28 @@ def test_gpu_native_preview_closes_child_window_when_target_cleared(qapp, monkey
         def configure_gpu(self, *args, **kwargs):
             return {"ok": True, "event": "gpu_configured", "native_preview": True}
 
-        def present_gpu_frame(self, t_ms, **kwargs):
+        def render_gpu_frame_direct(self, t_ms, **kwargs):
             presented_calls.append(int(t_ms))
             first_present.set()
             return {
                 "ok": True,
-                "event": "gpu_frame_presented",
+                "event": "gpu_frame_rendered_direct",
                 "t_ms": int(t_ms),
                 "render_ms": 1.25,
                 "present_ms": 0.2,
                 "readback_ms": 0.0,
+                "transport": "direct_composition",
+            }
+
+        def present_rendered_gpu_frame(self, **kwargs):
+            return {
+                "ok": True,
+                "event": "gpu_frame_presented",
+                "t_ms": int(kwargs.get("t_ms", 0)),
+                "render_ms": 0.0,
+                "present_ms": 0.2,
+                "readback_ms": 0.0,
+                "child_hwnd": 4321,
                 "transport": "direct_composition",
             }
 
@@ -1445,17 +1459,29 @@ def test_gpu_native_preview_skips_redundant_same_key_frames(qapp, monkeypatch):
         def configure_gpu(self, *args, **kwargs):
             return {"ok": True, "event": "gpu_configured", "native_preview": True}
 
-        def present_gpu_frame(self, t_ms, **kwargs):
+        def render_gpu_frame_direct(self, t_ms, **kwargs):
             presented.append(int(t_ms))
             if not presented[:-1]:
                 first_present.set()
             return {
                 "ok": True,
-                "event": "gpu_frame_presented",
+                "event": "gpu_frame_rendered_direct",
                 "t_ms": int(t_ms),
                 "render_ms": 5.0,
                 "present_ms": 0.2,
                 "readback_ms": 0.0,
+                "transport": "direct_composition",
+            }
+
+        def present_rendered_gpu_frame(self, **kwargs):
+            return {
+                "ok": True,
+                "event": "gpu_frame_presented",
+                "t_ms": int(kwargs.get("t_ms", 0)),
+                "render_ms": 0.0,
+                "present_ms": 0.2,
+                "readback_ms": 0.0,
+                "child_hwnd": 4321,
                 "transport": "direct_composition",
             }
 
@@ -1507,16 +1533,28 @@ def test_gpu_native_preview_projects_ahead_by_render_latency(qapp, monkeypatch):
         def configure_gpu(self, *args, **kwargs):
             return {"ok": True, "event": "gpu_configured", "native_preview": True}
 
-        def present_gpu_frame(self, t_ms, **kwargs):
+        def render_gpu_frame_direct(self, t_ms, **kwargs):
             presented.append((int(kwargs.get("generation", 0)), int(t_ms)))
             made.set()
             return {
                 "ok": True,
-                "event": "gpu_frame_presented",
+                "event": "gpu_frame_rendered_direct",
                 "t_ms": int(t_ms),
                 "render_ms": 40.0,
                 "present_ms": 0.2,
                 "readback_ms": 0.0,
+                "transport": "direct_composition",
+            }
+
+        def present_rendered_gpu_frame(self, **kwargs):
+            return {
+                "ok": True,
+                "event": "gpu_frame_presented",
+                "t_ms": int(kwargs.get("t_ms", 0)),
+                "render_ms": 0.0,
+                "present_ms": 0.2,
+                "readback_ms": 0.0,
+                "child_hwnd": 4321,
                 "transport": "direct_composition",
             }
 
@@ -1570,15 +1608,27 @@ def test_gpu_native_preview_idle_pumps_while_paused(qapp, monkeypatch):
         def configure_gpu(self, *args, **kwargs):
             return {"ok": True, "event": "gpu_configured", "native_preview": True}
 
-        def present_gpu_frame(self, t_ms, **kwargs):
+        def render_gpu_frame_direct(self, t_ms, **kwargs):
             first_present.set()
             return {
                 "ok": True,
-                "event": "gpu_frame_presented",
+                "event": "gpu_frame_rendered_direct",
                 "t_ms": int(t_ms),
                 "render_ms": 5.0,
                 "present_ms": 0.2,
                 "readback_ms": 0.0,
+                "transport": "direct_composition",
+            }
+
+        def present_rendered_gpu_frame(self, **kwargs):
+            return {
+                "ok": True,
+                "event": "gpu_frame_presented",
+                "t_ms": int(kwargs.get("t_ms", 0)),
+                "render_ms": 0.0,
+                "present_ms": 0.2,
+                "readback_ms": 0.0,
+                "child_hwnd": 4321,
                 "transport": "direct_composition",
             }
 
@@ -1630,17 +1680,29 @@ def test_gpu_native_preview_schedules_at_capacity_rate_without_waste(qapp, monke
         def configure_gpu(self, *args, **kwargs):
             return {"ok": True, "event": "gpu_configured", "native_preview": True}
 
-        def present_gpu_frame(self, t_ms, **kwargs):
+        def render_gpu_frame_direct(self, t_ms, **kwargs):
             time.sleep(0.045)  # 模拟慢机：一帧 45ms（≈22fps 吞吐）
             with lock:
                 presented_keys.append(int(t_ms))
             return {
                 "ok": True,
-                "event": "gpu_frame_presented",
+                "event": "gpu_frame_rendered_direct",
                 "t_ms": int(t_ms),
                 "render_ms": 45.0,
                 "present_ms": 0.2,
                 "readback_ms": 0.0,
+                "transport": "direct_composition",
+            }
+
+        def present_rendered_gpu_frame(self, **kwargs):
+            return {
+                "ok": True,
+                "event": "gpu_frame_presented",
+                "t_ms": int(kwargs.get("t_ms", 0)),
+                "render_ms": 0.0,
+                "present_ms": 0.2,
+                "readback_ms": 0.0,
+                "child_hwnd": 4321,
                 "transport": "direct_composition",
             }
 
@@ -1672,6 +1734,112 @@ def test_gpu_native_preview_schedules_at_capacity_rate_without_waste(qapp, monke
         assert 16 <= render_count <= 30, f"渲染数 {render_count} 应≈吞吐率而非请求率"
         # 每次渲染的帧键互不相同：没有一帧浪费在已上屏内容上
         assert len(set(keys)) == len(keys), f"出现重复帧键: {keys}"
+    finally:
+        renderer.stop()
+
+
+def test_gpu_native_preview_recovery_stays_monotonic(qapp, monkeypatch):
+    """恢复瞬态（2026-10 用户问询 + 拍板语义）：
+
+    - 吞吐骤升（166ms→瞬时）时呈现键严格递增（不倒走）；
+    - **到点才播放**：渲染提前完成也不得提前上屏——呈现戳与当时媒体
+      时钟之差不得超过一个小余量（≈2 帧，含测试时钟的量化误差）。
+    """
+    from krok_helper.subtitle_render.frontend.preview import preview_async as pa
+    from krok_helper.subtitle_render.domain.models import Style, TimingTrack
+
+    presented: list[tuple[int, int, int]] = []  # (generation, t, media_at_present)
+    clock = {"t": 60_000}
+    lock = threading.Lock()
+    slow_remaining = {"n": 3}
+
+    class FakeGpuProcess:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def start(self):
+            return {"ok": True, "event": "ready", "native_preview_protocol": 1}
+
+        def configure_gpu(self, *args, **kwargs):
+            return {"ok": True, "event": "gpu_configured", "native_preview": True}
+
+        def render_gpu_frame_direct(self, t_ms, **kwargs):
+            if slow_remaining["n"] > 0:
+                slow_remaining["n"] -= 1
+                time.sleep(0.166)  # 慢机 6fps
+                duration = 166.0
+            else:
+                duration = 1.0  # 骤快（缓存热了）
+            return {
+                "ok": True,
+                "event": "gpu_frame_rendered_direct",
+                "t_ms": int(t_ms),
+                "render_ms": duration,
+                "present_ms": 0.2,
+                "readback_ms": 0.0,
+                "transport": "direct_composition",
+            }
+
+        def present_rendered_gpu_frame(self, **kwargs):
+            # 到点持有发生在 present 之前：媒体时钟必须在上屏时刻读取，
+            # 在渲染时刻读会把持有量本身误判成提前量。
+            with lock:
+                presented.append(
+                    (
+                        int(kwargs.get("generation", 0)),
+                        int(kwargs.get("t_ms", 0)),
+                        clock["t"],
+                    )
+                )
+            return {
+                "ok": True,
+                "event": "gpu_frame_presented",
+                "t_ms": int(kwargs.get("t_ms", 0)),
+                "render_ms": 0.0,
+                "present_ms": 0.2,
+                "readback_ms": 0.0,
+                "child_hwnd": 4321,
+                "transport": "direct_composition",
+            }
+
+        def render_gpu_frame(self, *args, **kwargs):
+            raise AssertionError("G6 native preview must not use shared-memory readback")
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(pa, "gpu_native_preview_enabled", lambda: True)
+    monkeypatch.setattr(pa, "NativeRendererProcess", FakeGpuProcess)
+    renderer = pa.GpuAsyncSubtitleRenderer(320, 180)
+    try:
+        renderer.set_native_target(12345, 0, 0, 320, 180)
+        renderer.set_state(TimingTrack(), Style())
+        renderer.set_playing(True)
+        # 媒体时钟用墙钟驱动（生产中由 QElapsedTimer 平滑驱动，与墙钟
+        # 1:1）——离散步进（每拍 sleep 开销 >16.7ms 只走 16ms）会比真实
+        # 媒体慢，导致到点持有的模型被误判为提前上屏。
+        t0 = time.monotonic()
+        while time.monotonic() - t0 < 1.2:
+            with lock:
+                clock["t"] = 60_000 + int((time.monotonic() - t0) * 1000.0)
+            renderer.request(clock["t"])
+            qapp.processEvents()
+            time.sleep(0.016)
+        time.sleep(0.25)
+        qapp.processEvents()
+
+        keys = [renderer._frame_cache.key_for(t) for _, t, _ in presented]  # noqa: SLF001
+        assert len(keys) >= 10, f"应有足够样本（实际 {len(keys)}）"
+        backward = [(a, b) for a, b in zip(keys, keys[1:]) if b <= a]
+        assert not backward, f"恢复瞬态出现回退呈现: {backward}"
+        # 到点才播放：呈现戳最多比当时媒体时钟早 ~2 帧（测试时钟 16.7ms
+        # 量化 + 持有 4ms 粒度的余量）。
+        early = [
+            (t, media)
+            for _, t, media in presented
+            if t - media > 40
+        ]
+        assert not early, f"提前上屏未到点的帧: {early[:6]}"
     finally:
         renderer.stop()
 
@@ -1717,16 +1885,28 @@ def test_gpu_native_mode_hot_switch_keeps_sidecar_and_flips_transport(qapp, monk
         def configure_gpu(self, *args, **kwargs):
             return {"ok": True, "event": "gpu_configured", "native_preview": True}
 
-        def present_gpu_frame(self, t_ms, **kwargs):
+        def render_gpu_frame_direct(self, t_ms, **kwargs):
             present_calls.append(int(t_ms))
             step.set()
             return {
                 "ok": True,
-                "event": "gpu_frame_presented",
+                "event": "gpu_frame_rendered_direct",
                 "t_ms": int(t_ms),
                 "render_ms": 5.0,
                 "present_ms": 0.2,
                 "readback_ms": 0.0,
+                "transport": "direct_composition",
+            }
+
+        def present_rendered_gpu_frame(self, **kwargs):
+            return {
+                "ok": True,
+                "event": "gpu_frame_presented",
+                "t_ms": int(kwargs.get("t_ms", 0)),
+                "render_ms": 0.0,
+                "present_ms": 0.2,
+                "readback_ms": 0.0,
+                "child_hwnd": 4321,
                 "transport": "direct_composition",
             }
 

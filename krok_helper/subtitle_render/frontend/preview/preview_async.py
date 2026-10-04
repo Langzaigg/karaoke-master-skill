@@ -1410,8 +1410,17 @@ class GpuAsyncSubtitleRenderer(QObject):
                                 self._note("frames_emitted")
                                 self.frame_presented.emit(int(settled_t))
                             continue
-                        event = renderer.present_gpu_frame(
+                        # 拆分路径：先渲染到纹理（可提前），用真实渲染耗时
+                        # 持有到点，再上屏——present_gpu_frame 的渲染+上屏
+                        # 一体调用没法在中间等待，提前持有会让帧迟到。
+                        render_event = renderer.render_gpu_frame_direct(
                             render_t,
+                            force_warp=force_warp,
+                            generation=generation,
+                            frame_index=self._frame_index,
+                        )
+                        self._hold_until_due(t_ms, submitted_at, render_t, generation)
+                        event = renderer.present_rendered_gpu_frame(
                             parent_hwnd=parent_hwnd,
                             x=target_x,
                             y=target_y,
@@ -1419,10 +1428,12 @@ class GpuAsyncSubtitleRenderer(QObject):
                             height=target_height,
                             src_x=src_x,
                             src_y=src_y,
+                            t_ms=render_t,
                             force_warp=force_warp,
                             generation=generation,
-                            frame_index=self._frame_index,
                         )
+                        if event.get("render_ms") in (None, 0.0):
+                            event["render_ms"] = render_event.get("render_ms", 0.0)
                         self._native_note_presented(generation, render_t, event)
                         # 后续记账/emit 一律用实际渲染的时间戳。
                         t_ms = render_t
@@ -1787,9 +1798,54 @@ class GpuAsyncSubtitleRenderer(QObject):
         ahead_ms = min(age_ms + float(ema_ms or 0.0), self._STALE_TOLERANCE_MS)
         if ahead_ms < 1.0:
             return int(t_ms)
+        media_key = self._frame_cache.key_for(int(t_ms))
         projected_key = self._frame_cache.key_for(int(t_ms) + int(ahead_ms))
-        key = max(self._frame_cache.key_for(int(t_ms)), projected_key)
+        key = max(media_key, projected_key)
+        # 恢复瞬态的单调约束（2026-10 用户问询暴露的缺陷）：负载骤降时
+        # EMA 仍高估，目标戳随衰减逐帧回退 → 字幕先跳超前再倒着走。地板
+        # = 上次已画键+1（消灭倒走）；天花板 = 当前媒体键+容忍窗键数（把
+        # 超前钳在验收窗内，防地板在渲染快于键率时越跑越前）。EMA 收敛
+        # 后两条约束都不再绑定，回到逐帧节奏——等价于用户的「填缝恢复」
+        # （10,20,30… → 密到 15,25… → 13… → 60fps）的端态。
+        interval_keys = max(
+            1,
+            int(round(self._STALE_TOLERANCE_MS * self._frame_cache._fps / 1000.0)),  # noqa: SLF001
+        )
+        ceiling_key = media_key + interval_keys
+        with self._condition:
+            last = self._native_last_presented
+        if last is not None and last[0] == self._generation:
+            key = max(key, last[1] + 1)
+        key = min(key, ceiling_key)
         return self._frame_cache.timestamp_for_key(key)
+
+    def _hold_until_due(
+        self, requested_t: int, submitted_at: float, render_t: int, generation: int
+    ) -> None:
+        """到点才播放（2026-10 用户拍板）：渲染可以提前，present 必须等到
+        目标戳成为当前画面。
+
+        投喂前移把目标戳放到「预计完成时刻」，渲染通常刚好赶上；恢复瞬态
+        （EMA 高估/骤快）会提前完成——提前上屏就是字幕超前/倒走的根源。
+        这里按「目标戳 − 预估媒体时钟」分段持有等待，暂停/停止/代际变化
+        立即放行。预估时钟与投喂同一模型：请求戳 + 请求以来的墙钟流逝。
+        """
+        if not self._playing:
+            return
+        media_now_ms = float(requested_t) + (time.monotonic() - submitted_at) * 1000.0
+        hold_ms = float(render_t) - media_now_ms
+        if hold_ms <= 2.0:
+            return
+        deadline = time.monotonic() + min(hold_ms, 200.0) / 1000.0
+        while time.monotonic() < deadline:
+            with self._condition:
+                if (
+                    self._stopped
+                    or not self._playing
+                    or generation != self._generation
+                ):
+                    return
+            time.sleep(0.004)
 
     def _native_render_timestamp(
         self,
@@ -1805,13 +1861,21 @@ class GpuAsyncSubtitleRenderer(QObject):
         key = self._frame_cache.key_for(int(t_ms))
         if content_changed:
             return self._frame_cache.timestamp_for_key(key)
-        with self._condition:
-            last = self._native_last_presented
-            if last is not None and last[0] == self._generation and last[1] == key:
-                return None
-        return self._project_playback_timestamp(
+        projected = self._project_playback_timestamp(
             t_ms, submitted_at, self._render_ms_ema
         )
+        # 同键去重放在钳位之后用最终键判断：超前顶到天花板时，地板与
+        # 天花板的 clamp 可能回落到与上次相同的键——那是重复帧，跳过等
+        # 媒体时钟前进，而不是再画一遍。
+        with self._condition:
+            last = self._native_last_presented
+        if last is not None and last[0] == self._generation:
+            if last[1] == key:
+                return None
+            projected_key = self._frame_cache.key_for(projected)
+            if projected_key == last[1]:
+                return None
+        return projected
 
     def _native_note_presented(
         self, generation: int, t_ms: int, event: dict

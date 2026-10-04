@@ -8444,4 +8444,23 @@ void Direct2DGpuBackend::pumpNativePreviewMessages() {
     previewSurface_.pumpMessages();
 }
 
+NativeRenderOnlyResult Direct2DGpuBackend::renderFrameOnly(int tMs) {
+    const auto rendered = renderFrameInternal(tMs, false, false);
+    NativeRenderOnlyResult result;
+    result.renderMs = rendered.renderMs;
+    return result;
+}
+
+NativePreviewResult Direct2DGpuBackend::presentRendered(
+    const NativePreviewTarget &target
+) {
+    return previewSurface_.present(
+        device_.d3dDevice(),
+        device_.d3dContext(),
+        impl_->frameTargetTexture.Get(),
+        0.0,
+        target
+    );
+}
+
 }  // namespace krok::subtitle::native
