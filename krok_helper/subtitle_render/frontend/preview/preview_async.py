@@ -260,9 +260,34 @@ def gpu_preview_enabled() -> bool:
     return _env_enabled("KROK_SUBTITLE_GPU_PREVIEW", default)
 
 
+def _gpu_direct_present_preference() -> bool:
+    """Read the persisted G6 preference (set by the export-page toggle)."""
+    try:
+        from krok_helper.subtitle_render.settings.store import (
+            SubtitleRenderSettingsStore,
+        )
+        from krok_helper.settings import load_app_settings
+
+        store = SubtitleRenderSettingsStore(load_app_settings)
+        data = store.load()
+        output = data.get("output") if isinstance(data.get("output"), dict) else {}
+        return bool(output.get("gpu_direct_present", False))
+    except Exception:  # noqa: BLE001 - 设置读取失败按关处理
+        return False
+
+
 def gpu_native_preview_enabled() -> bool:
-    """G6 DirectComposition is retired from the product path."""
-    return False
+    """G6 DirectComposition 直画上屏（2026-10 用户决定重开，默认关）。
+
+    开启后 sidecar 在预览 viewport 下创建 DirectComposition 子窗口，
+    字幕层直接上屏（零回读/零共享内存/零 QImage），roundtrip 从 ~55ms
+    降到 ~5ms。开关在导出页「使用 GPU 渲染字幕预览」下面；失败自动
+    回退 G5（shared-memory/QImage）。KROK_SUBTITLE_GPU_NATIVE_PREVIEW=1
+    也可强制开启（测试用）。
+    """
+    if _env_enabled("KROK_SUBTITLE_GPU_NATIVE_PREVIEW", "0"):
+        return True
+    return _gpu_direct_present_preference()
 
 
 def native_preview_timestamps(

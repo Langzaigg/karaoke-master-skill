@@ -547,20 +547,23 @@ def test_gpu_preview_defaults_to_g5_on_interactive_windows(monkeypatch):
     assert pa.gpu_preview_enabled() is False
 
 
-def test_gpu_native_preview_is_hard_disabled(monkeypatch):
+def test_gpu_native_preview_env_gate(monkeypatch):
+    """G6 直画上屏：env=1 强制开，env=0/缺省+偏好关 → 关（2026-10 重开）。"""
     from krok_helper.subtitle_render.frontend.preview import preview_async as pa
 
     monkeypatch.delenv("KROK_SUBTITLE_GPU_NATIVE_PREVIEW", raising=False)
+    # 偏好也关（默认）→ 关
     assert pa.gpu_native_preview_enabled() is False
 
     monkeypatch.setenv("KROK_SUBTITLE_GPU_NATIVE_PREVIEW", "1")
-    assert pa.gpu_native_preview_enabled() is False
+    assert pa.gpu_native_preview_enabled() is True
 
     monkeypatch.setenv("KROK_SUBTITLE_GPU_NATIVE_PREVIEW", "0")
     assert pa.gpu_native_preview_enabled() is False
 
 
-def test_gpu_renderer_never_enters_g6_even_with_legacy_env_opt_in(qapp, monkeypatch):
+def test_gpu_renderer_enters_g6_with_env_opt_in(qapp, monkeypatch):
+    """env=1 时渲染器进入 G6 模式（uses_native_preview=True）。"""
     from krok_helper.subtitle_render.frontend.preview.preview_async import (
         GpuAsyncSubtitleRenderer,
     )
@@ -568,7 +571,7 @@ def test_gpu_renderer_never_enters_g6_even_with_legacy_env_opt_in(qapp, monkeypa
     monkeypatch.setenv("KROK_SUBTITLE_GPU_NATIVE_PREVIEW", "1")
     renderer = GpuAsyncSubtitleRenderer(320, 180)
     try:
-        assert renderer.uses_native_preview is False
+        assert renderer.uses_native_preview is True
     finally:
         renderer.stop()
 

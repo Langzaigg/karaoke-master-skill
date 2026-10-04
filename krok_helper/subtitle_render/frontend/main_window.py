@@ -1303,6 +1303,7 @@ class SubtitleRenderWindow(QWidget):
             self._on_render_workers_changed
         )
         self._gpu_preview_check.toggled.connect(self._on_gpu_preview_changed)
+        self._gpu_direct_check.toggled.connect(self._on_gpu_direct_present_changed)
         self._gpu_export_check.toggled.connect(self._on_gpu_export_changed)
 
     def _switch_tab(self, key: str) -> None:
@@ -2113,6 +2114,12 @@ class SubtitleRenderWindow(QWidget):
             self._gpu_preview_check.setChecked(gpu_preview_on)
             self._preview_panel.set_gpu_preview_enabled(gpu_preview_on)
             self._gpu_export_check.setChecked(gpu_export_enabled)
+            blocked_direct = self._gpu_direct_check.blockSignals(True)
+            try:
+                self._gpu_direct_check.setChecked(bool(
+                    output.get("gpu_direct_present", False)))
+            finally:
+                self._gpu_direct_check.blockSignals(blocked_direct)
         if self._loading_project:
             # Project output names are authoritative.  Forget the previous
             # project's auto-generated name before its media starts loading.
@@ -2812,6 +2819,7 @@ class SubtitleRenderWindow(QWidget):
             render_worker_options=RENDER_WORKER_OPTIONS,
             gpu_preview_checked=gpu_preview_enabled(),
             gpu_controls_visible=sys.platform == "win32",
+            gpu_direct_present_checked=self._load_direct_present_preference(),
         )
         page.locationSettingsRequested.connect(
             self._open_export_location_settings
@@ -2848,6 +2856,8 @@ class SubtitleRenderWindow(QWidget):
         self._export_native_check = controls.native_check
         self._gpu_preview_check = controls.gpu_preview_check
         self._gpu_export_check = controls.gpu_export_check
+
+        self._gpu_direct_check = controls.gpu_direct_present_check
         self._export_monitor_card = controls.monitor_card
         self._export_monitor_layout = controls.monitor_layout
         self._export_eta_label = controls.eta_label
@@ -6629,6 +6639,27 @@ class SubtitleRenderWindow(QWidget):
         """Apply and persist the experimental subtitle-preview backend."""
         self._preview_preference_controller.apply_gpu_enabled(enabled)
 
+    def _load_direct_present_preference(self) -> bool:
+        """从持久化设置读 G6 直画偏好（加载失败按关）。"""
+        try:
+            data = self._settings_store.load()
+            output = data.get("output") if isinstance(data.get("output"), dict) else {}
+            return bool(output.get("gpu_direct_present", False))
+        except Exception:
+            return False
+
+    def _on_gpu_direct_present_changed(self, enabled: bool) -> None:
+        """GPU 直画上屏（G6）：持久化 + 热切换预览渲染器。"""
+        # 持久化由 _save_persisted_state（gpu_direct_present 字段）完成。
+        # G6 依赖 GPU 预览开着（G5 是它的回退基座）
+        if enabled and not self._gpu_preview_check.isChecked():
+            self._gpu_preview_check.setChecked(True)
+        # 热切换：停掉当前渲染器，下一次 request 会按新设置重建
+        self._preview_panel.set_gpu_preview_enabled(
+            self._gpu_preview_check.isChecked()
+        )
+        self._save_persisted_state()
+
     def _warn_gpu_preview_unavailable(self) -> None:
         fluent_warning(
             self,
@@ -8411,6 +8442,7 @@ class SubtitleRenderWindow(QWidget):
                 preview_quality=self._transport_bar.preview_quality(),
                 gpu_export_enabled=self._gpu_export_check.isChecked(),
                 gpu_export_default_version=GPU_EXPORT_DEFAULT_VERSION,
+                gpu_direct_present=self._gpu_direct_check.isChecked(),
                 directory_mode=self._export_dir_mode,
                 custom_directory=self._export_custom_dir,
                 name_template=self._export_name_template,

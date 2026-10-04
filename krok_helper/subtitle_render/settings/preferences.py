@@ -189,6 +189,7 @@ class AppOutputPreferenceValues:
     render_workers: object
     allowed_render_workers: tuple[int, ...]
     output_format: str = "mp4"
+    gpu_direct_present: bool = False
 
 
 @dataclass(frozen=True)
@@ -598,6 +599,7 @@ def update_app_output_preferences(
     preview_quality: str,
     gpu_export_enabled: bool,
     gpu_export_default_version: int,
+    gpu_direct_present: bool = False,
     directory_mode: str,
     custom_directory: str,
     name_template: str,
@@ -634,6 +636,7 @@ def update_app_output_preferences(
                 and render_workers in allowed_render_workers
                 else 0
             ),
+            "gpu_direct_present": bool(gpu_direct_present),
             "output_format": (
                 str(output_format)
                 if str(output_format) in OUTPUT_FORMATS

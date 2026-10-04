@@ -547,6 +547,7 @@ class ExportWorkspaceControls:
     render_workers_combo: FluentComboBox
     native_check: CheckBox
     gpu_preview_check: CheckBox
+    gpu_direct_present_check: CheckBox
     gpu_export_check: CheckBox
     monitor_card: SimpleCardWidget
     monitor_layout: QVBoxLayout
@@ -580,6 +581,7 @@ class ExportWorkspaceView(QWidget):
         render_worker_options: Sequence[int],
         gpu_preview_checked: bool,
         gpu_controls_visible: bool,
+        gpu_direct_present_checked: bool = False,
         parent: Optional[QWidget] = None,
     ) -> None:
         super().__init__(parent)
@@ -862,6 +864,13 @@ class ExportWorkspaceView(QWidget):
             "使用稳定的 G5 shared-memory/QImage 路径加速字幕透明层；"
             "不可用或失败时自动回退 Painter。"
         )
+        gpu_direct_present_check = CheckBox("GPU 直画上屏（实验）", settings_col)
+        gpu_direct_present_check.setChecked(gpu_direct_present_checked)
+        gpu_direct_present_check.setVisible(gpu_controls_visible)
+        gpu_direct_present_check.setToolTip(
+            "字幕层由 GPU 直接合成到预览窗口（零回读，最流畅）；"
+            "失败时自动回退到上一项的 shared-memory 路径。"
+        )
         gpu_export_check = CheckBox("使用 GPU 渲染字幕导出", settings_col)
         gpu_export_check.setChecked(gpu_controls_visible)
         gpu_export_check.setVisible(gpu_controls_visible)
@@ -870,6 +879,7 @@ class ExportWorkspaceView(QWidget):
             "失败时会删除半成品并从头回退 Painter。"
         )
         settings_layout.addWidget(gpu_preview_check)
+        settings_layout.addWidget(gpu_direct_present_check)
         settings_layout.addWidget(gpu_export_check)
         settings_layout.addWidget(native_check)
         settings_layout.addStretch(1)
