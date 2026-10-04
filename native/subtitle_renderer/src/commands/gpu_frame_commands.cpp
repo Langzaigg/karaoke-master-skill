@@ -432,11 +432,9 @@ QJsonObject handleRenderGpuFrameDirect(
         return out;
     }
     const bool forceWarp = request.value(QStringLiteral("force_warp")).toBool(false);
-    if (!gpuConfigured(runtime, forceWarp)) {
-        QJsonObject out = response(false, QStringLiteral("gpu_render_frame_direct"));
-        out.insert(QStringLiteral("error"), QStringLiteral("GPU backend is not configured"));
-        return out;
-    }
+    // 不查 gpuConfigured 标志：池化 configure（G5 多 worker）后该标志不满足
+    // 但场景已配置（config 在场），ensureGpuBackend 按需建后端即可——
+    // G5→G6 热切换曾在此连败进入杀进程重启链（2026-10 最小复现钉死）。
     QString error;
     auto *backend = ensureGpuBackend(runtime, forceWarp, &error);
     if (backend == nullptr) {
@@ -470,11 +468,7 @@ QJsonObject handlePresentRenderedGpuFrame(
         return out;
     }
     const bool forceWarp = request.value(QStringLiteral("force_warp")).toBool(false);
-    if (!gpuConfigured(runtime, forceWarp)) {
-        QJsonObject out = response(false, QStringLiteral("gpu_present_rendered"));
-        out.insert(QStringLiteral("error"), QStringLiteral("GPU backend is not configured"));
-        return out;
-    }
+    // 同 render_direct：config 在场即可，ensureGpuBackend 按需建后端。
     QString error;
     auto *backend = ensureGpuBackend(runtime, forceWarp, &error);
     if (backend == nullptr) {

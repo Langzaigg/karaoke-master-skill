@@ -920,6 +920,13 @@ class GpuAsyncSubtitleRenderer(QObject):
                 return False
             self._native_preview = bool(enabled)
             self._note("native_mode_switches")
+            # 两个方向都强制走一次轻量 resize（1ms 量级）：G5 池化 configure
+            # 只配置池的后备 worker，主后端（direct 渲染的执行者）从未
+            # configure——renderFrameOnly 会抛 "GPU backend is not
+            # configured"（2026-10 最小复现钉死，曾致热切换连败进入杀
+            # 进程重启链）；worker=1 的 resize 恰好 configure 主后端。
+            # 反向同理：单 worker resize 会重置池，重建走池化 resize。
+            self._needs_target_resize = True
             if enabled:
                 # G5→G6：直画模式不用投机缓存（pending 跟随请求戳 + 投喂
                 # 前移），lookahead 冻结为 0。
@@ -1409,7 +1416,15 @@ class GpuAsyncSubtitleRenderer(QObject):
                             dpr=dpr,
                             force_warp=force_warp,
                             prewarm_t_ms=t_ms,
-                            worker_count=self._worker_count_requested,
+                            # native（直画）必须 worker=1：多 worker 走池化
+                            # 路径只配置池的后备 worker，主后端（direct 渲染
+                            # 执行者）不会被 configure（2026-10 热切换连败
+                            # 根因）。
+                            worker_count=(
+                                1
+                                if self._native_preview
+                                else self._worker_count_requested
+                            ),
                         )
                         self._active_worker_count = max(
                             1, min(int(configured.get("worker_count", 1)), 8)
@@ -1419,6 +1434,10 @@ class GpuAsyncSubtitleRenderer(QObject):
                         self._note("configure_count")
                         scene_configured = True
                         self._style_patch_key = current_patch_key
+                        # resize 成功即清零连败计数（用户要求：resize 本身
+                        # 消耗大，期间的瞬时失败是过渡态，不该累积降级）。
+                        self._frame_error_streak = 0
+                        self._native_preview_failures = 0
                     if scene_configured:
                         # configure 完成（IR 重排 + sidecar 场景就绪）；此刻起等待的
                         # 是首帧实现（字形光栅化）与出帧，帧到达即由 GUI 徽标收尾。

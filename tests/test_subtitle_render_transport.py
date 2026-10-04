@@ -1227,6 +1227,9 @@ def test_gpu_async_renderer_queue_is_capacity_one_latest_wins(qapp, monkeypatch)
 
         def configure_gpu(self, *args, **kwargs):
             return {"ok": True, "event": "gpu_configured"}
+        def resize_gpu_target(self, *args, **kwargs):
+            return {"ok": True, "event": "gpu_configured", "worker_count": 1}
+
 
         def render_gpu_frame(self, t_ms, **kwargs):
             rendered.append(int(t_ms))
@@ -1307,6 +1310,9 @@ def test_gpu_native_preview_presents_without_shared_memory_or_qimage(qapp, monke
 
         def configure_gpu(self, *args, **kwargs):
             return {"ok": True, "event": "gpu_configured", "native_preview": True}
+        def resize_gpu_target(self, *args, **kwargs):
+            return {"ok": True, "event": "gpu_configured", "worker_count": 1}
+
 
         def render_gpu_frame_direct(self, t_ms, **kwargs):
             presented_calls.append((int(t_ms), dict(kwargs)))
@@ -1399,6 +1405,9 @@ def test_gpu_native_preview_closes_child_window_when_target_cleared(qapp, monkey
 
         def configure_gpu(self, *args, **kwargs):
             return {"ok": True, "event": "gpu_configured", "native_preview": True}
+        def resize_gpu_target(self, *args, **kwargs):
+            return {"ok": True, "event": "gpu_configured", "worker_count": 1}
+
 
         def render_gpu_frame_direct(self, t_ms, **kwargs):
             presented_calls.append(int(t_ms))
@@ -1478,6 +1487,9 @@ def test_gpu_native_preview_skips_redundant_same_key_frames(qapp, monkeypatch):
 
         def configure_gpu(self, *args, **kwargs):
             return {"ok": True, "event": "gpu_configured", "native_preview": True}
+        def resize_gpu_target(self, *args, **kwargs):
+            return {"ok": True, "event": "gpu_configured", "worker_count": 1}
+
 
         def render_gpu_frame_direct(self, t_ms, **kwargs):
             presented.append(int(t_ms))
@@ -1552,6 +1564,9 @@ def test_gpu_native_preview_projects_ahead_by_render_latency(qapp, monkeypatch):
 
         def configure_gpu(self, *args, **kwargs):
             return {"ok": True, "event": "gpu_configured", "native_preview": True}
+        def resize_gpu_target(self, *args, **kwargs):
+            return {"ok": True, "event": "gpu_configured", "worker_count": 1}
+
 
         def render_gpu_frame_direct(self, t_ms, **kwargs):
             presented.append((int(kwargs.get("generation", 0)), int(t_ms)))
@@ -1627,6 +1642,9 @@ def test_gpu_native_preview_idle_pumps_while_paused(qapp, monkeypatch):
 
         def configure_gpu(self, *args, **kwargs):
             return {"ok": True, "event": "gpu_configured", "native_preview": True}
+        def resize_gpu_target(self, *args, **kwargs):
+            return {"ok": True, "event": "gpu_configured", "worker_count": 1}
+
 
         def render_gpu_frame_direct(self, t_ms, **kwargs):
             first_present.set()
@@ -1699,6 +1717,9 @@ def test_gpu_native_preview_schedules_at_capacity_rate_without_waste(qapp, monke
 
         def configure_gpu(self, *args, **kwargs):
             return {"ok": True, "event": "gpu_configured", "native_preview": True}
+        def resize_gpu_target(self, *args, **kwargs):
+            return {"ok": True, "event": "gpu_configured", "worker_count": 1}
+
 
         def render_gpu_frame_direct(self, t_ms, **kwargs):
             time.sleep(0.045)  # 模拟慢机：一帧 45ms（≈22fps 吞吐）
@@ -1782,6 +1803,9 @@ def test_gpu_native_preview_recovery_stays_monotonic(qapp, monkeypatch):
 
         def configure_gpu(self, *args, **kwargs):
             return {"ok": True, "event": "gpu_configured", "native_preview": True}
+        def resize_gpu_target(self, *args, **kwargs):
+            return {"ok": True, "event": "gpu_configured", "worker_count": 1}
+
 
         def render_gpu_frame_direct(self, t_ms, **kwargs):
             if slow_remaining["n"] > 0:
@@ -1886,6 +1910,9 @@ def test_gpu_native_due_scheduler_fills_during_recovery(qapp, monkeypatch):
 
         def configure_gpu(self, *args, **kwargs):
             return {"ok": True, "event": "gpu_configured", "native_preview": True}
+        def resize_gpu_target(self, *args, **kwargs):
+            return {"ok": True, "event": "gpu_configured", "worker_count": 1}
+
 
         def render_gpu_frame_direct(self, t_ms, **kwargs):
             if slow["n"] > 0:
@@ -1982,6 +2009,9 @@ def test_gpu_native_mode_hot_switch_keeps_sidecar_and_flips_transport(qapp, monk
 
         def configure_gpu(self, *args, **kwargs):
             return {"ok": True, "event": "gpu_configured", "native_preview": True}
+        def resize_gpu_target(self, *args, **kwargs):
+            return {"ok": True, "event": "gpu_configured", "worker_count": 1}
+
 
         def render_gpu_frame_direct(self, t_ms, **kwargs):
             present_calls.append(int(t_ms))
@@ -2125,6 +2155,9 @@ def test_gpu_async_renderer_queue_full_is_backpressure_not_failure(
 
         def configure_gpu(self, *args, **kwargs):
             return {"ok": True, "event": "gpu_configured", "worker_count": 1}
+        def resize_gpu_target(self, *args, **kwargs):
+            return {"ok": True, "event": "gpu_configured", "worker_count": 1}
+
 
         def render_gpu_frame(self, *args, **kwargs):
             calls["render"] += 1
@@ -2206,6 +2239,9 @@ def test_gpu_async_renderer_frame_error_retries_once_before_restart(
 
         def configure_gpu(self, *args, **kwargs):
             return {"ok": True, "event": "gpu_configured", "worker_count": 1}
+        def resize_gpu_target(self, *args, **kwargs):
+            return {"ok": True, "event": "gpu_configured", "worker_count": 1}
+
 
         def render_gpu_frame(self, *args, **kwargs):
             attempts["render"] += 1
@@ -2457,6 +2493,9 @@ def test_gpu_async_renderer_one_frame_lookahead_uses_bounded_cache(qapp, monkeyp
 
         def configure_gpu(self, *args, **kwargs):
             return {"ok": True, "event": "gpu_configured"}
+        def resize_gpu_target(self, *args, **kwargs):
+            return {"ok": True, "event": "gpu_configured", "worker_count": 1}
+
 
         def render_gpu_frame(self, t_ms, **kwargs):
             rendered.append(int(t_ms))
@@ -2893,6 +2932,9 @@ def test_gpu_async_renderer_ignores_dropped_single_frame_without_fallback(
 
         def configure_gpu(self, *args, **kwargs):
             return {"ok": True, "event": "gpu_configured", "worker_count": 1}
+        def resize_gpu_target(self, *args, **kwargs):
+            return {"ok": True, "event": "gpu_configured", "worker_count": 1}
+
 
         def render_gpu_frame(self, t_ms, **kwargs):
             nonlocal calls
@@ -4036,6 +4078,9 @@ def test_preview_graphics_backend_label_follows_gpu_failure_and_recovery(
 
         def configure_gpu(self, *args, **kwargs):
             return {"ok": True, "event": "gpu_configured", "worker_count": 1}
+        def resize_gpu_target(self, *args, **kwargs):
+            return {"ok": True, "event": "gpu_configured", "worker_count": 1}
+
 
         def render_gpu_frame(self, t_ms, **kwargs):
             return {
@@ -5073,6 +5118,9 @@ def test_gpu_renderer_backend_mode_reports_gpu_on_delivered_frame(qapp, monkeypa
 
         def configure_gpu(self, *args, **kwargs):
             return {"ok": True, "event": "gpu_configured", "worker_count": 1}
+        def resize_gpu_target(self, *args, **kwargs):
+            return {"ok": True, "event": "gpu_configured", "worker_count": 1}
+
 
         def render_gpu_frame(self, t_ms, **kwargs):
             return {
