@@ -894,14 +894,14 @@ def test_numeric_field_normalises_text_once_editing_finishes(qapp):
     spin.close()
 
 
-def test_font_weight_menu_only_shows_selected_font_weights(
+def test_font_weight_menu_merges_presets_with_physical_weights(
     monkeypatch, qapp
 ):
     families = ("Demo Sans", "MyEmoji5", "Variable Font")
     available = {
         "Demo Sans": (400, 700),
         "MyEmoji5": (400,),
-        "Variable Font": (100, 400, 700, 900),
+        "Variable Font": (100, 425, 700, 900),
     }
     monkeypatch.setattr(pp, "n3_font_families", lambda: families)
     monkeypatch.setattr(
@@ -916,17 +916,45 @@ def test_font_weight_menu_only_shows_selected_font_weights(
     )
     monkeypatch.setattr(
         pp,
-        "_supports_synthetic_bold",
-        lambda family, _weights: family == "MyEmoji5",
+        "physical_weight_styles",
+        lambda family: ((425, "R"),) if family == "Variable Font" else (),
+    )
+
+    class _Plan:
+        def __init__(self, mark):
+            self.mark = mark
+
+    marks = {
+        ("Variable Font", 300): "就近",
+        ("MyEmoji5", 700): "模拟",
+    }
+    monkeypatch.setattr(
+        pp,
+        "resolve_weight_plan",
+        lambda family, weight: _Plan(marks.get((family, weight))),
     )
     panel = PropertyPanel()
     panel.set_style(Style(font_family="Variable Font", font_weight=900))
 
+    # 标准预设 ∪ 真实字重（425 是命名实例，带实例名后缀）。
     assert [
         panel._font_weight_combo.itemData(index)
         for index in range(panel._font_weight_combo.count())
-    ] == [100, 400, 700, 900]
+    ] == [100, 200, 300, 400, 425, 500, 600, 700, 800, 900]
     assert panel._font_weight_combo.itemText(0) == "极细 100"
+    assert (
+        panel._font_weight_combo.itemText(
+            panel._font_weight_combo.findData(425)
+        )
+        == "字重 425 · R"
+    )
+    # 非原生档位带标注。
+    assert (
+        panel._font_weight_combo.itemText(
+            panel._font_weight_combo.findData(300)
+        )
+        == "细体 300（就近）"
+    )
 
     emitted: list[Style] = []
     panel.styleChanged.connect(emitted.append)
@@ -935,11 +963,17 @@ def test_font_weight_menu_only_shows_selected_font_weights(
     assert [
         panel._font_weight_combo.itemData(index)
         for index in range(panel._font_weight_combo.count())
-    ] == [400, 700]
-    assert panel._font_weight_combo.currentText() == "粗体 700（合成）"
+    ] == [100, 200, 300, 400, 500, 600, 700, 800, 900]
+    assert (
+        panel._font_weight_combo.currentText() == "黑体 900（模拟）"
+        or panel._font_weight_combo.itemText(
+            panel._font_weight_combo.findData(700)
+        )
+        == "粗体 700（模拟）"
+    )
     assert panel.subtitle_style.font_family == "MyEmoji5"
-    assert panel.subtitle_style.font_weight == 700
-    assert emitted[-1].font_weight == 700
+    assert panel.subtitle_style.font_weight == 900
+    assert emitted[-1].font_weight == 900
 
 
 def test_inherited_font_weight_menu_tracks_effective_parent_font(
@@ -957,10 +991,16 @@ def test_inherited_font_weight_menu_tracks_effective_parent_font(
         "_available_font_weights",
         lambda family: (400,) if family == "MyEmoji5" else (400, 700),
     )
+    monkeypatch.setattr(pp, "physical_weight_styles", lambda family: ())
+
+    class _Plan:
+        def __init__(self, mark):
+            self.mark = mark
+
     monkeypatch.setattr(
         pp,
-        "_supports_synthetic_bold",
-        lambda family, _weights: family == "MyEmoji5",
+        "resolve_weight_plan",
+        lambda family, weight: _Plan("模拟" if family == "MyEmoji5" and weight >= 600 else None),
     )
     panel = PropertyPanel()
     panel.set_style(
@@ -975,7 +1015,7 @@ def test_inherited_font_weight_menu_tracks_effective_parent_font(
     assert [
         panel._font_latin_weight_combo.itemData(index)
         for index in range(panel._font_latin_weight_combo.count())
-    ] == [0, 400, 700]
+    ] == [0, 100, 200, 300, 400, 500, 600, 700, 800, 900]
     assert panel._font_latin_weight_combo.currentData() == 0
 
     panel._font_combo.setCurrentFont(QFont("MyEmoji5"))
@@ -983,12 +1023,12 @@ def test_inherited_font_weight_menu_tracks_effective_parent_font(
     assert [
         panel._font_latin_weight_combo.itemData(index)
         for index in range(panel._font_latin_weight_combo.count())
-    ] == [0, 400, 700]
+    ] == [0, 100, 200, 300, 400, 500, 600, 700, 800, 900]
     assert (
         panel._font_latin_weight_combo.itemText(
             panel._font_latin_weight_combo.findData(700)
         )
-        == "粗体 700（合成）"
+        == "粗体 700（模拟）"
     )
     assert panel._font_latin_weight_combo.currentData() == 0
     assert panel.subtitle_style.latin_font_weight is None

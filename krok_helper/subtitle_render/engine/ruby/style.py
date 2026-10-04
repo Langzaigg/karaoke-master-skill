@@ -7,10 +7,10 @@ from dataclasses import replace
 from PyQt6.QtGui import QFont
 
 from krok_helper.subtitle_render.engine.text import (
-    clamp_weight,
     is_n3_latin_text,
 )
 from krok_helper.subtitle_render.engine.text import style_for_role_in_layout
+from krok_helper.subtitle_render.engine.text.font_weight import build_weight_font
 from krok_helper.subtitle_render.domain.models import Style
 from krok_helper.subtitle_render.n3.font_catalog import resolve_qt_font_family
 from krok_helper.subtitle_render.domain.timing import TimingLine
@@ -65,10 +65,12 @@ def build_ruby_font(style: Style) -> QFont:
         if style.ruby_font_weight is not None and int(style.ruby_font_weight) > 0
         else style.font_weight
     )
-    font = QFont(resolve_qt_font_family(family), size)
-    font.setPixelSize(size)
-    font.setWeight(clamp_weight(int(weight)))
-    font.setItalic(style.italic)
+    font = build_weight_font(
+        resolve_qt_font_family(family),
+        size,
+        int(weight),
+        italic=bool(style.italic),
+    )
     return font
 
 
@@ -108,10 +110,12 @@ def build_ruby_font_for_text(style: Style, reading: str) -> QFont:
         and int(style.ruby_latin_font_size_px) > 0
         else ruby_font_size(style)
     )
-    font = QFont(resolve_qt_font_family(family), max(size, 1))
-    font.setPixelSize(max(size, 1))
-    font.setWeight(clamp_weight(weight))
-    font.setItalic(style.italic)
+    font = build_weight_font(
+        resolve_qt_font_family(family),
+        max(size, 1),
+        weight,
+        italic=bool(style.italic),
+    )
     stretch = (
         style.ruby_latin_font_stretch_pct
         if style.ruby_latin_font_stretch_pct is not None

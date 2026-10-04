@@ -57,6 +57,7 @@ from krok_helper.subtitle_render.engine.style.style_preview import (
     ruby_stroke_width as _ruby_stroke_width,
 )
 from krok_helper.subtitle_render.frontend.widgets.theme import palette, themed
+from krok_helper.subtitle_render.engine.text.font_weight import build_weight_font
 from krok_helper.subtitle_render.n3.font_catalog import resolve_qt_font_family
 
 
@@ -144,11 +145,13 @@ class _FontSampleCanvas(QWidget):
     def _font(
         family: Optional[str], size: int, weight: Optional[int], italic: bool
     ) -> QFont:
-        font = QFont(family or "Microsoft YaHei UI")
-        font.setPixelSize(max(int(size), 1))
-        font.setWeight(QFont.Weight(max(100, min(int(weight or 400), 900))))
-        font.setItalic(bool(italic))
-        return font
+        # 与正式渲染同一套「字重→实例」统一口径，保证预览字形/宽度一致。
+        return build_weight_font(
+            resolve_qt_font_family(family or "Microsoft YaHei UI"),
+            int(size),
+            int(weight or 400),
+            italic=bool(italic),
+        )
 
     @staticmethod
     def _color(value: str, fallback: str = "#FFFFFF") -> QColor:

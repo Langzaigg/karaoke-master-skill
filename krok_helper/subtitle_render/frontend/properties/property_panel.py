@@ -27,7 +27,6 @@ from PyQt6.QtGui import (
     QCursor,
     QFont,
     QFontDatabase,
-    QFontInfo,
     QIcon,
 )
 from PyQt6.QtWidgets import (
@@ -228,6 +227,10 @@ from krok_helper.subtitle_render.settings.screen import (
 )
 from krok_helper.subtitle_render.engine.timing.timecode import format_timecode_ms, parse_timecode_ms
 from krok_helper.subtitle_render.engine.style.style_semantics import style_for_role
+from krok_helper.subtitle_render.engine.text.font_weight import (
+    physical_weight_styles,
+    resolve_weight_plan,
+)
 
 _GLOBAL_SCHEME_KEY = "global"
 _CUSTOM_SCHEME_PREFIX = "custom:"
@@ -338,25 +341,37 @@ def _font_weight_label(weight: int) -> str:
     return f"{label} {int(weight)}"
 
 
-def _supports_synthetic_bold(family: str, physical_weights: tuple[int, ...]) -> bool:
-    """Whether Qt resolves a non-physical 700 face as synthetic bold."""
-    if 700 in physical_weights:
-        return False
-    try:
-        physical_styles = {
-            style.casefold() for style in QFontDatabase.styles(str(family))
-        }
-        if not physical_styles:
-            return False
-        requested = QFont(str(family))
-        requested.setWeight(QFont.Weight.Bold)
-        resolved = QFontInfo(requested)
-    except (RuntimeError, TypeError, ValueError):
-        return False
-    if resolved.family().casefold() != str(family).casefold():
-        return False
-    resolved_style = resolved.styleName().casefold()
-    return "bold" in resolved_style and resolved_style not in physical_styles
+# 标准字重预设：与真实字重（含可变字体命名实例）合并成完整选项表。
+_FONT_WEIGHT_PRESETS = (100, 200, 300, 400, 500, 600, 700, 800, 900)
+# 这些 style 名与中文字重标签同义，追加到选项里只会重复。
+_GENERIC_FONT_STYLE_NAMES = frozenset({
+    "regular", "bold", "italic", "oblique", "light", "medium", "semibold",
+    "semilight", "black", "thin", "extralight", "extrabold", "heavy", "normal",
+})
+
+
+def _font_weight_combo_items(family: str) -> tuple[tuple[int, str], ...]:
+    """字重下拉选项：标准预设 ∪ 该字体的真实字重，非原生档标注。
+
+    标注口径与渲染端统一解析器（``engine.text.font_weight``）一致：
+    可变字体轴内=真实插值（不标）、轴外=「越界」（钳制到轴端点）、
+    静态单 face 缺失=「模拟」（合成粗体）、静态多 face 缺失=「就近」
+    （吸附到最近的真实 face）。真实字重额外带命名实例名（如 425 · R）。
+    """
+    physical = _available_font_weights(family)
+    style_names = dict(physical_weight_styles(family))
+    weights = sorted(set(_FONT_WEIGHT_PRESETS) | set(physical))
+    items: list[tuple[int, str]] = []
+    for weight in weights:
+        label = _font_weight_label(weight)
+        style = style_names.get(weight)
+        if style is not None and style.casefold() not in _GENERIC_FONT_STYLE_NAMES:
+            label += f" · {style}"
+        mark = resolve_weight_plan(str(family), weight).mark
+        if mark:
+            label += f"（{mark}）"
+        items.append((weight, label))
+    return tuple(items)
 
 
 _LIT_FIELDS = {
@@ -1596,11 +1611,8 @@ class PropertyPanel(QWidget):
             current_data = weight_combo.currentData()
             preferred_weight = int(current_data) if current_data is not None else 400
         family = self._effective_font_family(slot)
-        physical_weights = _available_font_weights(family)
-        synthetic_bold = _supports_synthetic_bold(family, physical_weights)
-        weights = tuple(
-            sorted(set(physical_weights) | ({700} if synthetic_bold else set()))
-        )
+        items = _font_weight_combo_items(family)
+        weights = tuple(weight for weight, _label in items)
         if preferred_weight == 0 and inheritance_label is not None:
             selected_weight = 0
         else:
@@ -1614,10 +1626,7 @@ class PropertyPanel(QWidget):
             weight_combo.clear()
             if inheritance_label is not None:
                 weight_combo.addItem(inheritance_label, 0)
-            for weight in weights:
-                label = _font_weight_label(weight)
-                if synthetic_bold and weight == 700:
-                    label += "（合成）"
+            for weight, label in items:
                 weight_combo.addItem(label, weight)
             weight_combo.setCurrentIndex(
                 max(0, weight_combo.findData(selected_weight))

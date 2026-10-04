@@ -1,5 +1,7 @@
 #include "d2d_font_fallback.h"
 
+#include <dwrite_3.h>
+
 #include <algorithm>
 #include <cstdint>
 #include <cwchar>
@@ -9,6 +11,26 @@
 namespace krok::subtitle::native::direct2d {
 
 namespace {
+
+// Unified weight resolution -- mirrors engine/text/font_weight.py on the
+// Python side; the two implementations must stay in lockstep.
+//
+// Variable fonts (fvar wght axis): render the TRUE axis-value instance
+// clamped to the axis range; never simulate.  Static fonts: bucket the
+// request to a standard hundred weight, then (a) exact face, (b) single-face
+// family with a >=600 request above the face weight -> that face plus bold
+// simulation (the only deterministic synthetic case), (c) otherwise snap to
+// the nearest face (ties prefer the lighter one) with no simulation.
+int weightBucket(int weight) {
+    if (weight <= 250) return 100;
+    if (weight <= 350) return 300;
+    if (weight <= 450) return 400;
+    if (weight <= 550) return 500;
+    if (weight <= 650) return 600;
+    if (weight <= 750) return 700;
+    if (weight <= 850) return 800;
+    return 900;
+}
 
 bool localizedStringsContain(
     IDWriteLocalizedStrings *strings,
@@ -94,12 +116,14 @@ Microsoft::WRL::ComPtr<IDWriteFont> findFontByGdiFamilyName(
     return match;
 }
 
-// Look the family up by name in one collection and weight-match within it.
-Microsoft::WRL::ComPtr<IDWriteFontFace> tryFamilyMatch(
+// Look the family up by name in one collection and weight-match a probe font
+// within it; the unified resolution re-enumerates exact faces itself.
+Microsoft::WRL::ComPtr<IDWriteFont> tryFamilyFont(
     IDWriteFontCollection *collection,
     const std::wstring &familyName,
     int weight,
-    bool italic
+    bool italic,
+    Microsoft::WRL::ComPtr<IDWriteFontFamily> *familyOut
 ) {
     UINT32 familyIndex = 0;
     BOOL exists = FALSE;
@@ -119,16 +143,224 @@ Microsoft::WRL::ComPtr<IDWriteFontFace> tryFamilyMatch(
             font.ReleaseAndGetAddressOf()))) {
         return {};
     }
-    Microsoft::WRL::ComPtr<IDWriteFontFace> face;
-    if (FAILED(font->CreateFontFace(face.ReleaseAndGetAddressOf()))) {
+    if (familyOut != nullptr) {
+        *familyOut = family;
+    }
+    return font;
+}
+
+Microsoft::WRL::ComPtr<IDWriteFontFace> faceFromFont(
+    IDWriteFont *font,
+    DWRITE_FONT_SIMULATIONS simulations
+) {
+    if (font == nullptr) {
         return {};
     }
-    return face;
+    Microsoft::WRL::ComPtr<IDWriteFont3> font3;
+    if (SUCCEEDED(font->QueryInterface(IID_PPV_ARGS(font3.ReleaseAndGetAddressOf())))
+        && font3) {
+        Microsoft::WRL::ComPtr<IDWriteFontFaceReference> reference;
+        if (SUCCEEDED(font3->GetFontFaceReference(reference.ReleaseAndGetAddressOf()))
+            && reference) {
+            Microsoft::WRL::ComPtr<IDWriteFontFace3> face3;
+            if (SUCCEEDED(reference->CreateFontFaceWithSimulations(
+                    simulations,
+                    face3.ReleaseAndGetAddressOf()))) {
+                return face3;
+            }
+        }
+    }
+    Microsoft::WRL::ComPtr<IDWriteFontFace> face;
+    if (SUCCEEDED(font->CreateFontFace(face.ReleaseAndGetAddressOf()))) {
+        return face;
+    }
+    return {};
+}
+
+// Variable-font path: if the matched face's font resource exposes a wght
+// axis, create the true axis-value instance (DirectWrite clamps the value to
+// the axis range, matching QFont.setVariableAxis).  Returns null for static
+// fonts so the caller falls through to the static rules.
+Microsoft::WRL::ComPtr<IDWriteFontFace> axisWeightFace(
+    IDWriteFontFace *probeFace,
+    int weight
+) {
+    if (probeFace == nullptr) {
+        return {};
+    }
+    Microsoft::WRL::ComPtr<IDWriteFontFace5> face5;
+    if (FAILED(probeFace->QueryInterface(IID_PPV_ARGS(face5.ReleaseAndGetAddressOf())))
+        || !face5) {
+        return {};
+    }
+    Microsoft::WRL::ComPtr<IDWriteFontResource> resource;
+    if (FAILED(face5->GetFontResource(resource.ReleaseAndGetAddressOf())) || !resource) {
+        return {};
+    }
+    const UINT32 axisCount = resource->GetFontAxisCount();
+    if (axisCount == 0 || axisCount > 32) {
+        return {};
+    }
+    DWRITE_FONT_AXIS_VALUE defaults[32]{};
+    if (FAILED(resource->GetDefaultFontAxisValues(defaults, axisCount))) {
+        return {};
+    }
+    for (UINT32 index = 0; index < axisCount; ++index) {
+        if (defaults[index].axisTag != DWRITE_FONT_AXIS_TAG_WEIGHT) {
+            continue;
+        }
+        DWRITE_FONT_AXIS_VALUE value{};
+        value.axisTag = DWRITE_FONT_AXIS_TAG_WEIGHT;
+        value.value = static_cast<float>(std::clamp(weight, 1, 1000));
+        // Unspecified axes keep their defaults; the metrics face below uses
+        // the same resource with no axis overrides.
+        Microsoft::WRL::ComPtr<IDWriteFontFace5> axisFace;
+        if (SUCCEEDED(resource->CreateFontFace(
+                DWRITE_FONT_SIMULATIONS_NONE,
+                &value,
+                1,
+                axisFace.ReleaseAndGetAddressOf()))) {
+            return axisFace;
+        }
+        return {};
+    }
+    return {};
+}
+
+Microsoft::WRL::ComPtr<IDWriteFontFace> defaultAxisFace(IDWriteFontFace *probeFace) {
+    // Default-instance face: its GetMetrics report the static OS/2 table
+    // values (no MVAR adjustment), which is what QFontMetrics uses on the
+    // CPU side regardless of the selected instance.
+    if (probeFace == nullptr) {
+        return {};
+    }
+    Microsoft::WRL::ComPtr<IDWriteFontFace5> face5;
+    if (FAILED(probeFace->QueryInterface(IID_PPV_ARGS(face5.ReleaseAndGetAddressOf())))
+        || !face5) {
+        return {};
+    }
+    Microsoft::WRL::ComPtr<IDWriteFontResource> resource;
+    if (FAILED(face5->GetFontResource(resource.ReleaseAndGetAddressOf())) || !resource) {
+        return {};
+    }
+    Microsoft::WRL::ComPtr<IDWriteFontFace5> face;
+    if (SUCCEEDED(resource->CreateFontFace(
+            DWRITE_FONT_SIMULATIONS_NONE,
+            nullptr,
+            0,
+            face.ReleaseAndGetAddressOf()))) {
+        return face;
+    }
+    return {};
+}
+
+ResolvedFontFaces resolveUnifiedFaces(
+    IDWriteFont *matchedFont,
+    IDWriteFontFamily *family,
+    int weight,
+    bool italic
+) {
+    ResolvedFontFaces result;
+    Microsoft::WRL::ComPtr<IDWriteFontFace> probeFace;
+    if (FAILED(matchedFont->CreateFontFace(probeFace.ReleaseAndGetAddressOf()))) {
+        return result;
+    }
+
+    if (auto axisFace = axisWeightFace(probeFace.Get(), weight)) {
+        result.outline = axisFace;
+        result.metrics = defaultAxisFace(probeFace.Get());
+        if (!result.metrics) {
+            result.metrics = axisFace;
+        }
+        return result;
+    }
+
+    struct FaceEntry {
+        int weight;
+        bool italic;
+        Microsoft::WRL::ComPtr<IDWriteFont> font;
+    };
+    std::vector<FaceEntry> faces;
+    if (family != nullptr) {
+        const UINT32 count = family->GetFontCount();
+        faces.reserve(count);
+        for (UINT32 index = 0; index < count; ++index) {
+            Microsoft::WRL::ComPtr<IDWriteFont> font;
+            if (FAILED(family->GetFont(index, font.ReleaseAndGetAddressOf()))) {
+                continue;
+            }
+            faces.push_back({
+                static_cast<int>(font->GetWeight()),
+                font->GetStyle() == DWRITE_FONT_STYLE_ITALIC,
+                font
+            });
+        }
+    }
+    if (faces.empty()) {
+        faces.push_back({
+            static_cast<int>(matchedFont->GetWeight()),
+            matchedFont->GetStyle() == DWRITE_FONT_STYLE_ITALIC,
+            Microsoft::WRL::ComPtr<IDWriteFont>(matchedFont)
+        });
+    }
+
+    // Italic requests select among italic faces (and upright requests among
+    // upright faces); a family without a matching face falls back to the
+    // other set, mirroring QFontDatabase-driven selection on the CPU side.
+    std::vector<FaceEntry> matchingStyle;
+    for (const FaceEntry &entry : faces) {
+        if (entry.italic == italic) {
+            matchingStyle.push_back(entry);
+        }
+    }
+    if (matchingStyle.empty()) {
+        matchingStyle = std::move(faces);
+    } else {
+        faces = std::move(matchingStyle);
+    }
+
+    const int bucket = weightBucket(weight);
+    const auto exact = std::find_if(
+        faces.begin(), faces.end(),
+        [&](const FaceEntry &entry) { return entry.weight == bucket; }
+    );
+    const FaceEntry *chosen = nullptr;
+    DWRITE_FONT_SIMULATIONS simulations = DWRITE_FONT_SIMULATIONS_NONE;
+    if (exact != faces.end()) {
+        chosen = &*exact;
+    } else if (
+        faces.size() == 1 && bucket >= 600 && bucket > faces.front().weight) {
+        chosen = &faces.front();
+        simulations = DWRITE_FONT_SIMULATIONS_BOLD;
+    } else {
+        chosen = &*std::min_element(
+            faces.begin(), faces.end(),
+            [&](const FaceEntry &lhs, const FaceEntry &rhs) {
+                const int lhsDistance = std::abs(lhs.weight - bucket);
+                const int rhsDistance = std::abs(rhs.weight - bucket);
+                if (lhsDistance != rhsDistance) {
+                    return lhsDistance < rhsDistance;
+                }
+                return lhs.weight < rhs.weight;
+            }
+        );
+    }
+    result.outline = faceFromFont(chosen->font.Get(), simulations);
+    // Vertical metrics always come from the unsimulated base face: DWrite's
+    // simulated faces keep the static ascent/descent, but stay explicit so a
+    // future DWrite change cannot silently fork the two backends.
+    result.metrics = simulations == DWRITE_FONT_SIMULATIONS_NONE
+        ? result.outline
+        : faceFromFont(chosen->font.Get(), DWRITE_FONT_SIMULATIONS_NONE);
+    if (!result.metrics) {
+        result.metrics = result.outline;
+    }
+    return result;
 }
 
 }  // namespace
 
-Microsoft::WRL::ComPtr<IDWriteFontFace> createFontFace(
+ResolvedFontFaces resolveFontFaces(
     IDWriteFontCollection *collection,
     IDWriteFontCollection *typographicCollection,
     const std::wstring &familyName,
@@ -145,21 +377,35 @@ Microsoft::WRL::ComPtr<IDWriteFontFace> createFontFace(
     // without the typographic collection a variable-font family silently
     // fell through to the caller's default-font substitution.
     if (typographicCollection != nullptr && typographicCollection != collection) {
-        if (auto face = tryFamilyMatch(
-                typographicCollection, familyName, weight, italic)) {
-            return face;
+        Microsoft::WRL::ComPtr<IDWriteFontFamily> family;
+        if (auto font = tryFamilyFont(
+                typographicCollection, familyName, weight, italic, &family)) {
+            return resolveUnifiedFaces(font.Get(), family.Get(), weight, italic);
         }
     }
-    if (auto face = tryFamilyMatch(collection, familyName, weight, italic)) {
-        return face;
+    {
+        Microsoft::WRL::ComPtr<IDWriteFontFamily> family;
+        if (auto font = tryFamilyFont(
+                collection, familyName, weight, italic, &family)) {
+            return resolveUnifiedFaces(font.Get(), family.Get(), weight, italic);
+        }
     }
     if (auto font = findFontByGdiFamilyName(collection, familyName)) {
-        Microsoft::WRL::ComPtr<IDWriteFontFace> legacyFace;
-        if (SUCCEEDED(font->CreateFontFace(legacyFace.ReleaseAndGetAddressOf()))) {
-            return legacyFace;
-        }
+        return resolveUnifiedFaces(font.Get(), nullptr, weight, italic);
     }
     return {};
+}
+
+Microsoft::WRL::ComPtr<IDWriteFontFace> createFontFace(
+    IDWriteFontCollection *collection,
+    IDWriteFontCollection *typographicCollection,
+    const std::wstring &familyName,
+    int weight,
+    bool italic
+) {
+    return resolveFontFaces(
+        collection, typographicCollection, familyName, weight, italic
+    ).outline;
 }
 
 namespace {

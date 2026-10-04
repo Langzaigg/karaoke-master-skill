@@ -330,6 +330,9 @@ struct Direct2DGpuBackend::Impl {
     std::uint64_t brushUseSerial = 0;
     static constexpr std::size_t brushCapacity = 512;
     std::map<FontFaceKey, Microsoft::WRL::ComPtr<IDWriteFontFace>> fontFaces;
+    // Vertical-metrics faces (default instance / unsimulated) parallel to
+    // ``fontFaces``; see resolveFontFaces in d2d_font_fallback.cpp.
+    std::map<FontFaceKey, Microsoft::WRL::ComPtr<IDWriteFontFace>> metricFaces;
     std::vector<Microsoft::WRL::ComPtr<IDWriteFontFace>> fallbackFaces;
     std::map<TextGlyphKey, GlyphGeometryResource> textGlyphResources;
     std::map<VectorGlyphKey, GlyphGeometryResource> vectorGlyphResources;

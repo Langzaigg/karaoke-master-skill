@@ -49,10 +49,10 @@ from krok_helper.subtitle_render.engine.style.title_semantics import (
     title_row_alignments,
 )
 from krok_helper.subtitle_render.engine.text import (
-    clamp_weight,
     n3_char_box_ascent,
     n3_char_box_descent,
 )
+from krok_helper.subtitle_render.engine.text.font_weight import build_weight_font
 from krok_helper.subtitle_render.domain.models import (
     Style,
     TitleOverlay,
@@ -119,21 +119,22 @@ class TitleRenderPorts:
 
 
 def build_title_font(title: TitleOverlay) -> QFont:
-    font = QFont(
+    font = build_weight_font(
         resolve_qt_font_family(title.font_family),
-        max(title.font_size_px, 1),
+        title.font_size_px,
+        title.font_weight,
     )
-    font.setPixelSize(max(title.font_size_px, 1))
-    font.setWeight(clamp_weight(title.font_weight))
     font.setItalic(title.italic)
     return font
 
 
 def build_title_latin_font(title: TitleOverlay) -> QFont:
     family = title.font_family_latin or title.font_family
-    font = QFont(resolve_qt_font_family(family), max(title.font_size_px, 1))
-    font.setPixelSize(max(title.font_size_px, 1))
-    font.setWeight(clamp_weight(title.font_weight))
+    font = build_weight_font(
+        resolve_qt_font_family(family),
+        title.font_size_px,
+        title.font_weight,
+    )
     font.setItalic(title.italic)
     if int(title.latin_font_stretch_pct) != 100:
         font.setStretch(max(50, min(200, int(title.latin_font_stretch_pct))))

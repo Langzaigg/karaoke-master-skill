@@ -8,12 +8,34 @@
 
 namespace krok::subtitle::native::direct2d {
 
-// Resolve one family name to a font face.  ``collection`` is the classic
-// GDI-model system collection; ``typographicCollection`` (nullable) is the
-// typographic-model collection that groups variable fonts under merged
-// family names.  The name is tried typographic-first, then classic, then
-// the Win32 informational-name scan, so both spellings the Qt font picker
-// offers resolve to the face the CPU renderer draws.
+// One (family, weight, italic) resolved through the unified weight rules.
+// ``outline`` is the face actually drawn/measured per glyph: the variable
+// axis-value instance for variable fonts, or the static face (plus bold
+// simulation for the single-face synthetic case).  ``metrics`` is the
+// default-instance / unsimulated face whose vertical metrics match the
+// static OS/2 values QFontMetrics reports on the CPU side.
+struct ResolvedFontFaces {
+    Microsoft::WRL::ComPtr<IDWriteFontFace> outline;
+    Microsoft::WRL::ComPtr<IDWriteFontFace> metrics;
+};
+
+// Resolve one family name through the unified weight rules (see
+// d2d_font_fallback.cpp).  ``collection`` is the classic GDI-model system
+// collection; ``typographicCollection`` (nullable) is the typographic-model
+// collection that groups variable fonts under merged family names.  The name
+// is tried typographic-first, then classic, then the Win32
+// informational-name scan, so both spellings the Qt font picker offers
+// resolve to the face the CPU renderer draws.
+ResolvedFontFaces resolveFontFaces(
+    IDWriteFontCollection *collection,
+    IDWriteFontCollection *typographicCollection,
+    const std::wstring &familyName,
+    int weight,
+    bool italic
+);
+
+// Outline-only view of resolveFontFaces for callers that do not need the
+// metrics face (emoji / fallback chains).
 Microsoft::WRL::ComPtr<IDWriteFontFace> createFontFace(
     IDWriteFontCollection *collection,
     IDWriteFontCollection *typographicCollection,

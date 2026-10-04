@@ -8,6 +8,10 @@ from collections.abc import Callable
 from PyQt6.QtGui import QFont, QFontMetrics, QPainterPath
 
 from krok_helper.subtitle_render.engine.layout.layout_context import _LAYOUT_PASS
+from krok_helper.subtitle_render.engine.text.font_weight import (
+    bucket_weight,
+    build_weight_font,
+)
 from krok_helper.subtitle_render.domain.models import Style
 from krok_helper.subtitle_render.n3.font_catalog import resolve_qt_font_family
 
@@ -16,32 +20,16 @@ FontSelector = Callable[[str], QFont]
 
 
 def clamp_weight(weight: int) -> QFont.Weight:
-    if weight <= 250:
-        return QFont.Weight.Thin
-    if weight <= 350:
-        return QFont.Weight.Light
-    if weight <= 450:
-        return QFont.Weight.Normal
-    if weight <= 550:
-        return QFont.Weight.Medium
-    if weight <= 650:
-        return QFont.Weight.DemiBold
-    if weight <= 750:
-        return QFont.Weight.Bold
-    if weight <= 850:
-        return QFont.Weight.ExtraBold
-    return QFont.Weight.Black
+    return QFont.Weight(bucket_weight(weight))
 
 
 def build_font(style: Style) -> QFont:
-    font = QFont(
+    return build_weight_font(
         resolve_qt_font_family(style.font_family),
-        max(style.font_size_px, 1),
+        style.font_size_px,
+        style.font_weight,
+        italic=bool(style.italic),
     )
-    font.setPixelSize(max(style.font_size_px, 1))
-    font.setWeight(clamp_weight(style.font_weight))
-    font.setItalic(style.italic)
-    return font
 
 
 def latin_font_size(style: Style) -> int:
@@ -95,20 +83,23 @@ def is_emoji_text(text: str) -> bool:
 
 
 def _build_emoji_font(style: Style) -> QFont:
-    font = QFont("Segoe UI Symbol", max(int(style.font_size_px), 1))
-    font.setPixelSize(max(int(style.font_size_px), 1))
-    font.setWeight(clamp_weight(style.font_weight))
-    font.setItalic(style.italic)
-    return font
+    return build_weight_font(
+        "Segoe UI Symbol",
+        int(style.font_size_px),
+        style.font_weight,
+        italic=bool(style.italic),
+    )
 
 
 def build_latin_font(style: Style) -> QFont:
     family = style.font_family_latin or style.font_family
     size = max(latin_font_size(style), 1)
-    font = QFont(resolve_qt_font_family(family), size)
-    font.setPixelSize(size)
-    font.setWeight(clamp_weight(latin_font_weight(style)))
-    font.setItalic(style.italic)
+    font = build_weight_font(
+        resolve_qt_font_family(family),
+        size,
+        latin_font_weight(style),
+        italic=bool(style.italic),
+    )
     if int(style.latin_font_stretch_pct) != 100:
         font.setStretch(max(50, min(200, int(style.latin_font_stretch_pct))))
     return font
@@ -239,7 +230,23 @@ def n3_char_box_descent(
 
 
 def _font_signature(font: QFont) -> tuple:
-    return (font.family(), font.pixelSize(), int(font.weight()), font.italic(), font.stretch())
+    # styleName / wght 轴值与 setWeight 同样影响最终解析的 face，
+    # 绕过它们会与不同实例共享缓存条目。
+    weight_axis_tag = QFont.Tag(b"wght")
+    axis_value = (
+        float(font.variableAxisValue(weight_axis_tag))
+        if font.isVariableAxisSet(weight_axis_tag)
+        else None
+    )
+    return (
+        font.family(),
+        font.pixelSize(),
+        int(font.weight()),
+        font.italic(),
+        font.stretch(),
+        font.styleName(),
+        axis_value,
+    )
 
 
 def _char_glyph_metrics(
