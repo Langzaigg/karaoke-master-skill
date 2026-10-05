@@ -3217,6 +3217,12 @@ def test_effects_page_uses_compact_responsive_groups(qapp):
     panel.resize(360, 820)
     qapp.processEvents()
     assert panel._animation_grid._columns == 1
+    # 单列之外还不能横向溢出：粒子双色槽在窄窗转竖排，网格最小宽度
+    # 必须落在视口内（此前六控件挤一行把最小宽度顶到 539px，右缘被裁）。
+    assert (
+        panel._animation_grid.minimumSizeHint().width()
+        <= panel.widget(3).viewport().width()
+    )
 
 
 def test_title_page_uses_compact_responsive_appearance_and_timing(qapp):

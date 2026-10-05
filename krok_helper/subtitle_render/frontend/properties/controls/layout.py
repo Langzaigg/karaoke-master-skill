@@ -36,8 +36,15 @@ from krok_helper.subtitle_render.frontend.widgets.theme import control_qss, pale
 _COMPACT_CONTROL_HEIGHT = 32
 
 
-def property_field(label_text: str, control: QWidget) -> QWidget:
-    """Wrap one property control with its standard vertical label."""
+def property_field(
+    label_text: str, control: QWidget, *, wrap_label: bool = False
+) -> QWidget:
+    """Wrap one property control with its standard vertical label.
+
+    ``wrap_label`` lets a label that enumerates several controls (and is
+    therefore long) break onto a second line instead of becoming the field's
+    minimum width, which would keep a responsive grid from narrowing.
+    """
     box = QWidget()
     box.setObjectName("SubtitlePropertyField")
     themed(box, lambda: "#SubtitlePropertyField { background: transparent; }")
@@ -45,6 +52,7 @@ def property_field(label_text: str, control: QWidget) -> QWidget:
     layout.setContentsMargins(0, 0, 0, 0)
     layout.setSpacing(4)
     label = QLabel(label_text)
+    label.setWordWrap(wrap_label)
     themed(label, lambda: f"color: {palette().text_secondary}; font-size: 9pt;")
     control.setParent(box)
     layout.addWidget(label)
@@ -266,6 +274,32 @@ def property_section_pair(first: QWidget, second: QWidget) -> ResponsiveProperty
         )
     pair.set_widgets(first, None, second)
     return pair
+
+
+class ResponsiveControlPair(ResponsivePropertyPair):
+    """Keep two compact controls side by side for as long as they genuinely fit.
+
+    Same reflow contract as :class:`ResponsivePropertyPair`, but measured on
+    each side's *minimum* width: input controls (spin boxes, colour slots) carry
+    a very wide preferred size, so the card-oriented heuristic would stack them
+    even when there is room to spare.
+    """
+
+    def __init__(self, parent: Optional[QWidget] = None) -> None:
+        super().__init__(parent)
+        self._layout.setSpacing(4)
+
+    def set_widgets(self, first: QWidget, second: QWidget) -> None:  # type: ignore[override]
+        super().set_widgets(first, None, second)
+
+    def horizontal_width_hint(self) -> int:
+        if self._first is None or self._second is None:
+            return 0
+        return (
+            self._first.minimumSizeHint().width()
+            + self._second.minimumSizeHint().width()
+            + self._layout.spacing()
+        )
 
 
 class ResponsiveFieldGrid(QWidget):

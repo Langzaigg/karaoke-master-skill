@@ -6,6 +6,7 @@ from PyQt6.QtCore import QSize, Qt
 from PyQt6.QtWidgets import QLabel, QLineEdit, QSizePolicy, QWidget
 
 from krok_helper.subtitle_render.frontend.properties.controls.layout import (
+    ResponsiveControlPair,
     ResponsiveFieldGrid,
     ResponsivePropertyPair,
     ResponsiveRoleHeader,
@@ -78,6 +79,36 @@ def test_responsive_property_pair_uses_child_hints_as_breakpoint(qapp) -> None:
     assert pair.is_stacked() is False
 
     pair.resize(100, 100)
+    pair._sync_direction()
+    assert pair.is_stacked() is True
+
+
+def test_responsive_control_pair_breaks_on_minimum_not_preferred_width(qapp) -> None:
+    class HintWidget(QWidget):
+        def __init__(self, minimum: int, preferred: int) -> None:
+            super().__init__()
+            self._minimum = minimum
+            self._preferred = preferred
+
+        def minimumSizeHint(self) -> QSize:  # noqa: N802
+            return QSize(self._minimum, 30)
+
+        def sizeHint(self) -> QSize:  # noqa: N802
+            return QSize(self._preferred, 30)
+
+    pair = ResponsiveControlPair()
+    pair.set_widgets(HintWidget(170, 330), HintWidget(170, 330))
+
+    # 输入类控件的首选宽度（330）远大于实际可用宽度，断点必须只看两侧
+    # 最小宽度：并排 170+170+4 = 344 够用就不竖排。
+    assert pair._layout.spacing() == 4
+    assert pair.minimumSizeHint().width() == 170
+
+    pair.resize(400, 100)
+    pair._sync_direction()
+    assert pair.is_stacked() is False
+
+    pair.resize(300, 100)
     pair._sync_direction()
     assert pair.is_stacked() is True
 

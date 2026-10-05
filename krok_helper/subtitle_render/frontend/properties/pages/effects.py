@@ -12,6 +12,7 @@ from krok_helper.subtitle_render.frontend.properties.controls.inputs import (
     WheelFocusedComboBox,
 )
 from krok_helper.subtitle_render.frontend.properties.controls.layout import (
+    ResponsiveControlPair,
     ResponsiveFieldGrid,
     compact_property_control,
     property_field,
@@ -722,12 +723,10 @@ class EffectsPropertyPageBuilder:
             "粒子颜色二（默认白色）：单独颜色档恒为双色随机混发"
         )
         # 双色槽容器：两颗颜色按钮并排，共占参数行的「颜色/来源」列位。
-        host._fx_color_slot = QWidget(section)
-        color_slot_layout = QHBoxLayout(host._fx_color_slot)
-        color_slot_layout.setContentsMargins(0, 0, 0, 0)
-        color_slot_layout.setSpacing(4)
-        color_slot_layout.addWidget(host._fx_color_btn)
-        color_slot_layout.addWidget(host._fx_color_btn2)
+        # 窄窗下自动改竖排——两颗颜色按钮并排要 344px，会把特效页网格的
+        # 最小宽度顶到 539px，360px 窄窗就再也降不到 1 列（响应式失效）。
+        host._fx_color_slot = ResponsiveControlPair(section)
+        host._fx_color_slot.set_widgets(host._fx_color_btn, host._fx_color_btn2)
         host._fx_apply_check = CheckBox("仅唱字", section)
         host._fx_apply_check.setToolTip(
             "勾选（默认）：粒子的颜色与尺寸仅作用于唱字装饰粒子，入场/退场"
@@ -739,19 +738,24 @@ class EffectsPropertyPageBuilder:
         host._fx_apply_check.toggled.connect(
             lambda checked: host._update_style(fx_apply_to_entry_exit=not checked)
         )
-        host._fx_param_controls_row = self._fx_size_row(
+        host._fx_size_count_row = self._fx_size_row(
             section,
             host._fx_size_spin,
             host._fx_count_spin,
+        )
+        host._fx_color_row = self._fx_color_row(
+            section,
             host._fx_color_slot,
             host._fx_particle_role_combo,
             host._fx_apply_check,
         )
         # 网格行序：第 1 行 = 入场/退场，第 2 行 = 唱字对 + 段首尾区块，
         # 第 3 行 = 扫字线整行（参数永久可编辑，颜色/亮度按模式互换启用态），
-        # 第 4 行 = 整字放大速度等级，第 5 行 = 描边闪光 + 装饰粒子
-        # （唱字档位 + 颜色模式），第 6 行 = 粒子参数（尺寸为字号百分比，
-        # 颜色/来源按模式互换，尾部「入退场同用」联动开关）。
+        # 第 4 行 = 整字放大速度等级，第 5 行 = 装饰粒子（唱字档位 + 颜色模式
+        # + 取色层级），第 6 行 = 粒子尺寸 · 数量，第 7 行 = 粒子颜色/来源
+        # （双色槽与来源下拉按模式互换）+ 行尾「入退场同用」联动开关。
+        # 粒子参数拆成三个字段：单行塞六控件会把网格最小宽度顶到 539px，
+        # 特效页在 360px 窄窗下再也降不到 1 列（响应式失效）。
 
         host._section_edge_check = CheckBox("段首尾独立动画", section)
         host._section_edge_check.toggled.connect(host._on_section_edge_toggled)
@@ -786,9 +790,14 @@ class EffectsPropertyPageBuilder:
             host._section_edge_both_check,
         )
         host._animation_grid.add_widget(host._section_edge_row)
-        host._animation_grid.add_field(
-            "扫字线 / 模式 · 粗细 · 颜色/亮度/角色 · 柔化半径",
-            host._scanline_row,
+        # 该字段把整行四个控件都写进标签，标签本身就比行宽更长；允许折行，
+        # 否则它会成为字段的最小宽度，把网格顶到 372px、窄窗右缘被裁。
+        host._animation_grid.add_widget(
+            property_field(
+                "扫字线 / 模式 · 粗细 · 颜色/亮度/角色 · 柔化半径",
+                host._scanline_row,
+                wrap_label=True,
+            )
         )
         host._animation_grid.add_field("整字放大速度等级", host._zoom_pulse_curve_combo)
         host._stroke_flash_row = QWidget(section)
@@ -798,9 +807,10 @@ class EffectsPropertyPageBuilder:
         stroke_flash_layout.addWidget(host._stroke_flash_check)
         # 用户口径：粒子参数行与唱字闪光行互换位置（粒子参数在前）。
         host._animation_grid.add_field("唱字装饰粒子 / 颜色模式", host._fx_particle_row)
+        host._animation_grid.add_field("粒子尺寸 · 数量", host._fx_size_count_row)
         host._animation_grid.add_field(
-            "粒子尺寸 · 数量 · 颜色 / 仅唱字",
-            host._fx_param_controls_row,
+            "粒子颜色 / 来源 · 仅唱字",
+            host._fx_color_row,
         )
         host._animation_grid.add_field("唱字闪光", host._stroke_flash_row)
         layout.addWidget(host._animation_grid)
@@ -828,24 +838,32 @@ class EffectsPropertyPageBuilder:
         parent: QWidget,
         size_spin: Any,
         count_spin: Any,
-        color_button: QWidget,
-        role_combo: Any,
-        apply_check: Any,
     ) -> QWidget:
-        """粒子参数单行：尺寸 · 数量 · 颜色/来源 · 入退场联动开关。
-
-        颜色按钮与来源下拉共用同一列位（按颜色模式互换显示，扫字线第
-        三列同款约定）；「入退场同用」开关常驻行尾。
-        """
+        """粒子尺寸 · 数量单行（尺寸为字号百分比，数量按特效折算）。"""
         row = QWidget(parent)
         row_layout = QHBoxLayout(row)
         row_layout.setContentsMargins(0, 0, 0, 0)
         row_layout.setSpacing(6)
-        row_layout.addWidget(size_spin, 2)
-        row_layout.addWidget(count_spin, 2)
-        row_layout.addWidget(color_button, 2)
-        row_layout.addWidget(role_combo, 2)
-        row_layout.addWidget(apply_check, 2)
+        row_layout.addWidget(size_spin, 1)
+        row_layout.addWidget(count_spin, 1)
+        return row
+
+    @staticmethod
+    def _fx_color_row(
+        parent: QWidget,
+        color_button: QWidget,
+        role_combo: Any,
+        apply_check: Any,
+    ) -> QWidget:
+        """粒子颜色/来源单行：双色槽与来源下拉共用同一列位（按颜色模式
+        互换显示，扫字线第三列同款约定）；「入退场同用」开关常驻行尾。"""
+        row = QWidget(parent)
+        row_layout = QHBoxLayout(row)
+        row_layout.setContentsMargins(0, 0, 0, 0)
+        row_layout.setSpacing(6)
+        row_layout.addWidget(color_button, 1)
+        row_layout.addWidget(role_combo, 1)
+        row_layout.addWidget(apply_check, 0)
         role_combo.hide()
         return row
 
