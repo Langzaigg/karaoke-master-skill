@@ -1187,8 +1187,10 @@ class PropertyPanel(QWidget):
                     0,
                     self._fx_particle_mode_combo.findData(
                         self._style.fx_particle_color_mode
-                        if self._style.fx_particle_color_mode
-                        in {"color", "follow_before", "follow_after", "role"}
+                        if self._style.fx_particle_color_mode in {
+                            "color", "sakura", "follow_mix", "follow_before",
+                            "follow_after", "role",
+                        }
                         else "color"
                     ),
                 )
@@ -1214,6 +1216,10 @@ class PropertyPanel(QWidget):
             )
             self._fx_color_btn.set_color(
                 getattr(self._style, "fx_particle_color", "#FFFFFF")
+            )
+            # 双色槽：颜色二恒为真实颜色（默认白色，无「未设置」态）。
+            self._fx_color_btn2.set_color(
+                getattr(self._style, "fx_particle_color2", "#FFFFFF")
             )
             # 「仅唱字」勾选 = 不联动入退场（fx_apply_to_entry_exit=False）。
             self._fx_apply_check.setChecked(
@@ -1528,23 +1534,24 @@ class PropertyPanel(QWidget):
             self._refresh_scanline_role_combo()
 
     def _sync_fx_particle_controls(self) -> None:
-        """粒子参数按颜色模式互换第三列：单独颜色显示颜色，复用配色方案
-        显示来源下拉，跟随字体两档两者都隐藏（颜色来自字体，粒子无
-        亮度参数可复用，与扫字线第三列「按模式互换」同款约定）。"""
+        """粒子参数按颜色模式互换第三列：单独颜色显示双色槽（颜色一/二），
+        复用配色方案显示来源下拉，跟随字体档与默认颜色（樱花粉双色）隐藏
+        颜色与来源（颜色自动解析，粒子无亮度参数可复用，与扫字线第三列
+        「按模式互换」同款约定）。"""
 
         mode = self._style.fx_particle_color_mode
-        follow = mode in {"follow_before", "follow_after"}
+        follow = mode in {"sakura", "follow_mix", "follow_before", "follow_after"}
         role = mode == "role"
         for control in (
             self._fx_particle_mode_combo,
             self._fx_size_spin,
             self._fx_count_spin,
-            self._fx_color_btn,
+            self._fx_color_slot,
             self._fx_particle_role_combo,
             self._fx_apply_check,
         ):
             control.setEnabled(True)
-        self._fx_color_btn.setVisible(not follow and not role)
+        self._fx_color_slot.setVisible(not follow and not role)
         self._fx_particle_role_combo.setVisible(role)
         if role:
             self._refresh_fx_particle_role_combo()
@@ -3431,7 +3438,8 @@ class PropertyPanel(QWidget):
                 )
             )
             return
-        current = QColor(self._scheme_value(field_name))
+        # 颜色槽值缺失时回白色作对话框初始值（防御旧工程/未初始化字段）。
+        current = QColor(self._scheme_value(field_name) or "#FFFFFF")
         color = _select_color(current, self, "选择颜色")
         if color.isValid():
             self._set_color(field_name, color.name(QColor.NameFormat.HexArgb))
@@ -4790,8 +4798,10 @@ class PropertyPanel(QWidget):
                 # 立即回显新值（宿主回流 set_style 会走等值快路径跳过）。
                 self._scanline_color_btn.set_color(self._style.scanline_color)
             if "fx_particle_color" in changes:
-                # 粒子颜色同上：调色板选色后立即回显可输入控件。
+                # 粒子颜色同上：调色盘选色后立即回显可输入控件。
                 self._fx_color_btn.set_color(self._style.fx_particle_color)
+            if "fx_particle_color2" in changes:
+                self._fx_color_btn2.set_color(self._style.fx_particle_color2)
             if set(changes).intersection(
                 _SCHEME_FIELDS | {"singer_style_overrides", "custom_style_schemes"}
             ):

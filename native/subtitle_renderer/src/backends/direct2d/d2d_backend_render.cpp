@@ -783,17 +783,23 @@ ProbeResult Direct2DGpuBackend::renderFrameInternal(
             const int windowMs = std::clamp(durationMs, 120, 3000);
             return std::max(lineEndMs, displayEndMs - windowMs);
         };
+        // 逐字过渡总闸名单：漏档位时该行不进 characterAnimationAt 的几何
+        // 分支（hasCharacterTransition=false、activeCharacterTransition 恒
+        // 空），出入场整行弹出无逐字渐显/渐隐——2026-10 花瓣实测踩坑，
+        // 改 Python 档位清单（timing.py 集合）时必须同步这里与竖排名单。
         const auto isGeoEntry = [](const std::string &animation) {
             return animation == "tracking_in" || animation == "wave_in"
                 || animation == "glow_in" || animation == "stretch_in"
                 || animation == "assemble_in" || animation == "sparkle"
-                || animation == "ripple" || animation == "note";
+                || animation == "ripple" || animation == "note"
+                || animation == "petal";
         };
         const auto isGeoExit = [](const std::string &animation) {
             return animation == "scatter_out" || animation == "converge_out"
                 || animation == "glow_out" || animation == "stretch_out"
                 || animation == "dissolve_out" || animation == "sparkle"
-                || animation == "ripple" || animation == "note";
+                || animation == "ripple" || animation == "note"
+                || animation == "petal";
         };
         const auto isGeoTransition = [&](const std::string &animation) {
             return isGeoEntry(animation) || isGeoExit(animation);

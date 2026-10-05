@@ -614,12 +614,13 @@ _RENDER_ONLY_ANIM_STYLE_FIELDS: frozenset[str] = frozenset({
     "fx_particle_color_mode",
     "fx_particle_role_name",
     "fx_apply_to_entry_exit",
-    # 粒子物理参数（数量/尺寸/单色）与三段装饰档（entry_fx/exit_fx/
+    # 粒子物理参数（数量/尺寸/双色槽）与三段装饰档（entry_fx/exit_fx/
     # sing_fx）、描边闪光、放大曲线：纯绘制参数（值签名已剔除，IR 里随
     # 行 fx_bursts 下发），改这些走 paint 差分而不必全量重排。
     "fx_particle_size_em",
     "fx_particle_count",
     "fx_particle_color",
+    "fx_particle_color2",
     "entry_fx",
     "exit_fx",
     "sing_fx",

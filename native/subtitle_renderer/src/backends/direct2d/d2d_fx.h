@@ -78,7 +78,7 @@ std::vector<FxParticle> burstParticlesAt(
     float boxH
 );
 
-/// 粒子 sprite 名（star4 / ring / note）。
+/// 粒子 sprite 名（star4 / ring / note / pixel / petal）。
 inline const char *fxSpriteForKind(const std::string &kind) {
     if (kind == "ripple") {
         return "ring";
@@ -88,6 +88,9 @@ inline const char *fxSpriteForKind(const std::string &kind) {
     }
     if (kind == "assemble" || kind == "dissolve") {
         return "pixel";
+    }
+    if (kind == "petal") {
+        return "petal";
     }
     return "star4";
 }

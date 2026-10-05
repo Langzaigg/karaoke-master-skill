@@ -562,19 +562,19 @@ def test_style_controller_keeps_new_geo_kinds():
     cases = {
         "entry_anim": (
             "tracking_in", "wave_in", "stretch_in", "glow_in", "assemble_in",
-            "sparkle", "ripple", "note",
+            "sparkle", "ripple", "note", "petal",
         ),
         "exit_anim": (
             "scatter_out", "converge_out", "stretch_out", "glow_out", "dissolve_out",
-            "sparkle", "ripple", "note",
+            "sparkle", "ripple", "note", "petal",
         ),
         "section_head_anim": (
             "tracking_in", "wave_in", "stretch_in", "glow_in", "assemble_in",
-            "sparkle", "ripple", "note",
+            "sparkle", "ripple", "note", "petal",
         ),
         "section_tail_anim": (
             "scatter_out", "converge_out", "stretch_out", "glow_out", "dissolve_out",
-            "sparkle", "ripple", "note",
+            "sparkle", "ripple", "note", "petal",
         ),
     }
     for field, values in cases.items():
@@ -812,6 +812,27 @@ def test_particle_anim_core_is_staggered_char_transition():
         t_ms=10_000, char_center_x=None, line_center_x=None,
     )[0] == 0.0
 
+    # 花瓣（petal）同款逐字渐显/渐隐 + 过渡上下文接线。
+    petal_ctx = line_char_transition_context(
+        Style(entry_anim="petal", entry_lead_ms=600, karaoke_anim="none"),
+        TimingLine(), 100, 0, 6000, 3,
+    )
+    assert petal_ctx is not None and petal_ctx.effect == "petal"
+    assert line_char_transition_context(
+        Style(exit_anim="petal", exit_fade_ms=600, karaoke_anim="none"),
+        TimingLine(), 5900, 0, 6000, 3,
+    ).effect == "petal"
+    petal_first = _geo_char_state(
+        style, _entry_transition("petal", 0), 0, 5,
+        t_ms=100, char_center_x=None, line_center_x=None,
+    )
+    petal_second = _geo_char_state(
+        style, _entry_transition("petal", 0), 1, 5,
+        t_ms=100, char_center_x=None, line_center_x=None,
+    )
+    assert petal_first[0] > 0.8
+    assert petal_second[0] < 0.5
+
 
 def test_sing_particles_skip_whitespace_chars():
     """空格无走字内容：唱字粒子跳过；出入场粒子仍整行参与。"""
@@ -1010,14 +1031,17 @@ def test_fx_apply_to_entry_exit_switch_plans():
     on = plan_line_bursts(
         _style(fx_apply_to_entry_exit=True), 0, 1000, 4000, 3900, windows
     )
-    assemble_on = next(b for b in on if b["kind"] == "assemble")
-    twinkle_on = next(b for b in on if b["kind"] == "twinkle")
-    # 开启后：颜色与尺寸跟随旋钮；数量仍固定。
-    assert assemble_on["color"] == "#FF8800"
-    assert assemble_on["size_px"] == pytest.approx(50.0 * 0.75)
-    assert assemble_on["count"] == 7
-    assert twinkle_on["color"] == "#FF8800"
-    assert twinkle_on["size_px"] == pytest.approx(50.0)
+    # 开启后：颜色与尺寸跟随旋钮；数量仍固定。自定义颜色一与默认白色
+    # 颜色二按「必须双色」口径混发（拆双色后总量守恒：4+3=7）。
+    assemble_pair = [b for b in on if b["kind"] == "assemble"][:2]
+    twinkle_pair = [b for b in on if b["kind"] == "twinkle"][:2]
+    assert {b["color"] for b in assemble_pair} == {"#FF8800", "#FFFFFF"}
+    for burst in assemble_pair:
+        assert burst["size_px"] == pytest.approx(50.0 * 0.75)
+    assert sorted(b["count"] for b in assemble_pair) == [3, 4]
+    assert {b["color"] for b in twinkle_pair} == {"#FF8800", "#FFFFFF"}
+    for burst in twinkle_pair:
+        assert burst["size_px"] == pytest.approx(50.0)
 
     # 颜色模式对入退场动画粒子同样生效（开启联动时）。
     follow = plan_line_bursts(
@@ -1069,6 +1093,15 @@ def test_particle_color_mode_serialization_roundtrip():
     assert legacy.fx_particle_color_mode == "color"
     assert legacy.fx_particle_role_name is None
     assert legacy.fx_apply_to_entry_exit is False
+    assert legacy.fx_particle_color2 == "#FFFFFF"  # 双色槽默认白（恒双色）
+    # 双色槽往返。
+    dual = style_from_dict(
+        style_to_dict(
+            Style(fx_particle_color="#40E0FF", fx_particle_color2="#FF69B4")
+        )
+    )
+    assert dual.fx_particle_color == "#40E0FF"
+    assert dual.fx_particle_color2 == "#FF69B4"
     # 非法值回落默认；空串来源名归一 None。
     payload = style_to_dict(Style())
     payload["fx_particle_color_mode"] = "brighten"  # 粒子无此档
@@ -1797,3 +1830,364 @@ def test_star_particles_bias_up_and_avoid_repeat_quadrant():
     mid = burst_particles_at(burst, 700, 0.0, 0.0, 400.0, 100.0)
     ups_mid = [s for s in mid if s.y < 0.0]
     assert len(ups_mid) / len(mid) >= 0.5
+
+
+# ---------------------------------------------------------------------------
+# 2026-10 花瓣（樱花飘落）：入场飘入 / 退场飘散 / 唱字飘动 + 双色随机档。
+# ---------------------------------------------------------------------------
+
+
+def test_plan_line_bursts_petal_entry_exit_sing():
+    """花瓣三档规划接线（与音符同构）：错峰、计数、行程与旋钮口径。"""
+    style = Style(
+        entry_anim="petal",
+        entry_lead_ms=600,
+        exit_anim="petal",
+        exit_fade_ms=600,
+        sing_fx="petal",
+        fx_particle_count=14,
+        font_size_px=100,
+        karaoke_anim="none",
+    )
+    bursts = plan_line_bursts(
+        style, 0, 1000, 4200, 4100,
+        [(1200, 1600), (1600, 2000), (2000, 3000)],
+    )
+    # 入场花瓣：逐字错峰（3 字 → 步距 175），每字 3 颗，固定白档；
+    # 位置偏移全部 box 比例（不带字号行程，travel 恒 0）。
+    entry = [b for b in bursts if b["kind"] == "petal" and b["sweep"] == 1]
+    assert len(entry) == 3
+    assert [b["start_ms"] for b in entry] == [1000, 1175, 1350]
+    assert all(b["count"] == 3 and b["color"] == "#FFFFFF" for b in entry)
+    assert all(b["travel_px"] == 0.0 for b in entry)
+    # 退场花瓣：sweep=-1，自 max(行末, 显示末回溯) 起排布（与音符同款：
+    # 尾窗不足 120ms 时护栏推到 显示末-120，错峰压缩为 0，burst 窗口
+    # 规划到自然播完、画面随行消失截断）。
+    exit_petals = [b for b in bursts if b["kind"] == "petal" and b["sweep"] == -1]
+    assert len(exit_petals) == 3
+    assert [b["start_ms"] for b in exit_petals] == [4080, 4080, 4080]
+    # 唱字花瓣：sweep=0、每字 max(3, 14//3)=4 颗、尺寸吃旋钮（40% 字号）。
+    sing = [b for b in bursts if b["kind"] == "petal" and b["sweep"] == 0]
+    assert len(sing) == 3
+    assert all(b["count"] == 4 for b in sing)
+    assert sing[0]["start_ms"] in (1200, 1600, 2000)
+    assert sing[0]["size_px"] == pytest.approx(100 * 0.40)
+
+
+def test_petal_trajectory_windows_and_downward_drift():
+    """花瓣轨迹：窗口外为空、确定性、三档都单调下沉且**贴近字框**
+    （box 比例寻路——星光/音符同约定；初版字号倍数行程出生过高被否）。"""
+    base = {
+        "kind": "petal", "anchor": "char", "char_index": 0,
+        "start_ms": 0, "end_ms": 900, "count": 6, "seed": 12345,
+        "size_px": 30.0, "travel_px": 0.0, "front": True,
+    }
+    for sweep in (1, -1, 0):
+        burst = {**base, "sweep": sweep}
+        assert burst_particles_at(burst, -1, 0.0, 0.0, 120.0, 100.0) == []
+        assert burst_particles_at(burst, 901, 0.0, 0.0, 120.0, 100.0) == []
+        early = burst_particles_at(burst, 200, 0.0, 0.0, 120.0, 100.0)
+        again = burst_particles_at(burst, 200, 0.0, 0.0, 120.0, 100.0)
+        assert early == again  # 纯时间函数：重放逐位一致
+        assert len(early) == 6  # 出生延迟上限 110ms < 200
+        late = burst_particles_at(burst, 700, 0.0, 0.0, 120.0, 100.0)
+        for before, after in zip(early, late):
+            assert after.y >= before.y  # 无 y 向摇摆项：单调下沉
+        if sweep < 0:
+            # 飘逸随机、**终点向右**（2026-10 用户口径）：每颗粒子终点在
+            # 起点右侧（幅度随机），整簇随时间右移（sin 摇摆是振荡项，
+            # 逐粒子 x 非单调，按簇和判方向）。
+            assert sum(s.x for s in late) > sum(s.x for s in early)
+        # 贴近字框：横向 |x| ≤ 一个字宽（飘散档终点右移 ≤1.4 字宽 + 摇摆
+        # ±1.5×粒子尺寸，起点最左 -0.43 字宽）、纵向在 [-0.95, +1.2]
+        # box_h 内（溢出量与星光 -0.62 同量级，不再飘进行间距）。
+        for states in (early, late):
+            for state in states:
+                assert 0.0 < state.alpha <= 1.0
+                assert state.size_px > 0.0
+                if sweep < 0:
+                    assert -100.0 <= state.x <= 240.0
+                else:
+                    assert abs(state.x) <= 120.0
+                assert -95.0 <= state.y <= 120.0
+
+
+def test_petal_two_color_variant_split():
+    """双色档：同轨迹拆两条 burst（数量对半、种子错开、各带一实色）；
+    2026-10 用户口径：双色系一律实色（单独颜色双槽 / 前后实色 / 樱花粉）。"""
+    from krok_helper.subtitle_render.domain.paint import (
+        KaraokeColorState,
+        KaraokeColors,
+        PaintFill,
+    )
+    from krok_helper.subtitle_render.engine.style.style_semantics import solid_fill
+
+    sakura = Style(
+        sing_fx="petal",
+        fx_particle_color_mode="sakura",
+        fx_particle_count=14,
+        font_size_px=100,
+        karaoke_anim="none",
+    )
+    bursts = plan_line_bursts(sakura, 0, 0, 3000, 2900, [(100, 400)])
+    petals = [b for b in bursts if b["kind"] == "petal"]
+    assert len(petals) == 2
+    assert sorted(b["count"] for b in petals) == [2, 2]  # 4 → 2+2
+    assert {b["color"] for b in petals} == {"#FFB7C5", "#FFD7E0"}
+    assert petals[0]["seed"] != petals[1]["seed"]
+    assert all("paint" not in b for b in petals)  # 双色档不带装饰规格
+    # 奇数数量：余数归第一条（唱字档数量吃旋钮：9 → 每字 3 → 2+1；
+    # 入退场动画粒子默认固定白档不拆双色，开联动后才吃颜色模式）。
+    odd = Style(
+        sing_fx="petal",
+        fx_particle_color_mode="sakura",
+        fx_particle_count=9,
+        font_size_px=100,
+        karaoke_anim="none",
+    )
+    odd_bursts = plan_line_bursts(odd, 0, 0, 3000, 2900, [(100, 400)])
+    entry_pair = [b for b in odd_bursts if b["kind"] == "petal"]
+    assert sorted(b["count"] for b in entry_pair) == [1, 2]
+
+    # 跟随字体·前后实色：两实色 = 行配色走字前/后「主文字」实色，
+    # 不携带装饰规格（渐变折停止色平均）。
+    mix = Style(
+        sing_fx="petal",
+        fx_particle_color_mode="follow_mix",
+        karaoke_colors=_karaoke_matrix("#123456", "#ABCDEF"),
+        font_size_px=100,
+        karaoke_anim="none",
+    )
+    mix_bursts = plan_line_bursts(mix, 0, 0, 3000, 2900, [(100, 400)])
+    mix_petals = [b for b in mix_bursts if b["kind"] == "petal"]
+    assert {b["color"] for b in mix_petals} == {"#123456", "#ABCDEF"}
+    assert all("paint" not in b for b in mix_petals)
+    # 渐变走字后态：该侧变体折成停止色平均实色（(FF+00+00...)/3 → #555555）。
+    gradient = PaintFill(
+        mode="gradient_horizontal",
+        start_color="#FF0000",
+        end_color="#0000FF",
+        gradient_stops=[(0, "#FF0000"), (50, "#00FF00"), (100, "#0000FF")],
+    )
+    grad_style = Style(
+        sing_fx="petal",
+        fx_particle_color_mode="follow_mix",
+        fx_particle_color="#00FF00",
+        font_size_px=100,
+        karaoke_anim="none",
+        karaoke_colors=KaraokeColors(
+            before=KaraokeColorState(text=solid_fill("#2468AC")),
+            after=KaraokeColorState(text=gradient),
+        ),
+    )
+    grad_bursts = plan_line_bursts(grad_style, 0, 0, 3000, 2900, [(100, 400)])
+    grad_petals = [b for b in grad_bursts if b["kind"] == "petal"]
+    assert {b["color"] for b in grad_petals} == {"#2468AC", "#555555"}
+    assert all("paint" not in b for b in grad_petals)
+
+    # 单独颜色档·双色槽：恒双色随机混发——颜色二默认白色（白色即颜色
+    # 本身，无「未设置」态，2026-10 用户口径：必须设置双色）。
+    single = Style(
+        sing_fx="petal",
+        fx_particle_color="#40E0FF",
+        font_size_px=100,
+        karaoke_anim="none",
+    )
+    single_bursts = plan_line_bursts(single, 0, 0, 3000, 2900, [(100, 400)])
+    petals = [b for b in single_bursts if b["kind"] == "petal"]
+    assert len(petals) == 2
+    assert {b["color"] for b in petals} == {"#40E0FF", "#FFFFFF"}
+    # 设置颜色二 → 双色随机混发。
+    dual = Style(
+        sing_fx="petal",
+        fx_particle_color="#40E0FF",
+        fx_particle_color2="#FF69B4",
+        font_size_px=100,
+        karaoke_anim="none",
+    )
+    dual_bursts = plan_line_bursts(dual, 0, 0, 3000, 2900, [(100, 400)])
+    dual_petals = [b for b in dual_bursts if b["kind"] == "petal"]
+    assert len(dual_petals) == 2
+    assert {b["color"] for b in dual_petals} == {"#40E0FF", "#FF69B4"}
+    # 两槽同色：折单 burst（观感等价的双色折叠，省一半 burst）。
+    same = Style(
+        sing_fx="petal",
+        fx_particle_color="#40E0FF",
+        fx_particle_color2="#40E0FF",
+        font_size_px=100,
+        karaoke_anim="none",
+    )
+    same_bursts = plan_line_bursts(same, 0, 0, 3000, 2900, [(100, 400)])
+    same_petals = [b for b in same_bursts if b["kind"] == "petal"]
+    assert len(same_petals) == 1
+    assert same_petals[0]["count"] == 4 and same_petals[0]["color"] == "#40E0FF"
+
+
+def test_petal_role_mode_pair_but_other_kinds_stay_single():
+    """复用配色方案：花瓣取来源走字前/后双色；其余粒子保持走字后单色。"""
+    from krok_helper.subtitle_render.domain.models import SubtitleStyleScheme
+
+    scheme = SubtitleStyleScheme(
+        karaoke_colors=_karaoke_matrix("#000000", "#EE7700")
+    )
+    style = Style(
+        fx_particle_color="#00FF00",
+        fx_particle_color_mode="role",
+        fx_particle_role_name="主唱",
+        custom_style_schemes={"主唱": scheme},
+        font_size_px=100,
+        karaoke_anim="none",
+    )
+    from dataclasses import replace as _replace
+
+    petal_style = _replace(style, sing_fx="petal")
+    petal_bursts = plan_line_bursts(petal_style, 0, 0, 3000, 2900, [(100, 400)])
+    petal_pair = [b for b in petal_bursts if b["kind"] == "petal"]
+    assert {b["color"] for b in petal_pair} == {"#000000", "#EE7700"}
+    # 花瓣的 role 档 = 来源走字前/后实色双色（不带装饰规格，
+    # 与 follow_mix「前后实色」同口径）。
+    assert all("paint" not in b for b in petal_pair)
+    # 音符在同一 role 模式下保持单色（走字后）——不改既有观感。
+    note_style = _replace(style, sing_fx="note")
+    note_bursts = plan_line_bursts(note_style, 0, 0, 3000, 2900, [(100, 400)])
+    notes = [b for b in note_bursts if b["kind"] == "note"]
+    assert len(notes) == 1 and notes[0]["color"] == "#EE7700"
+
+
+def test_petal_sprite_contract():
+    """花瓣 sprite：单轮廓、闭合、em 空间内；kind → sprite 映射正确。"""
+    petal = FX_SPRITES["petal"]["path_commands"]
+    assert petal[0][0] == "M" and petal[-1][0] == "Z"
+    assert sum(1 for c in petal if c[0] == "M") == 1  # 单轮廓（无自交叠）
+    for command in petal:
+        assert command[0] in {"M", "L", "C", "Q", "Z"}
+    points = [
+        (float(command[i]), float(command[i + 1]))
+        for command in petal
+        for i in range(1, len(command) - 1, 2)
+    ]
+    assert max(abs(x) for x, _y in points) <= 500.0
+    assert max(abs(y) for _x, y in points) <= 500.0
+    # 修长比例（画法参考：瓣长 ≈ 1.3~1.5 倍瓣宽；初版过宽被否）。
+    width = 2.0 * max(abs(x) for x, _y in points)
+    span_y = max(y for _x, y in points) - min(y for _x, y in points)
+    assert span_y / width >= 1.3
+    assert sprite_for_kind("petal") == "petal"
+
+
+def test_petal_gpu_support_and_override_roundtrip():
+    """花瓣档位不触发 GPU 整帧回退；逐行覆盖可往返序列化。"""
+    track = type("Track", (), {"lines": []})()
+    style = Style(
+        entry_anim="petal",
+        exit_anim="petal",
+        sing_fx="petal",
+        karaoke_anim="inherit",
+        reverse_karaoke_anim="inherit",
+    )
+    assert gpu_unsupported_features(track, style) == ()
+    data = line_animation_override_to_dict(
+        LineAnimationOverride(entry_anim="petal", exit_anim="petal", sing_fx="petal")
+    )
+    restored = line_animation_override_from_dict(data)
+    assert restored is not None
+    assert restored.entry_anim == "petal"
+    assert restored.exit_anim == "petal"
+    assert restored.sing_fx == "petal"
+
+
+def test_painter_petal_smoke(qapp):
+    """CPU painter 花瓣三档冒烟：char 锚点轨迹不抛异常（飘入/飘动各一帧）。"""
+    from PyQt6.QtGui import QImage
+
+    from krok_helper.subtitle_render.domain.timing import TimingChar, TimingTrack
+    from krok_helper.subtitle_render.engine.painter import paint_frame
+
+    track = TimingTrack(
+        lines=[
+            TimingLine(
+                chars=[
+                    TimingChar(text="あ", start_ms=1000),
+                    TimingChar(text="い", start_ms=1600),
+                ],
+                end_ms=2200,
+            )
+        ]
+    )
+    sing = Style(
+        sing_fx="petal",
+        fx_particle_color_mode="sakura",
+        karaoke_anim="utopia",
+        fx_particle_size_em=0.6,
+        fx_particle_count=8,
+    )
+    img = QImage(800, 450, QImage.Format.Format_ARGB32_Premultiplied)
+    img.fill(0xFF101010)
+    paint_frame(img, track, 1300, sing)  # 「あ」唱到一半：花瓣飘动
+    entry = Style(
+        entry_anim="petal",
+        entry_lead_ms=600,
+        fx_particle_color_mode="follow_mix",
+        karaoke_anim="utopia",
+    )
+    img2 = QImage(800, 450, QImage.Format.Format_ARGB32_Premultiplied)
+    img2.fill(0xFF101010)
+    paint_frame(img2, track, 1100, entry)  # 入场窗口内：花瓣飘入
+
+
+def test_d2d_geo_transition_gates_cover_particle_anims():
+    """C++ 逐字过渡总闸名单必须覆盖 Python 侧全部粒子档（2026-10 花瓣踩坑）。
+
+    GPU 的逐字渐显/渐隐链路：isGeoEntry/isGeoExit → hasCharacterTransition
+    / activeCharacterTransition → characterAnimationAt → geoCharState。档位
+    漏进总闸名单时整条链路不触发（求值器加了也没用），出入场整行弹出。
+    本测试按源码文本对齐 timing.py 的集合与两个 native 名单（竖排禁用名单
+    同口径），改 Python 档位时若忘同步 C++ 名单即在此失败。
+    """
+    import re
+    from pathlib import Path
+
+    from krok_helper.subtitle_render.domain.timing import (
+        ENTRY_PARTICLE_ANIMS,
+        EXIT_PARTICLE_ANIMS,
+    )
+
+    root = Path(__file__).resolve().parents[1]
+    render_source = (
+        root
+        / "native/subtitle_renderer/src/backends/direct2d/d2d_backend_render.cpp"
+    ).read_text(encoding="utf-8")
+    projection_source = (
+        root
+        / "native/subtitle_renderer/src/backends/qt/gpu_scene_projection.cpp"
+    ).read_text(encoding="utf-8")
+
+    def _animation_names(source: str, anchor: str) -> set[str]:
+        start = source.index(anchor)
+        end = source.index("};", start)
+        return set(
+            re.findall(r'animation == "([a-z_]+)"', source[start:end])
+        )
+
+    entry_names = _animation_names(render_source, "const auto isGeoEntry = []")
+    exit_names = _animation_names(render_source, "const auto isGeoExit = []")
+    assert ENTRY_PARTICLE_ANIMS <= entry_names, sorted(
+        ENTRY_PARTICLE_ANIMS - entry_names
+    )
+    assert EXIT_PARTICLE_ANIMS <= exit_names, sorted(
+        EXIT_PARTICLE_ANIMS - exit_names
+    )
+
+    vertical_start = projection_source.index(
+        "const auto verticalCharacterAnimation = [&]"
+    )
+    vertical_end = projection_source.index("};", vertical_start)
+    vertical_names = set(
+        re.findall(
+            r'animation == QStringLiteral\("([a-z_]+)"\)',
+            projection_source[vertical_start:vertical_end],
+        )
+    )
+    assert (ENTRY_PARTICLE_ANIMS | EXIT_PARTICLE_ANIMS) <= vertical_names, (
+        sorted((ENTRY_PARTICLE_ANIMS | EXIT_PARTICLE_ANIMS) - vertical_names)
+    )

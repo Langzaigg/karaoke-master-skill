@@ -123,6 +123,7 @@ _ENTRY_ANIMATION_LABELS = {
     "sparkle": "星光闪烁",
     "ripple": "涟漪光环",
     "note": "音符飘出",
+    "petal": "花瓣飘入",
 }
 _EXIT_ANIMATION_LABELS = {
     "none": "无",
@@ -141,6 +142,7 @@ _EXIT_ANIMATION_LABELS = {
     "sparkle": "星光闪烁",
     "ripple": "涟漪光环",
     "note": "音符飘出",
+    "petal": "花瓣飘散",
 }
 
 

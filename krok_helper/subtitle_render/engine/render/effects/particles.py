@@ -9,8 +9,12 @@
   由既有双后端布局奇偶校验保证。
 - sprite 轮廓是本模块定义的常量（M/L/C/Q/Z，1000 单位 em 空间、以 (0,0) 为
   中心），随场景 IR 下发（``fx_sprites``），C++ 不内置副本——单一事实源。
-- 粒子颜色模式（单独颜色 / 跟随字体·走字前后 / 复用配色方案）在规划期解析
-  成每 burst 的实色（#RRGGBB）下发，两条后端按 burst 颜色实心绘制、天然同色。
+- 粒子颜色模式（默认颜色·樱花粉双色 / 单独颜色·双色槽 / 跟随字体·
+  前后实色 / 跟随字体·走字前后 / 复用配色方案）在规划期解析成每 burst
+  的实色（#RRGGBB）下发，两条后端按 burst 颜色实心绘制、天然同色；
+  双色档由规划器拆成两条同轨迹、不同种子/半数量的 burst 实现「每颗粒
+  子随机取一色」，渲染端无特殊分支；单色跟随档（走字前/后、role）另带
+  完整 PaintFill 装饰规格（与音符「跟随字体」同源）。
 """
 
 from __future__ import annotations
@@ -47,6 +51,14 @@ RIPPLE_CHAR_STAGGER_MS = 350
 # 粒子拼接/消散（assemble / dissolve）：每字飞入/飞离的行程与寿命。
 ASSEMBLE_TRAVEL_EM = 2.2
 ASSEMBLE_LIFE_MS = 320
+# 花瓣（樱花飘落，2026-10）：飘入/飘散/飘动三档共用一条「\moves4 四点飘移」
+# 等效轨迹（sin 横向摇摆 + 单调竖直行程 + 连续翻转）。位置偏移全部取
+# box_w/box_h 比例（星光/音符同约定），不带字号倍数行程（2026-10 用户
+# 口径：初版 travel=1.6em 出生过高、飘进行间距）。
+PETAL_LIFE_MS = 900
+# 「默认颜色」档的两种樱花粉：规划器拆双 burst 随机混发（每颗粒子一色）。
+SAKURA_PINK_A = "#FFB7C5"
+SAKURA_PINK_B = "#FFD7E0"
 # 出入场动画驱动的粒子（星光/涟漪/音符/拼接/消散）默认用固定默认档；
 # 开启 ``fx_apply_to_entry_exit`` 后颜色与尺寸改吃粒子旋钮（数量仍固定）。
 ANIM_PARTICLE_SIZE_EM = 0.40
@@ -195,32 +207,25 @@ def particle_solid_color(style: Style, char_style: Style | None = None) -> str:
     return fill_to_solid_color(state.text, fallback)
 
 
-def particle_paint_spec(
-    style: Style,
-    char_style: Style | None,
+def _state_paint_spec(
+    source: Style,
+    state: KaraokeColorState,
     size_px: float,
     *,
-    include_strokes: bool = True,
-) -> dict[str, object] | None:
-    """按颜色模式解析成 burst 级**完整装饰规格**（IR dict，随 burst 下发）。
+    include_strokes: bool,
+    fallback: str,
+) -> dict[str, object]:
+    """把一个配色态折成 burst 级**完整装饰规格**（IR dict，随 burst 下发）。
 
     角色装饰比单色丰富——「跟随字体 / 复用配色方案」时不再折实色，而是
     把配色态的三层填充（主文字/描边/二重描边）原样下发，两条后端按
     PaintFill 完整绘制（渐变/拼色直接复用；涟漪的非横向渐变由各端做径
-    向映射——每环按扩散进度取实心色）。描边宽度按 粒子尺寸/该来源字号 同比缩放（上限半个粒子
-    边长，指示灯装饰管线同款映射）。``include_strokes=False``（涟漪光环）
-    描边/二重描边宽恒 0——环体是发丝线，叠描边会显著变粗（2026-10 用户
-    口径）。图片填充暂折为单独颜色（实色回退，两端一致）。``color`` 档
-    与悬空引用返回 ``None``——burst 只带实色 ``color``，走旧的实心路径
-    （旧 sidecar 兼容）。
+    向映射——每环按扩散进度取实心色）。描边宽度按 粒子尺寸/该来源字号
+    同比缩放（上限半个粒子边长，指示灯装饰管线同款映射）。
+    ``include_strokes=False``（涟漪光环）描边/二重描边宽恒 0——环体是
+    发丝线，叠描边会显著变粗（2026-10 用户口径）。图片填充暂折为单独
+    颜色（实色回退，两端一致）。
     """
-
-    mode = str(getattr(style, "fx_particle_color_mode", "color") or "color")
-    resolved = _particle_color_state(style, char_style, mode)
-    if resolved is None:
-        return None
-    source, state = resolved
-    fallback = str(getattr(style, "fx_particle_color", "") or "#FFFFFF")
 
     def _layer_fill(fill: PaintFill) -> dict[str, object]:
         if fill.mode == "image":
@@ -259,6 +264,91 @@ def particle_paint_spec(
         "stroke_width_px": round(stroke_width, 3),
         "stroke2_width_px": round(stroke2_width, 3),
     }
+
+
+def particle_paint_spec(
+    style: Style,
+    char_style: Style | None,
+    size_px: float,
+    *,
+    include_strokes: bool = True,
+) -> dict[str, object] | None:
+    """按颜色模式解析成 burst 级完整装饰规格（单态档：跟随前/后·复用方案）。
+
+    ``color`` 档与悬空引用返回 ``None``——burst 只带实色 ``color``，走旧的
+    实心路径（旧 sidecar 兼容）。双色档（前后随机）的规格见
+    :func:`particle_variant_paints`。
+    """
+
+    mode = str(getattr(style, "fx_particle_color_mode", "color") or "color")
+    resolved = _particle_color_state(style, char_style, mode)
+    if resolved is None:
+        return None
+    source, state = resolved
+    fallback = str(getattr(style, "fx_particle_color", "") or "#FFFFFF")
+    return _state_paint_spec(
+        source, state, size_px, include_strokes=include_strokes, fallback=fallback
+    )
+
+
+def particle_variant_paints(
+    style: Style,
+    char_style: Style | None,
+    size_px: float,
+    *,
+    petal: bool = False,
+    include_strokes: bool = True,
+) -> list[dict[str, object]] | None:
+    """双色随机模式的**变体实色列表**（2026-10 花瓣特效口径）：
+
+    - ``color`` 单独颜色——颜色一/颜色二双色槽随机混发（颜色二默认白色，
+      白色即颜色本身——2026-10 用户口径：必须设置双色，无「未设置」态）；
+    - ``sakura`` 默认颜色——两种樱花粉实色变体；
+    - ``follow_mix`` 跟随字体·前后实色——当前字符角色方案（缺省回落行
+      样式）配色的走字前/后「主文字」**实色**（渐变/拼色取停止色平均）
+      作为双色（2026-10 用户口径：前后实色，不携带装饰规格）；
+    - ``role`` 复用配色方案——**仅花瓣粒子**取指定来源方案走字前/后实色
+      双色（其余粒子 kind 的 ``role`` 保持单色「走字后」+ 完整装饰规格
+      旧口径，不改既有观感）。
+
+    其余模式（follow_before / follow_after / 悬空 role）返回 ``None``
+    （调用方走单色 + 完整 paint 规格路径，与音符同源）。「随机混发」由
+    :func:`plan_line_bursts` 拆成两条同轨迹、不同种子/半数量的 burst 实现
+    ——每颗粒子属且属一条变体，与逐粒子取色分布等价，渲染端零改动。
+    ``size_px`` / ``include_strokes`` 仅为缓存键兼容保留，实色对不消费。
+    """
+
+    fallback = str(getattr(style, "fx_particle_color", "") or "#FFFFFF")
+    mode = str(getattr(style, "fx_particle_color_mode", "color") or "color")
+    if mode == "color":
+        # 单独颜色：恒双色（颜色二默认白色——白色即颜色，无「未设置」
+        # 态，2026-10 用户口径：必须设置双色）。两槽同色时折单 burst
+        #（观感等价，默认双白不翻倍 burst）。
+        color2 = str(getattr(style, "fx_particle_color2", "") or "#FFFFFF")
+        if color2 == fallback:
+            return [{"color": fallback}]
+        return [{"color": fallback}, {"color": color2}]
+    if mode == "sakura":
+        return [{"color": SAKURA_PINK_A}, {"color": SAKURA_PINK_B}]
+
+    def _state_solids(source: Style) -> list[dict[str, object]]:
+        colors = effective_karaoke_colors(source)
+        return [
+            {"color": fill_to_solid_color(state.text, fallback)}
+            for state in (colors.before, colors.after)
+        ]
+
+    if mode == "follow_mix":
+        source = char_style if char_style is not None else style
+        return _state_solids(source)
+    if mode == "role" and petal:
+        resolved = appearance_role_source(
+            style, getattr(style, "fx_particle_role_name", None)
+        )
+        if resolved is None:
+            return None
+        return _state_solids(resolved)
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -359,11 +449,33 @@ def _pixel_commands() -> list[list[object]]:
     ]
 
 
+def _petal_commands() -> list[list[object]]:
+    """樱花单瓣剪影（画法参考：圆润风筝形/泪滴形——底部收窄成尖、向上
+    展宽，最宽处约 2/3 高度，顶端带 V 形缺刻（樱花区别于桃李杏梅的关键
+    特征）；瓣长 ≈ 1.45 倍瓣宽，2026-10 用户口径：初版过宽）。单轮廓无
+    自交叠（宽 0.48em × 高 0.70em）。"""
+    return [
+        ["M", 0.0, 370.0],
+        # 左缘自底尖收窄处展宽上行
+        ["C", -65.0, 335.0, -190.0, 175.0, -238.0, -25.0],
+        # 左顶瓣绕向中线（最宽 ≈ ±242 在上部 2/3 处）
+        ["C", -242.0, -225.0, -150.0, -355.0, -52.0, -295.0],
+        # 顶端缺刻：左沿下沉到谷底再升起（缺刻深 ≈ 10% 瓣长）
+        ["C", -26.0, -278.0, -11.0, -268.0, 0.0, -262.0],
+        ["C", 11.0, -268.0, 26.0, -278.0, 52.0, -295.0],
+        # 右顶瓣 + 右缘收窄下行回底尖
+        ["C", 150.0, -355.0, 242.0, -225.0, 238.0, -25.0],
+        ["C", 190.0, 175.0, 65.0, 335.0, 0.0, 370.0],
+        ["Z"],
+    ]
+
+
 FX_SPRITES: dict[str, dict[str, object]] = {
     "star4": _sprite_ir(_star4_commands()),
     "ring": _sprite_ir(_ring_commands()),
     "note": _sprite_ir(_note_commands()),
     "pixel": _sprite_ir(_pixel_commands()),
+    "petal": _sprite_ir(_petal_commands()),
 }
 
 _SPRITE_FOR_KIND = {
@@ -374,6 +486,7 @@ _SPRITE_FOR_KIND = {
     "note": "note",
     "assemble": "pixel",
     "dissolve": "pixel",
+    "petal": "petal",
 }
 
 
@@ -396,6 +509,10 @@ _PAINT_CACHE: "OrderedDict[tuple, tuple[tuple[Style, Style | None], dict[str, ob
 # 实色回退同理缓存（渐变平均色逐 burst 重算同样昂贵）。
 _SOLID_CACHE_MAX = 64
 _SOLID_CACHE: "OrderedDict[tuple, tuple[tuple[Style, Style | None], str]]" = OrderedDict()
+# 双色档（sakura / follow_mix / role+花瓣）的变体规格同样缓存
+#（含每个态的完整装饰规格——渐变停止色/描边宽折算逐变体重算同样昂贵）。
+_VARIANT_CACHE_MAX = 64
+_VARIANT_CACHE: "OrderedDict[tuple, tuple[tuple[Style, Style | None], list[dict[str, object]] | None]]" = OrderedDict()
 
 
 def _cached_particle_solid(style: Style, char_style: Style | None) -> str:
@@ -447,11 +564,48 @@ def _cached_particle_paint(
     return spec
 
 
+def _cached_particle_variants(
+    style: Style,
+    char_style: Style | None,
+    size_px: float,
+    *,
+    petal: bool,
+    include_strokes: bool,
+) -> list[dict[str, object]] | None:
+    key = (
+        id(style),
+        id(char_style) if char_style is not None else 0,
+        round(float(size_px), 3),
+        bool(petal),
+        bool(include_strokes),
+    )
+    entry = _VARIANT_CACHE.get(key)
+    if entry is not None and entry[0][0] is style and (
+        entry[0][1] is char_style
+        if char_style is not None
+        else entry[0][1] is None
+    ):
+        _VARIANT_CACHE.move_to_end(key)
+        return entry[1]
+    variants = particle_variant_paints(
+        style,
+        char_style,
+        size_px,
+        petal=petal,
+        include_strokes=include_strokes,
+    )
+    if len(_VARIANT_CACHE) >= _VARIANT_CACHE_MAX:
+        _VARIANT_CACHE.popitem(last=False)
+    _VARIANT_CACHE[key] = ((style, char_style), variants)
+    return variants
+
+
 def clear_particle_paint_cache() -> None:
     """清空装饰规格缓存（测试隔离用；常规渲染无需失效——键含完整签名）。"""
 
     _PAINT_CACHE.clear()
     _SOLID_CACHE.clear()
+    _VARIANT_CACHE.clear()
 
 
 def plan_line_bursts(
@@ -476,7 +630,9 @@ def plan_line_bursts(
     颜色语义：``color`` 恒为实色回退（旧 sidecar 兼容）；颜色模式非
     ``color`` 时另附 ``paint`` 完整装饰规格（填充/描边/二重描边 PaintFill
     + 已按粒子尺寸缩放的描边宽，见 :func:`particle_paint_spec`），两条
-    后端优先按 ``paint`` 绘制。入退场动画粒子默认固定白档，开启
+    后端优先按 ``paint`` 绘制；双色档（单独颜色双槽 / ``sakura`` /
+    ``follow_mix`` 前后实色 / ``role``+花瓣）改拆两条实色变体 burst
+    （数量对半、种子错开）。入退场动画粒子默认固定白档，开启
     ``fx_apply_to_entry_exit`` 后改吃粒子旋钮的颜色与尺寸（数量恒固定）。
     ``line_index`` 参与种子，保证同曲目每行轨迹不同且重开可复现。
     ``char_visible``（与 char_windows 等长）：False = 空白字符（空格等
@@ -521,12 +677,17 @@ def plan_line_bursts(
         anim: bool,
         ring: bool = False,
         line_anchor: bool = False,
-    ) -> dict[str, object]:
-        """burst 的颜色字段：固定白档 / 实色回退 (+ 非单色模式的 paint 规格)。
+        petal: bool = False,
+    ) -> list[dict[str, object]]:
+        """burst 的颜色规格**列表**：固定白档 / 实色回退 (+ 非单色模式的
+        paint 规格) / 双色档的变体规格列表（见 :func:`particle_variant_paints`）。
 
         规格按「样式 × 角色方案 × 尺寸 × 是否涟漪」缓存——同一组合全帧
         复用一份（见 :func:`_cached_particle_paint`）。涟漪光环不带描边
         （``include_strokes=False``）：环体是发丝线，叠描边显著变粗。
+        双色档（单独颜色双槽 / sakura / follow_mix 前后实色 / role+花瓣）
+        拆两条实色变体（见 :func:`particle_variant_paints`，2026-10 用户
+        口径：双色系一律实色，不携带装饰规格）。
 
         ``line_anchor``（入退场星光）：跟随模式下附 ``char_colors`` 逐字
         颜色表——动画仍是整行一条 burst（扫过轨迹不变），绘制端按每颗粒
@@ -536,7 +697,7 @@ def plan_line_bursts(
         """
 
         if anim and not apply_to_anim:
-            return {"color": ANIM_PARTICLE_COLOR}
+            return [{"color": ANIM_PARTICLE_COLOR}]
         mode = str(getattr(style, "fx_particle_color_mode", "color") or "color")
         if (
             line_anchor
@@ -547,11 +708,20 @@ def plan_line_bursts(
                 _cached_particle_solid(style, _char_style(index))
                 for index in range(char_count)
             ]
-            return {
+            return [{
                 "color": char_colors[0],
                 "char_colors": char_colors,
-            }
+            }]
         char_style = _char_style(char_index)
+        variants = _cached_particle_variants(
+            style,
+            char_style,
+            burst_size,
+            petal=petal,
+            include_strokes=not ring,
+        )
+        if variants is not None:
+            return variants
         fields: dict[str, object] = {
             "color": _cached_particle_solid(style, char_style)
         }
@@ -560,7 +730,28 @@ def plan_line_bursts(
         )
         if spec is not None:
             fields["paint"] = spec
-        return fields
+        return [fields]
+
+    def _variant_bursts(
+        fields: dict[str, object],
+        paints: list[dict[str, object]],
+    ) -> None:
+        """按颜色变体发射 burst：单色一条原样下发；双色档拆两条同轨迹
+        变体——数量对半（余数归第一条）、种子按变体序号偏移，保证两条
+        变体的粒子伪随机位置互相独立（同 index 撞位）。「每颗粒子随机
+        取一色」由此实现，渲染端零特殊分支。"""
+
+        total = int(fields["count"])
+        for variant, paint in enumerate(paints):
+            burst = {**fields, **paint}
+            if len(paints) > 1:
+                burst["count"] = (
+                    total - total // 2 if variant == 0 else total // 2
+                )
+                burst["seed"] = (
+                    int(fields["seed"]) + variant * 0x9E37
+                ) & 0xFFFFFFFF
+            bursts.append(burst)
 
     def _duration_scale(configured: int) -> float:
         total = min(max(int(configured), 120), 3000)
@@ -585,7 +776,7 @@ def plan_line_bursts(
         px = anim_size * 3.6 if ring_size is None else ring_size
         for char_index in range(char_count):
             start = int(base_ms) + int(stagger_ms * scale) * char_index
-            bursts.append({
+            _variant_bursts({
                 "kind": "ripple", "anchor": "char",
                 "char_index": int(char_index),
                 "start_ms": start,
@@ -595,12 +786,11 @@ def plan_line_bursts(
                 # 水波纹基准直径 ≈ 1.4× 字高，扩散峰值约 1.6× 字高。
                 "size_px": px, "travel_px": 0.0, "front": False,
                 "sweep": 0,
-                **_burst_paint(char_index, px, anim=True, ring=True),
-            })
+            }, _burst_paint(char_index, px, anim=True, ring=True))
 
     entry_anim = str(getattr(style, "entry_anim", "none") or "none")
     if entry_anim == "sparkle" and entry_active and display_start_ms is not None:
-        bursts.append({
+        _variant_bursts({
             "kind": "sparkle", "anchor": "line", "char_index": -1,
             "start_ms": int(display_start_ms),
             "end_ms": int(display_start_ms)
@@ -610,8 +800,7 @@ def plan_line_bursts(
             # 已偏置到字上侧为主，遮挡有限）。
             "size_px": anim_size, "travel_px": anim_size * 3.2, "front": True,
             "sweep": 1,
-            **_burst_paint(None, anim_size, anim=True, line_anchor=True),
-        })
+        }, _burst_paint(None, anim_size, anim=True, line_anchor=True))
     elif entry_anim == "ripple" and entry_active and display_start_ms is not None:
         _char_ripples(
             int(display_start_ms), 2, stagger_ms=stagger, scale=entry_scale
@@ -619,7 +808,7 @@ def plan_line_bursts(
     elif entry_anim == "note" and entry_active and display_start_ms is not None:
         for char_index in range(char_count):
             start = int(display_start_ms) + int(stagger * entry_scale) * char_index
-            bursts.append({
+            _variant_bursts({
                 "kind": "note", "anchor": "char",
                 "char_index": int(char_index),
                 "start_ms": start,
@@ -627,8 +816,21 @@ def plan_line_bursts(
                 "count": 3, "seed": (seed_base + 6 + char_index) & 0xFFFFFFFF,
                 "size_px": anim_size, "travel_px": anim_size * 1.8,
                 "front": True, "sweep": 0,
-                **_burst_paint(char_index, anim_size, anim=True),
-            })
+            }, _burst_paint(char_index, anim_size, anim=True))
+    elif entry_anim == "petal" and entry_active and display_start_ms is not None:
+        # 花瓣飘入：每字自字形顶上方错峰飘落汇拢到字框（ease-out 减速
+        # 抵达后熄灭），随机摇摆 + 连续翻转（\moves4 四点飘移等效观感）。
+        for char_index in range(char_count):
+            start = int(display_start_ms) + int(stagger * entry_scale) * char_index
+            _variant_bursts({
+                "kind": "petal", "anchor": "char",
+                "char_index": int(char_index),
+                "start_ms": start,
+                "end_ms": start + int(PETAL_LIFE_MS * entry_scale),
+                "count": 3, "seed": (seed_base + 10 + char_index) & 0xFFFFFFFF,
+                "size_px": anim_size, "travel_px": 0.0,
+                "front": True, "sweep": 1,
+            }, _burst_paint(char_index, anim_size, anim=True, petal=True))
 
     exit_anim = str(getattr(style, "exit_anim", "none") or "none")
     if exit_anim == "sparkle" and exit_active and display_end_ms is not None:
@@ -638,14 +840,13 @@ def plan_line_bursts(
         )
         if int(display_end_ms) - exit_start < 120:
             exit_start = int(display_end_ms) - 120
-        bursts.append({
+        _variant_bursts({
             "kind": "sparkle", "anchor": "line", "char_index": -1,
             "start_ms": exit_start, "end_ms": int(display_end_ms),
             "count": anim_count, "seed": (seed_base + 3) & 0xFFFFFFFF,
             "size_px": anim_size, "travel_px": anim_size * 3.2, "front": True,
             "sweep": -1,
-            **_burst_paint(None, anim_size, anim=True, line_anchor=True),
-        })
+        }, _burst_paint(None, anim_size, anim=True, line_anchor=True))
     elif exit_anim == "ripple" and exit_active and display_end_ms is not None:
         exit_start = max(
             int(line_end_ms) if line_end_ms is not None else 0,
@@ -679,7 +880,7 @@ def plan_line_bursts(
         )
         for char_index in range(char_count):
             start = exit_start + stagger_exit * char_index
-            bursts.append({
+            _variant_bursts({
                 "kind": "note", "anchor": "char",
                 "char_index": int(char_index),
                 "start_ms": start,
@@ -687,15 +888,42 @@ def plan_line_bursts(
                 "count": 3, "seed": (seed_base + 8 + char_index) & 0xFFFFFFFF,
                 "size_px": anim_size, "travel_px": anim_size * 1.8,
                 "front": True, "sweep": 0,
-                **_burst_paint(char_index, anim_size, anim=True),
-            })
+            }, _burst_paint(char_index, anim_size, anim=True))
+    elif exit_anim == "petal" and exit_active and display_end_ms is not None:
+        exit_start_petal = max(
+            int(line_end_ms) if line_end_ms is not None else 0,
+            int(display_end_ms)
+            - int((RIPPLE_CHAR_STAGGER_MS + PETAL_LIFE_MS) * exit_scale),
+        )
+        if int(display_end_ms) - exit_start_petal < 120:
+            exit_start_petal = int(display_end_ms) - 120
+        tail_petal = (
+            int(display_end_ms) - exit_start_petal
+            - int(PETAL_LIFE_MS * exit_scale)
+        )
+        stagger_petal = min(
+            int(stagger * exit_scale),
+            max(0, tail_petal) // max(1, char_count - 1),
+        )
+        # 花瓣飘散：每字自字框内错峰剥落、边翻转边飘落到字底下方淡出。
+        for char_index in range(char_count):
+            start = exit_start_petal + stagger_petal * char_index
+            _variant_bursts({
+                "kind": "petal", "anchor": "char",
+                "char_index": int(char_index),
+                "start_ms": start,
+                "end_ms": start + int(PETAL_LIFE_MS * exit_scale),
+                "count": 3, "seed": (seed_base + 11 + char_index) & 0xFFFFFFFF,
+                "size_px": anim_size, "travel_px": 0.0,
+                "front": True, "sweep": -1,
+            }, _burst_paint(char_index, anim_size, anim=True, petal=True))
 
     # 粒子拼接/消散：像素风方块粒子，同出入场动画档（默认固定档）。
     per_char_assemble = max(4, ANIM_PARTICLE_COUNT // 2)
     if entry_anim == "assemble_in" and entry_active and display_start_ms is not None:
         for char_index in range(char_count):
             start = int(display_start_ms) + int(stagger * entry_scale) * char_index
-            bursts.append({
+            _variant_bursts({
                 "kind": "assemble", "anchor": "char",
                 "char_index": int(char_index),
                 "start_ms": start,
@@ -705,8 +933,7 @@ def plan_line_bursts(
                 "size_px": anim_size * 0.75,
                 "travel_px": font_px * ASSEMBLE_TRAVEL_EM,
                 "front": True, "sweep": 0,
-                **_burst_paint(char_index, anim_size * 0.75, anim=True),
-            })
+            }, _burst_paint(char_index, anim_size * 0.75, anim=True))
     if exit_anim == "dissolve_out" and exit_active and display_end_ms is not None:
         exit_start_assemble = max(
             int(line_end_ms) if line_end_ms is not None else 0,
@@ -723,7 +950,7 @@ def plan_line_bursts(
         )
         for char_index in range(char_count):
             start = exit_start_assemble + stagger_dissolve * char_index
-            bursts.append({
+            _variant_bursts({
                 "kind": "dissolve", "anchor": "char",
                 "char_index": int(char_index),
                 "start_ms": start,
@@ -733,8 +960,7 @@ def plan_line_bursts(
                 "size_px": anim_size * 0.75,
                 "travel_px": font_px * ASSEMBLE_TRAVEL_EM,
                 "front": True, "sweep": 0,
-                **_burst_paint(char_index, anim_size * 0.75, anim=True),
-            })
+            }, _burst_paint(char_index, anim_size * 0.75, anim=True))
 
     # 唱字装饰粒子：默认唯一吃粒子旋钮（尺寸/数量/颜色）的档位。
     if style.sing_fx == "ripple":
@@ -745,7 +971,7 @@ def plan_line_bursts(
             if char_visible is not None and not char_visible[char_index]:
                 continue
             ring_px = size * 3.6
-            bursts.append({
+            _variant_bursts({
                 "kind": "ripple", "anchor": "char",
                 "char_index": int(char_index),
                 "start_ms": int(start_ms),
@@ -754,8 +980,27 @@ def plan_line_bursts(
                 "seed": (seed_base + 5 + char_index) & 0xFFFFFFFF,
                 "size_px": ring_px, "travel_px": 0.0, "front": False,
                 "sweep": 0,
-                **_burst_paint(char_index, ring_px, anim=False, ring=True),
-            })
+            }, _burst_paint(char_index, ring_px, anim=False, ring=True))
+    elif style.sing_fx == "petal":
+        # 花瓣飘动：唱到的字上花瓣轻摆缓沉（数量吃粒子旋钮，默认 4/字），
+        # 窗口不受唱字窗约束、自然播完（与星光/音符同口径）。
+        per_char = max(3, count // 3)
+        for char_index, (start_ms, end_ms) in enumerate(char_windows):
+            duration = int(end_ms) - int(start_ms)
+            if duration <= 0:
+                continue
+            if char_visible is not None and not char_visible[char_index]:
+                continue
+            _variant_bursts({
+                "kind": "petal", "anchor": "char",
+                "char_index": int(char_index),
+                "start_ms": int(start_ms),
+                "end_ms": int(start_ms) + PETAL_LIFE_MS,
+                "count": per_char,
+                "seed": (seed_base + 5 + char_index) & 0xFFFFFFFF,
+                "size_px": size, "travel_px": 0.0,
+                "front": True, "sweep": 0,
+            }, _burst_paint(char_index, size, anim=False, petal=True))
     elif style.sing_fx in ("twinkle", "twinkle_classic", "note"):
         # 唱字星光并入出入场星光运动学后，密度对齐出入场观感（默认 7/字）；
         # 「旧版」档（twinkle_classic）保留 2026-10 运动学改造前的原地闪烁
@@ -774,7 +1019,7 @@ def plan_line_bursts(
             if char_visible is not None and not char_visible[char_index]:
                 continue
             seed = (seed_base + 5 + char_index) & 0xFFFFFFFF
-            bursts.append({
+            _variant_bursts({
                 # 叠加在正在唱的那个字上（用户口径）：锚点=该字符自身
                 # 中心；发射时刻=该字符唱字窗起点，窗口延伸到轨迹自然
                 # 播完（换字后余韵继续，不硬截断）。
@@ -789,8 +1034,7 @@ def plan_line_bursts(
                 # 旧版档原地闪烁（sweep=0，无扫过）。
                 "size_px": size, "travel_px": size * 1.8, "front": True,
                 "sweep": 1 if style.sing_fx == "twinkle" else 0,
-                **_burst_paint(char_index, size, anim=False),
-            })
+            }, _burst_paint(char_index, size, anim=False))
     return bursts
 
 
@@ -989,4 +1233,74 @@ def burst_particles_at(
                 size * (0.70 + 0.60 * u1) * (0.85 + 0.15 * math.sin(math.pi * p)),
                 1.0 - p * math.sqrt(p),
             ))
+        elif kind == "petal":
+            # 花瓣飘落（Aegisub「\moves4 四点飘移」等效运动学）：sin 横向
+            # 摇摆 + 单调竖直行程 + 全程连续翻转。位置寻路与星光/音符同
+            # 约定——偏移全部取 box_w/box_h 比例（星光 star_y_fraction 的
+            # 「只稍微溢出字形顶」口径；音符出生在 -0.35 box_h、行程按
+            # 粒子尺寸折算），不用字号倍数，避免飘进行间距/上一行
+            #（2026-10 用户口径：初版 travel=1.6em 出生过高）。
+            # sweep>0 飘入 ease-out 汇拢、sweep<0 飘散 smoothstep 离场、
+            # sweep==0 唱字飘动小行程缓起缓落。随机出生延迟错峰
+            # （快进慢出包络，\fad 同款）。镜像 d2d_fx.cpp petal 分支。
+            u1 = fx_unit_hash(seed + i, 1)
+            u2 = fx_unit_hash(seed + i, 2)
+            u3 = fx_unit_hash(seed + i, 3)
+            u4 = fx_unit_hash(seed + i, 4)
+            u5 = fx_unit_hash(seed + i, 5)
+            delay = u3 * 110.0
+            p = min(max((tau - delay) / max(life - delay, 1.0), 0.0), 1.0)
+            if p <= 0.0:
+                continue
+            sway = (
+                math.sin((u2 + p * (0.9 + 0.9 * u5)) * 2.0 * math.pi)
+                * size * (0.8 + 0.7 * u4)
+            )
+            size_i = size * (0.72 + 0.55 * u4)
+            spin = (
+                u3 * 360.0
+                + p * (160.0 + 240.0 * u5) * (1.0 if u4 >= 0.5 else -1.0)
+            )
+            if sweep > 0:
+                # 花瓣飘入：自字形顶上方（溢出 0.10~0.40 box_h，星光同
+                # 量级）ease-out 减速飘落进字框，抵达后熄灭。
+                eased = 1.0 - (1.0 - p) * (1.0 - p)
+                land_x = (u1 - 0.5) * box_w * 0.85
+                land_y = (u4 - 0.5) * box_h * 0.55
+                start_x = land_x + (u5 - 0.5) * box_w * 0.7
+                start_y = -(0.60 + 0.30 * u2) * box_h
+                out.append(ParticleDraw(
+                    origin_x + start_x + (land_x - start_x) * eased + sway,
+                    origin_y + start_y + (land_y - start_y) * eased,
+                    spin,
+                    size_i * (0.85 + 0.15 * math.sin(math.pi * p)),
+                    min(p * 5.0, 1.0) * (1.0 - p) * (1.0 - p * 0.4),
+                ))
+            elif sweep < 0:
+                # 花瓣飘散：横向飘逸保持随机（sin 摇摆），只有**结束位置**
+                # 落在起点右侧（幅度随机，2026-10 用户口径：飘逸随机、
+                # 终点向右）；纵向落到字底下方（0.05~0.65 box_h）淡出。
+                eased = p * p * (3.0 - 2.0 * p)
+                start_x = (u1 - 0.5) * box_w * 0.85
+                end_x = start_x + (0.5 + 0.9 * u5) * box_w
+                start_y = (u4 - 0.5) * box_h * 0.55
+                out.append(ParticleDraw(
+                    origin_x + start_x + (end_x - start_x) * eased + sway,
+                    origin_y + start_y + (0.55 + 0.30 * u2) * box_h * eased,
+                    spin,
+                    size_i * (0.90 + 0.10 * (1.0 - p)),
+                    (1.0 - p) * (1.0 - p * 0.5),
+                ))
+            else:
+                # 花瓣飘动：字框上半出生（星光的偏上口径），小行程缓沉，
+                # sin 包络淡入淡出。
+                eased = p * p * (3.0 - 2.0 * p)
+                out.append(ParticleDraw(
+                    origin_x + (u1 - 0.5) * box_w * 0.7 + sway,
+                    origin_y - (0.25 + 0.30 * u4) * box_h
+                    + (0.40 + 0.30 * u2) * box_h * eased,
+                    spin,
+                    size_i * (0.85 + 0.15 * math.sin(math.pi * p)),
+                    min(p * 5.0, 1.0) * math.sin(math.pi * p),
+                ))
     return out

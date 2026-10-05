@@ -190,7 +190,8 @@ GeoCharState geoCharState(
         }
         return state;
     }
-    if (effect == "sparkle" || effect == "ripple" || effect == "note") {
+    if (effect == "sparkle" || effect == "ripple" || effect == "note"
+        || effect == "petal") {
         // 粒子类出入场动画的本体：文字逐字显形（入场 4 倍速透明度，
         // 粒子拼接同款编排），退场逐字淡出；粒子由 planner 叠加。
         const float p = staggerProgress;
@@ -437,6 +438,79 @@ std::vector<FxParticle> burstParticlesAt(
                     * (0.85f + 0.15f * std::sin(pi * p)),
                 1.0f - std::sqrt(p) * p,
             });
+        } else if (burst.kind == "petal") {
+            // 花瓣飘落（镜像 particles.burst_particles_at petal 分支）：
+            // sin 横向摇摆 + 单调竖直行程 + 连续翻转；位置偏移全部取
+            // box_w/box_h 比例（星光/音符同约定，不用字号倍数行程——
+            // 初版 travel=1.6em 出生过高飘进行间距，2026-10 用户口径）。
+            // sweep>0 飘入 ease-out 汇拢、sweep<0 飘散 smoothstep 离场、
+            // sweep==0 唱字飘动小行程缓起缓落。
+            const float u1 = fxUnitHash(index, 1u);
+            const float u2 = fxUnitHash(index, 2u);
+            const float u3 = fxUnitHash(index, 3u);
+            const float u4 = fxUnitHash(index, 4u);
+            const float u5 = fxUnitHash(index, 5u);
+            const float delay = u3 * 110.0f;
+            const float p = std::clamp(
+                (tau - delay)
+                    / std::max(static_cast<float>(life) - delay, 1.0f),
+                0.0f,
+                1.0f
+            );
+            if (p <= 0.0f) {
+                continue;
+            }
+            constexpr float pi = 3.14159265358979323846f;
+            const float sway = std::sin(
+                (u2 + p * (0.9f + 0.9f * u5)) * 2.0f * pi
+            ) * size * (0.8f + 0.7f * u4);
+            const float sizeI = size * (0.72f + 0.55f * u4);
+            const float spin = u3 * 360.0f
+                + p * (160.0f + 240.0f * u5) * (u4 >= 0.5f ? 1.0f : -1.0f);
+            if (burst.sweep > 0) {
+                // 花瓣飘入：自字形顶上方（溢出 0.10~0.40 box_h，星光同
+                // 量级）ease-out 减速飘落进字框，抵达后熄灭。
+                const float eased = 1.0f - (1.0f - p) * (1.0f - p);
+                const float landX = (u1 - 0.5f) * boxW * 0.85f;
+                const float landY = (u4 - 0.5f) * boxH * 0.55f;
+                const float startX = landX + (u5 - 0.5f) * boxW * 0.7f;
+                const float startY = -(0.60f + 0.30f * u2) * boxH;
+                out.push_back(FxParticle{
+                    originX + startX + (landX - startX) * eased + sway,
+                    originY + startY + (landY - startY) * eased,
+                    spin,
+                    sizeI * (0.85f + 0.15f * std::sin(pi * p)),
+                    std::min(p * 5.0f, 1.0f) * (1.0f - p) * (1.0f - p * 0.4f),
+                });
+            } else if (burst.sweep < 0) {
+                // 花瓣飘散：横向飘逸保持随机（sin 摇摆），只有**结束
+                // 位置**落在起点右侧（幅度随机；2026-10 用户口径：飘逸
+                // 随机、终点向右），落到字底下方（0.05~0.65 box_h）淡出。
+                const float eased = p * p * (3.0f - 2.0f * p);
+                const float startX = (u1 - 0.5f) * boxW * 0.85f;
+                const float endX = startX + (0.5f + 0.9f * u5) * boxW;
+                const float startY = (u4 - 0.5f) * boxH * 0.55f;
+                out.push_back(FxParticle{
+                    originX + startX + (endX - startX) * eased + sway,
+                    originY + startY
+                        + (0.55f + 0.30f * u2) * boxH * eased,
+                    spin,
+                    sizeI * (0.90f + 0.10f * (1.0f - p)),
+                    (1.0f - p) * (1.0f - p * 0.5f),
+                });
+            } else {
+                // 花瓣飘动：字框上半出生（星光的偏上口径），小行程缓沉，
+                // sin 包络淡入淡出。
+                const float eased = p * p * (3.0f - 2.0f * p);
+                out.push_back(FxParticle{
+                    originX + (u1 - 0.5f) * boxW * 0.7f + sway,
+                    originY - (0.25f + 0.30f * u4) * boxH
+                        + (0.40f + 0.30f * u2) * boxH * eased,
+                    spin,
+                    sizeI * (0.85f + 0.15f * std::sin(pi * p)),
+                    std::min(p * 5.0f, 1.0f) * std::sin(pi * p),
+                });
+            }
         }
     }
     return out;

@@ -38,6 +38,7 @@ ENTRY_ANIMATION_OPTIONS = (
     ("星光闪烁", "sparkle"),
     ("涟漪光环", "ripple"),
     ("音符飘出", "note"),
+    ("花瓣飘入", "petal"),
 )
 
 EXIT_ANIMATION_OPTIONS = (
@@ -57,6 +58,7 @@ EXIT_ANIMATION_OPTIONS = (
     ("星光闪烁", "sparkle"),
     ("涟漪光环", "ripple"),
     ("音符飘出", "note"),
+    ("花瓣飘散", "petal"),
 )
 
 FX_PARTICLE_OPTIONS = (
@@ -71,10 +73,13 @@ FX_SING_OPTIONS = (
     ("星光闪烁（旧版）", "twinkle_classic"),
     ("音符飘出", "note"),
     ("涟漪光环", "ripple"),
+    ("花瓣飘动", "petal"),
 )
 
 FX_PARTICLE_COLOR_MODE_OPTIONS = (
+    ("默认颜色", "sakura"),
     ("单独颜色", "color"),
+    ("跟随字体·前后实色", "follow_mix"),
     ("跟随字体·走字前", "follow_before"),
     ("跟随字体·走字后", "follow_after"),
     ("复用配色方案", "role"),
@@ -629,11 +634,15 @@ class EffectsPropertyPageBuilder:
         for label, value in FX_PARTICLE_COLOR_MODE_OPTIONS:
             host._fx_particle_mode_combo.addItem(label, value)
         host._fx_particle_mode_combo.setToolTip(
-            "粒子颜色模式：单独颜色=用下方颜色按钮；"
-            "跟随字体·走字前/后=取所在行实际配色的走字前/走字后主文字颜色"
+            "粒子颜色模式：默认颜色=两种樱花粉随机混发（花瓣特效的默认观感）；"
+            "单独颜色=颜色一/颜色二双色槽随机混发（两色相同为单色）；"
+            "跟随字体·前后实色=所在行实际配色的走字前/后主文字实色双色随机混发"
             "（渐变/拼色取平均色）；"
-            "复用配色方案=用所选来源（全局默认/「标题」/角色方案）"
-            "「走字后-主文字」的填充折算成实色，与扫字线同口径"
+            "跟随字体·走字前/后=取所在行实际配色的走字前/后主文字"
+            "完整装饰（渐变/描边原样下发，渐变/拼色取平均色仅作回退）；"
+            "复用配色方案=用所选来源（全局默认/「标题」/角色方案）的配色，"
+            "花瓣取该来源走字前/后实色双色随机、其余粒子取「走字后-主文字」"
+            "填充折算成实色，与扫字线同口径"
         )
         host._fx_particle_mode_combo.currentIndexChanged.connect(
             lambda _index: host._update_style(
@@ -675,6 +684,23 @@ class EffectsPropertyPageBuilder:
         host._fx_color_btn = host._color_button(
             "fx_particle_color", getattr(host._style, "fx_particle_color", "#FFFFFF")
         )
+        host._fx_color_btn.setToolTip(
+            "粒子颜色一；单独颜色档下与颜色二双色随机混发"
+        )
+        host._fx_color_btn2 = host._color_button(
+            "fx_particle_color2",
+            getattr(host._style, "fx_particle_color2", "#FFFFFF"),
+        )
+        host._fx_color_btn2.setToolTip(
+            "粒子颜色二（默认白色）：单独颜色档恒为双色随机混发"
+        )
+        # 双色槽容器：两颗颜色按钮并排，共占参数行的「颜色/来源」列位。
+        host._fx_color_slot = QWidget(section)
+        color_slot_layout = QHBoxLayout(host._fx_color_slot)
+        color_slot_layout.setContentsMargins(0, 0, 0, 0)
+        color_slot_layout.setSpacing(4)
+        color_slot_layout.addWidget(host._fx_color_btn)
+        color_slot_layout.addWidget(host._fx_color_btn2)
         host._fx_apply_check = CheckBox("仅唱字", section)
         host._fx_apply_check.setToolTip(
             "勾选（默认）：粒子的颜色与尺寸仅作用于唱字装饰粒子，入场/退场"
@@ -690,7 +716,7 @@ class EffectsPropertyPageBuilder:
             section,
             host._fx_size_spin,
             host._fx_count_spin,
-            host._fx_color_btn,
+            host._fx_color_slot,
             host._fx_particle_role_combo,
             host._fx_apply_check,
         )

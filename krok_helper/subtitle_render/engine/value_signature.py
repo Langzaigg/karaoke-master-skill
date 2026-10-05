@@ -103,6 +103,7 @@ _LYRIC_LAYOUT_EXCLUDED_STYLE_FIELDS = _LYRIC_LAYOUT_TITLE_ONLY_EXCLUDED_STYLE_FI
     "fx_particle_size_em",
     "fx_particle_count",
     "fx_particle_color",
+    "fx_particle_color2",
     "fx_particle_color_mode",
     "fx_particle_role_name",
     "fx_apply_to_entry_exit",

@@ -6406,17 +6406,22 @@ def test_property_panel_particle_color_mode_controls(qapp):
     assert [
         panel._fx_particle_mode_combo.itemText(index)
         for index in range(panel._fx_particle_mode_combo.count())
-    ] == ["单独颜色", "跟随字体·走字前", "跟随字体·走字后", "复用配色方案"]
-    # 默认单独颜色：显示颜色按钮、隐藏来源下拉；「仅唱字」默认勾选。
-    assert not panel._fx_color_btn.isHidden()
+    ] == [
+        "默认颜色", "单独颜色", "跟随字体·前后实色",
+        "跟随字体·走字前", "跟随字体·走字后", "复用配色方案",
+    ]
+    # 默认单独颜色：显示双色槽（两颗颜色按钮）、隐藏来源下拉；
+    # 「仅唱字」默认勾选。
+    assert not panel._fx_color_slot.isHidden()
+    assert not panel._fx_color_btn2.isHidden()
     assert panel._fx_particle_role_combo.isHidden()
     assert panel._fx_apply_check.isChecked()
-    # 跟随字体两档：颜色与来源都隐藏（粒子无亮度参数）。
+    # 跟随字体档：双色槽与来源都隐藏（粒子无亮度参数）。
     panel._fx_particle_mode_combo.setCurrentIndex(
         panel._fx_particle_mode_combo.findData("follow_before")
     )
     assert emitted[-1].fx_particle_color_mode == "follow_before"
-    assert panel._fx_color_btn.isHidden()
+    assert panel._fx_color_slot.isHidden()
     assert panel._fx_particle_role_combo.isHidden()
     # 复用配色方案：第三列换来源下拉；无引用时切入自动补第一个角色。
     panel.set_roles(["主唱", "和声"])
@@ -6425,7 +6430,7 @@ def test_property_panel_particle_color_mode_controls(qapp):
     )
     assert emitted[-1].fx_particle_color_mode == "role"
     assert emitted[-1].fx_particle_role_name == "主唱"
-    assert panel._fx_color_btn.isHidden()
+    assert panel._fx_color_slot.isHidden()
     assert not panel._fx_particle_role_combo.isHidden()
     assert [
         panel._fx_particle_role_combo.itemData(index)
@@ -6461,12 +6466,12 @@ def test_property_panel_particle_color_mode_controls(qapp):
     )
     assert panel._fx_particle_mode_combo.currentData() == "follow_after"
     assert not panel._fx_apply_check.isChecked()
-    assert panel._fx_color_btn.isHidden()
+    assert panel._fx_color_slot.isHidden()
     assert panel._fx_particle_role_combo.isHidden()
     # 未知模式回落单独颜色。
     panel.set_style(Style(fx_particle_color_mode="bogus"))
     assert panel._fx_particle_mode_combo.currentData() == "color"
-    assert not panel._fx_color_btn.isHidden()
+    assert not panel._fx_color_slot.isHidden()
 
 
 def test_property_panel_scanline_spins_show_canvas_values_over_fixed_base(qapp):

@@ -450,6 +450,7 @@ def normalize_entry_animation(value: object) -> EntryAnimation:
         "sparkle",
         "ripple",
         "note",
+        "petal",
     }:
         return value  # type: ignore[return-value]
     return "none"
@@ -473,6 +474,7 @@ def normalize_exit_animation(value: object) -> ExitAnimation:
         "sparkle",
         "ripple",
         "note",
+        "petal",
     }:
         return value  # type: ignore[return-value]
     return "none"
@@ -494,7 +496,9 @@ def normalize_scanline_mode(value: object) -> str:
 
 
 def normalize_particle_color_mode(value: object) -> str:
-    if value in {"color", "follow_before", "follow_after", "role"}:
+    if value in {
+        "color", "sakura", "follow_mix", "follow_before", "follow_after", "role",
+    }:
         return str(value)
     return "color"
 

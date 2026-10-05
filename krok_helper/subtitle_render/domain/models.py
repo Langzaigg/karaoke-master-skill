@@ -1189,8 +1189,8 @@ class Style:
     """退场装饰粒子：none / sparkle（星光闪烁）/ ripple（涟漪光环，向内收束）。"""
 
     sing_fx: SingFx = "none"
-    """唱字装饰粒子：none / twinkle（星光闪烁）/ note（音符飘出）。
-    每个字的唱字窗口内发射。"""
+    """唱字装饰粒子：none / twinkle（星光闪烁）/ note（音符飘出）/
+    petal（花瓣飘动）。每个字的唱字窗口内发射。"""
 
     fx_particle_size_em: float = 0.40
     """粒子尺寸（相对主字号比例，0.40 = 40% 字号）：星光/音符 sprite 的目标
@@ -1200,17 +1200,28 @@ class Style:
     """粒子数量：星光闪烁一次发射的 sprite 数；闪烁/音符按比例折算为每字数量。"""
 
     fx_particle_color: str = "#FFFFFF"
-    """粒子颜色（#RRGGBB）；仅 ``fx_particle_color_mode == "color"`` 时生效。"""
+    """粒子颜色一（#RRGGBB）；``fx_particle_color_mode == "color"`` 时与
+    ``fx_particle_color2`` 双色随机混发。"""
+
+    fx_particle_color2: str = "#FFFFFF"
+    """粒子颜色二（#RRGGBB，默认白色——白色即颜色本身，无「未设置」
+    态）：单独颜色档恒为双色随机混发（2026-10 用户口径：必须设置双色）。"""
 
     fx_particle_color_mode: str = "color"
-    """粒子颜色模式（仿扫字线）：``color`` 单独颜色（``fx_particle_color``）；
-    ``follow_before`` / ``follow_after`` 跟随字体——用**所在行**实际配色的
-    走字前 / 走字后「主文字」填充折算成实色（行级口径：行内逐字混合配色
-    不逐字取色，与唱字粒子的行级规划一致）；``role`` 复用配色方案——用
-    ``fx_particle_role_name`` 指定来源（``__global__`` 全局默认 / 角色或
-    「标题」方案）的「走字后-主文字」填充折算成实色。填充为渐变/拼色时
-    取各停止色平均，图片填充回退单独颜色。在 ``plan_line_bursts`` 内解析
-    成每 burst 实色下发，两条后端同色。"""
+    """粒子颜色模式（仿扫字线）：``color`` 单独颜色——颜色一/颜色二双色
+    随机混发（两色相同折叠为单色）；
+    ``sakura`` 默认颜色——两种樱花粉随机混发（规划器拆双 burst，每颗粒子
+    各取一色）；``follow_mix`` 跟随字体·前后实色——所在行实际配色的
+    走字前/后「主文字」**实色**双色随机混发（渐变/拼色取停止色平均）；
+    ``follow_before`` / ``follow_after`` 跟随字体——
+    用**所在行**实际配色的走字前 / 走字后「主文字」完整装饰规格（渐变/
+    描边原样下发，与音符「跟随字体」同源；行级口径：行内逐字混合配色
+    不逐字取色，与唱字粒子的行级规划一致）；
+    ``role`` 复用配色方案——用 ``fx_particle_role_name`` 指定来源
+    （``__global__`` 全局默认 / 角色或「标题」方案）的「走字后-主文字」
+    填充折算成实色（花瓣粒子改取该来源的走字前/后实色双色随机混发）。
+    图片填充取不到代表色，回退单独颜色。在
+    ``plan_line_bursts`` 内解析成每 burst 实色下发，两条后端同色。"""
 
     fx_particle_role_name: Optional[str] = None
     """粒子 ``role`` 颜色模式引用的来源名：语义同 ``scanline_role_name``
@@ -2199,7 +2210,7 @@ def style_from_dict(payload: object) -> Style:
                 value
                 if value in {
                     "none", "fade", "slide_in", "rise", "char_fade", "char_drip", "spin_flip", "utopia",
-                    "stretch_in", "glow_in", "assemble_in", "sparkle", "ripple", "note",
+                    "stretch_in", "glow_in", "assemble_in", "sparkle", "ripple", "note", "petal",
                 }
                 else defaults.entry_anim
             )
@@ -2208,7 +2219,7 @@ def style_from_dict(payload: object) -> Style:
                 value
                 if value in {
                     "none", "fade", "slide_out", "rise", "char_fade", "char_drip", "spin_flip", "utopia",
-                    "stretch_out", "glow_out", "dissolve_out", "sparkle", "ripple", "note",
+                    "stretch_out", "glow_out", "dissolve_out", "sparkle", "ripple", "note", "petal",
                 }
                 else defaults.exit_anim
             )
@@ -2235,6 +2246,18 @@ def style_from_dict(payload: object) -> Style:
                 )
                 else defaults.fx_particle_color
             )
+        elif key == "fx_particle_color2":
+            changes[key] = (
+                value
+                if isinstance(value, str)
+                and value.startswith("#")
+                and len(value) in {7, 9}
+                and all(
+                    character in "0123456789abcdefABCDEF"
+                    for character in value[1:]
+                )
+                else defaults.fx_particle_color2
+            )
         elif key == "fx_particle_size_em":
             try:
                 em_value = float(value)
@@ -2246,7 +2269,10 @@ def style_from_dict(payload: object) -> Style:
         elif key == "fx_particle_color_mode":
             changes[key] = (
                 value
-                if value in {"color", "follow_before", "follow_after", "role"}
+                if value in {
+                    "color", "sakura", "follow_mix", "follow_before", "follow_after",
+                    "role",
+                }
                 else defaults.fx_particle_color_mode
             )
         elif key == "fx_particle_role_name":
@@ -2288,7 +2314,7 @@ def style_from_dict(payload: object) -> Style:
                 value
                 if value in {
                     "none", "fade", "slide_in", "rise", "char_fade", "char_drip", "spin_flip", "utopia",
-                    "stretch_in", "glow_in", "assemble_in", "sparkle", "ripple", "note",
+                    "stretch_in", "glow_in", "assemble_in", "sparkle", "ripple", "note", "petal",
                 }
                 else defaults.section_head_anim
             )
@@ -2297,7 +2323,7 @@ def style_from_dict(payload: object) -> Style:
                 value
                 if value in {
                     "none", "fade", "slide_out", "rise", "char_fade", "char_drip", "spin_flip", "utopia",
-                    "stretch_out", "glow_out", "dissolve_out", "sparkle", "ripple", "note",
+                    "stretch_out", "glow_out", "dissolve_out", "sparkle", "ripple", "note", "petal",
                 }
                 else defaults.section_tail_anim
             )

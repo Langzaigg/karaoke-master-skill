@@ -158,6 +158,7 @@ _ENTRY_EFFECTS = (
     ("sparkle", "星光闪烁"),
     ("ripple", "涟漪光环"),
     ("note", "音符飘出"),
+    ("petal", "花瓣飘入"),
 )
 _EXIT_EFFECTS = (
     ("none", "无"),
@@ -176,6 +177,7 @@ _EXIT_EFFECTS = (
     ("sparkle", "星光闪烁"),
     ("ripple", "涟漪光环"),
     ("note", "音符飘出"),
+    ("petal", "花瓣飘散"),
 )
 #: 唱字特效比入退场多一档「跟随全局」——覆盖这一行的入退场时，唱字往往仍想跟着
 #: 主字幕走，不该被迫二选一。
@@ -198,6 +200,7 @@ _SING_FX_EFFECTS = (
     ("twinkle_classic", "星光闪烁（旧版）"),
     ("note", "音符飘出"),
     ("ripple", "涟漪光环"),
+    ("petal", "花瓣飘动"),
 )
 _ENTRY_LABELS = dict(_ENTRY_EFFECTS)
 _EXIT_LABELS = dict(_EXIT_EFFECTS)
@@ -225,6 +228,7 @@ _PRESET_COMBO_ITEMS = (
     ("sing_twinkle", "唱字·星光闪烁"),
     ("sing_note", "唱字·音符飘出"),
     ("sing_ripple", "唱字·涟漪光环"),
+    ("sing_petal", "唱字·花瓣飘动"),
 )
 _PRESET_ENTRY_EXIT = {
     "none": ("none", "none"),
@@ -246,6 +250,7 @@ _PRESET_SING_FX = {
     "sing_twinkle": "twinkle",
     "sing_note": "note",
     "sing_ripple": "ripple",
+    "sing_petal": "petal",
 }
 
 
