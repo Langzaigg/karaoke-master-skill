@@ -10,6 +10,7 @@
 #define QT_NO_KEYWORDS
 #include "../../protocol/json_protocol.h"
 #undef QT_NO_KEYWORDS
+#include "../../diagnostics/long_call_watchdog.h"
 #include "../text_semantics.h"
 
 #include <d2d1_2.h>
@@ -3151,7 +3152,14 @@ void Direct2DGpuBackend::configure(const RenderScene &scene) {
                 HRESULT result = E_FAIL;
                 const bool stroked = task.strokeWidth > 0.0f;
                 const auto createStart = Clock::now();
+                // 描边 realization 创建是单体不可中断调用（密集路径 ×
+                // 宽描边实测最坏 49s）：预热线程被它阻塞期间逐任务心跳
+                // 发不出。主线程此时通常空闲（空闲层心跳在喂），但用户
+                // 若恰好再触发 configure，等待期就只剩这里——按预算登记
+                // 代喂兜底（双保险）。
                 if (stroked) {
+                    krok::subtitle::native::diagnostics::LongCallScope
+                        realizeCall("d2d-realize", 240.0);
                     result = workerContext->CreateStrokedGeometryRealization(
                         task.geometry.Get(),
                         flatteningTolerance,

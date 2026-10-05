@@ -11,6 +11,7 @@
 #include <thread>
 
 #include "commands/command_router.h"
+#include "diagnostics/long_call_watchdog.h"
 #include "protocol/json_protocol.h"
 
 namespace {
@@ -80,6 +81,10 @@ int main(int argc, char **argv) {
     );
     idleHeartbeat.start(1000);
 
+    // 预算制代喂线程：主线程被单体 D2D 长调用（Widen/realization 创建）
+    // 阻塞时，空闲定时器与逐段心跳都发不出——由本线程按登记的预算代喂。
+    krok::subtitle::native::diagnostics::startLongCallFeeder();
+
     std::atomic<bool> inputOpen{true};
     std::thread reader([&router, &commandContext, &inputOpen]() {
         std::string line;
@@ -105,6 +110,8 @@ int main(int argc, char **argv) {
 
     const int exitCode = app.exec();
     reader.join();
+    // 代喂线程随事件循环一起停（见 diagnostics::LongCallScope）。
+    krok::subtitle::native::diagnostics::stopLongCallFeeder();
     router.shutdown();
     return exitCode;
 }

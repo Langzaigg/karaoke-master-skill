@@ -1,5 +1,7 @@
 #include "d2d_geometry_resources.h"
 
+#include "../../diagnostics/long_call_watchdog.h"
+
 #include <d2d1helper.h>
 
 #include <algorithm>
@@ -341,6 +343,12 @@ Microsoft::WRL::ComPtr<ID2D1Geometry> outsideStrokeGeometry(
     if (body == nullptr || width <= 0.0f) {
         return {};
     }
+    // Widen+Combine 是单体不可中断调用，密集路径上单次可达数十秒且常跑
+    // 在主线程 configure 里（此时逐段/空闲两层心跳都被它阻塞）——登记
+    // 预算由喂狗线程代喂（见 diagnostics::LongCallScope）。
+    krok::subtitle::native::diagnostics::LongCallScope longCall(
+        "d2d-protected", 240.0
+    );
     D2D1_STROKE_STYLE_PROPERTIES properties = D2D1::StrokeStyleProperties();
     properties.startCap = D2D1_CAP_STYLE_ROUND;
     properties.endCap = D2D1_CAP_STYLE_ROUND;
@@ -408,6 +416,10 @@ Microsoft::WRL::ComPtr<ID2D1Geometry> widenedStrokeGeometry(
     if (body == nullptr || width <= 0.0f) {
         return {};
     }
+    // 同 outsideStrokeGeometry：单体 Widen 调用按预算登记代喂。
+    krok::subtitle::native::diagnostics::LongCallScope longCall(
+        "d2d-widen", 240.0
+    );
     D2D1_STROKE_STYLE_PROPERTIES properties = D2D1::StrokeStyleProperties();
     properties.startCap = D2D1_CAP_STYLE_ROUND;
     properties.endCap = D2D1_CAP_STYLE_ROUND;
