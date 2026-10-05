@@ -26,6 +26,7 @@ from krok_helper.subtitle_render.n3.project_import import (
     load_n3proj,
 )
 from krok_helper.subtitle_render.sources.subtitles import load_nicokara_lrc
+from krok_helper.subtitle_render.sources.sug import load_sug_timing_track
 
 
 def _size(px: int, reference: int = 1080) -> dict:
@@ -1060,13 +1061,162 @@ def test_import_mixed_line_actions_as_per_line_overrides(tmp_path):
     assert not any("多数行" in warning for warning in result.warnings)
 
 
-def test_mismatched_lyrics_skip_line_payload(tmp_path):
+def test_line_count_mismatch_rebuilds_sug_from_n3(tmp_path):
+    """行数不一致以 N3 数据为准：落盘新 .sug、工程改指它，原 LRC 不动。"""
     payload = _project_payload(tmp_path)
-    # 少一行歌词记录 → 行数不一致，整体跳过行级导入
+    original_lrc = tmp_path / "demo.lrc"
+    original_text = original_lrc.read_text(encoding="utf-8")
+    # 少一行歌词记录 → 行数不一致（歌词 2 行 / N3 记录 1 行）
     payload["SourceLyricsInfos"][0]["LineInfos"].pop()
     result = load_n3proj(_write_n3proj(tmp_path, payload))
+
+    sug = tmp_path / "demo_从N3重建.sug"
+    assert sug.is_file()
+    assert result.project_data["subtitle_path"] == str(sug)
+    # 原歌词文件保持原样
+    assert original_lrc.read_text(encoding="utf-8") == original_text
+    assert any("行数" in warning and "重建" in warning for warning in result.warnings)
+
+    # 行级数据按 N3 记录完整带回（第一行 あ/い，含布局与逐字配色）
+    data = result.project_data
+    assert data["line_layout_indices"][0] == 1
+    assert data["char_role_labels"][0] == ["標準配色", "青配色"]
+    assert "line_breaks_before" in data
+
+
+def test_missing_subtitle_file_rebuilds_sug(tmp_path):
+    """字幕文件丢失：用 N3 内嵌逐字数据在 n3proj 同目录重建 .sug。"""
+    payload = _project_payload(tmp_path)
+    (tmp_path / "demo.lrc").unlink()
+    result = load_n3proj(_write_n3proj(tmp_path, payload))
+
+    sug = tmp_path / "demo_从N3重建.sug"
+    assert sug.is_file()
+    assert result.project_data["subtitle_path"] == str(sug)
+    assert any("不存在" in warning and "重建" in warning for warning in result.warnings)
+
+    data = result.project_data
+    # Kind2 分页仍落在第二歌词行前（中间空行来自空 Sentence 占位）
+    assert data["line_breaks_before"] == ["none", "none", "page"]
+    assert data["line_layout_indices"] == [1, 0, 0]
+    assert data["char_role_labels"][0] == ["標準配色", "青配色"]
+
+    # 重建的 .sug 能按 SUG 路径读回：文本、逐字起点、行末时刻与 N3 一致
+    track = load_sug_timing_track(sug)
+    assert [line.is_blank for line in track.lines] == [False, True, False]
+    first, _blank, second = track.lines
+    assert [char.text for char in first.chars] == ["あ", "い"]
+    assert [char.start_ms for char in first.chars] == [1000, 2000]
+    assert first.end_ms == 3000
+    assert [char.text for char in second.chars] == ["う", "え"]
+    assert [char.start_ms for char in second.chars] == [5000, 6000]
+    assert second.end_ms == 7000
+
+
+def test_missing_subtitle_file_without_lyric_data_keeps_skip(tmp_path):
+    """N3 行数据里没有歌词行时无法重建，保持跳过行级导入的原行为。"""
+    payload = _project_payload(tmp_path)
+    (tmp_path / "demo.lrc").unlink()
+    payload["SourceLyricsInfos"][0]["LineInfos"] = [
+        {"Kind": 2, "LyricsCharInfos": [], "LayoutIndex": -1, "Raw": ""}
+    ]
+    result = load_n3proj(_write_n3proj(tmp_path, payload))
+
+    assert not (tmp_path / "demo_从N3重建.sug").exists()
     assert "line_layout_indices" not in result.project_data
-    assert any("行数" in warning for warning in result.warnings)
+    assert any("已跳过每行布局" in warning for warning in result.warnings)
+
+
+def test_rebuild_failure_falls_back_to_text_alignment(tmp_path, monkeypatch):
+    """重建失败（写盘异常）时退回按文本对齐：未改动的行仍带上行级数据。"""
+    payload = _project_payload(tmp_path)
+    # 歌词文件行数与 N3 记录错开：删掉 N3 的第一行记录，LRC 保留两行
+    payload["SourceLyricsInfos"][0]["LineInfos"].pop(0)
+
+    from krok_helper.subtitle_render.n3 import project_import
+
+    def _boom(*_args, **_kwargs):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(project_import.SugProjectParser, "save", _boom)
+    result = load_n3proj(_write_n3proj(tmp_path, payload))
+
+    assert "line_layout_indices" in result.project_data
+    data = result.project_data
+    # LRC 里 う/え 一行仍与 N3 记录对齐，布局随行带回；被删记录的行保持默认
+    assert data["line_layout_indices"][2] == 0
+    assert data["char_role_labels"][2] == ["標準配色", "標準配色"]
+    assert any("对齐" in warning for warning in result.warnings)
+
+
+def test_rebuilt_sug_keeps_inline_pause_release(tmp_path):
+    """行内 EndTime 早于下一字起点 → 演唱停顿（pause release）保留。"""
+    payload = _project_payload(tmp_path)
+    (tmp_path / "demo.lrc").unlink()
+    payload["SourceLyricsInfos"][0]["LineInfos"] = [
+        _line_info([
+            _char("あ", 1000, 1500),
+            _char("い", 3000, 4000),
+        ]),
+    ]
+    result = load_n3proj(_write_n3proj(tmp_path, payload))
+
+    track = load_sug_timing_track(tmp_path / "demo_从N3重建.sug")
+    assert [char.pause_release_ms for char in track.lines[0].chars] == [1500, 4000]
+    assert not any("ルビ" in warning for warning in result.warnings)
+
+
+def test_rebuilt_sug_skips_ruby_with_warning(tmp_path):
+    """N3 内嵌 ruby 无法无损关联基底字：跳过并在 warning 里明示。"""
+    payload = _project_payload(tmp_path)
+    (tmp_path / "demo.lrc").unlink()
+    payload["SourceLyricsInfos"][0]["LineInfos"] = [
+        _line_info([
+            _char("漢", 1000, 2000),
+            {"Kind": 0, "Char": "かん", "BeginTime": 1000, "EndTime": 2000,
+             "FontIndex": 0, "IsRuby": True},
+            _char("字", 2000, 3000),
+        ]),
+    ]
+    result = load_n3proj(_write_n3proj(tmp_path, payload))
+
+    track = load_sug_timing_track(tmp_path / "demo_从N3重建.sug")
+    assert [char.text for char in track.lines[0].chars] == ["漢", "字"]
+    assert any("ルビ" in warning for warning in result.warnings)
+    # ruby 字不进入逐字配色对位
+    assert result.project_data["char_role_labels"][0] == ["標準配色", "標準配色"]
+
+
+def test_extra_source_missing_file_rebuilds_sug(tmp_path):
+    """副字幕源（コーラス）文件丢失同样按 N3 数据重建并改指新 .sug。"""
+    payload = _project_payload(tmp_path)
+    chorus = tmp_path / "chorus.lrc"
+    chorus.write_text(
+        "[00:11:00]か[00:12:00]ら\n", encoding="utf-8"
+    )
+    # N3 记录的副源行数比实际 LRC 多一行 → 行数不一致也触发重建
+    payload["SourceLyricsInfos"].append(
+        {
+            "SourceLyricsPath": str(chorus),
+            "SourceLyricsRelativePath": "chorus.lrc",
+            "SettingsName": "コーラス",
+            "LineInfos": [
+                _line_info([_char("か", 11000, 12000)], layout_index=0),
+                _line_info([_char("ら", 12000, 13000)], layout_index=0),
+            ],
+        }
+    )
+    chorus.unlink()
+    result = load_n3proj(_write_n3proj(tmp_path, payload))
+
+    extra_sources = result.project_data["extra_subtitle_sources"]
+    assert len(extra_sources) == 1
+    sug = tmp_path / "chorus_从N3重建.sug"
+    assert sug.is_file()
+    assert extra_sources[0]["path"] == str(sug)
+    track = load_sug_timing_track(sug)
+    assert [char.text for char in track.lines[0].chars] == ["か"]
+    assert [char.text for char in track.lines[1].chars] == ["ら"]
 
 
 def test_unsupported_dest_format_warns(tmp_path):

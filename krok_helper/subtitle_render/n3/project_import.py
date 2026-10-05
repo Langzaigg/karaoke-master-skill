@@ -28,6 +28,13 @@
 
 不支持的设置（未压缩 AVI 输出、未知字幕动作等）不阻塞导入，
 收集为中文 warning 由 UI 一次性展示。
+
+字幕源自适应（2026-10）：字幕文件丢失、解析失败或行数与 N3 记录不一致时，
+以 n3proj 内嵌的 ``LineInfos``（逐字文本 + 逐字时间）为准，物化成
+``<原文件名>_从N3重建.sug`` 落在 n3proj 同目录并让工程字幕源改指它——
+后续保存/重载走 SUG 高保真路径，不再经历 LRC 有损往返（ruby 除外，见
+:func:`_sug_project_from_n3`）。原字幕文件一律不改动。重建不可行时退回
+按行文本 LCS 对齐的兜底路径（能对上的行照常导入行级数据）。
 """
 
 from __future__ import annotations
@@ -65,10 +72,15 @@ from krok_helper.subtitle_render.engine.export.render_job import (
     OUTPUT_FORMAT_PNG_TRANSPARENT,
 )
 from krok_helper.subtitle_render.sources.subtitles import load_nicokara_lrc
+from krok_helper.subtitle_render.sources.sug import timing_track_from_sug_project
 from krok_helper.subtitle_render.serialization.timing import (
     guide_symbol_to_dict,
     line_animation_override_to_dict,
 )
+from strange_uta_game.backend.domain.entities import Sentence, Singer
+from strange_uta_game.backend.domain.models import Character
+from strange_uta_game.backend.domain.project import Project
+from strange_uta_game.backend.infrastructure.persistence.sug_io import SugProjectParser
 
 N3_PROJECT_FILE_SUFFIX = ".n3proj"
 N3_PROJECT_FILTER = "NicoKaraMaker3 项目 (*.n3proj);;所有文件 (*.*)"
@@ -194,10 +206,20 @@ def load_n3proj(path: str | Path) -> N3ImportResult:
         or str(info.get("SourceLyricsRelativePath") or "").strip()
     ]
     subtitle_path: Optional[Path] = None
+    subtitle_track: Optional[TimingTrack] = None
     if lyrics_with_source:
         subtitle_path = _resolve_media(
             lyrics_with_source[0].get("SourceLyricsPath"),
             lyrics_with_source[0].get("SourceLyricsRelativePath"),
+            base_dir,
+            warnings,
+            "字幕源",
+        )
+        subtitle_track = _load_track(subtitle_path, warnings)
+        subtitle_path, subtitle_track = _ensure_usable_subtitle_source(
+            lyrics_with_source[0],
+            subtitle_path,
+            subtitle_track,
             base_dir,
             warnings,
             "字幕源",
@@ -314,7 +336,9 @@ def load_n3proj(path: str | Path) -> N3ImportResult:
         line_infos = [_dict(item) for item in _list(lyrics_with_source[0].get("LineInfos"))]
         animation_changes, default_animation = _animation_changes(line_infos, warnings)
         changes.update(animation_changes)
-        track = _load_track(subtitle_path, warnings)
+        track = subtitle_track
+        if track is None:
+            warnings.append("已跳过每行布局、分页与逐字配色导入")
         if track is not None:
             emoji_specs = _parse_emoji_tags(
                 _emoji_tag_lines(lyrics_with_source[0], track),
@@ -352,8 +376,16 @@ def load_n3proj(path: str | Path) -> N3ImportResult:
             )
             if extra_path is None:
                 continue
-            extra_payload: dict[str, Any] = {"name": name, "path": str(extra_path)}
             extra_track = _load_track(extra_path, warnings)
+            extra_path, extra_track = _ensure_usable_subtitle_source(
+                info,
+                extra_path,
+                extra_track,
+                base_dir,
+                warnings,
+                f"字幕源「{name}」",
+            )
+            extra_payload: dict[str, Any] = {"name": name, "path": str(extra_path)}
             if extra_track is not None:
                 extra_line_infos = [_dict(item) for item in _list(info.get("LineInfos"))]
                 extra_emoji_specs = _parse_emoji_tags(
@@ -839,9 +871,189 @@ def _load_track(subtitle_path: Optional[Path], warnings: list[str]) -> Optional[
         return None
     try:
         return load_nicokara_lrc(subtitle_path)
-    except Exception:  # noqa: BLE001 — 主窗口加载时会再次报错，这里只跳过行级导入
-        warnings.append("字幕源解析失败，已跳过每行布局与逐字配色导入")
+    except Exception:  # noqa: BLE001 — 主窗口加载时会再次报错，这里先记录再交给重建决策
+        warnings.append("字幕源文件解析失败")
         return None
+
+
+# 重建字幕源的固定后缀：N3 内嵌数据物化出的 .sug 一律带此标记，重复导入
+# 重新生成同名文件（内容由 n3proj 决定，可重放），不触碰任何其他文件。
+_N3_REBUILT_SUFFIX = "_从N3重建"
+
+
+def _n3_lyric_line_count(info: dict) -> int:
+    """N3 ``LineInfos`` 里 Kind==1 且有可见字符的行数（对应轨道非空行数）。"""
+    count = 0
+    for line in _list(info.get("LineInfos")):
+        line = _dict(line)
+        if _int(line.get("Kind"), -1) != 1:
+            continue
+        if any(str(char.get("Char") or "") for char in _stripped_n3_chars(line)):
+            count += 1
+    return count
+
+
+def _sug_project_from_n3(info: dict) -> tuple[Optional[Project], bool, list[str]]:
+    """把 N3 字幕源的 ``LineInfos`` 物化为 SUG :class:`Project`。
+
+    每个非 ruby、非 ``【…】`` 标签的 N3 字符直落一个 SUG Character：
+    ``BeginTime`` → 唯一时间戳（缺失时沿用前一字符起点，保证逐字 1:1，
+    不触发 SUG 加载端的行尾丢弃/匀分规则）；末字符 ``EndTime`` →
+    ``sentence_end_ts``（行末结束时刻）；行内 ``EndTime`` 严格早于下一
+    字符起点时视为演唱停顿。Kind 0/2（空行/分页）落成空 Sentence 保留
+    源文件的空行结构；Kind 3（段落分隔是 N3 运行时插入的）不落盘，分页
+    语义由 ``line_breaks_before`` payload 承载。
+
+    N3 ruby 是内嵌在字符流里的注音字，n3proj 里没有可靠的「注音↔基底字」
+    关联字段，无法无损转成 SUG Ruby——跳过并在调用方提示，避免错挂。
+    """
+    default_singer = Singer(
+        name="未命名",
+        color="#FF6B6B",
+        is_default=True,
+        is_placeholder=True,
+        backend_number=1,
+    )
+    sentences: list[Sentence] = []
+    has_ruby = False
+    has_lyrics = False
+    for line in _list(info.get("LineInfos")):
+        line = _dict(line)
+        kind = _int(line.get("Kind"), -1)
+        if kind in (0, 2):
+            sentences.append(Sentence(singer_id=default_singer.id))
+            continue
+        if kind != 1:
+            continue
+        has_ruby = has_ruby or any(
+            _dict(char).get("IsRuby") for char in _list(line.get("LyricsCharInfos"))
+        )
+        entries = [
+            (
+                str(char.get("Char") or ""),
+                _int(char.get("BeginTime"), -1),
+                _int(char.get("EndTime"), -1),
+            )
+            for char in _stripped_n3_chars(line)
+        ]
+        entries = [entry for entry in entries if entry[0]]
+        if not entries:
+            continue
+        has_lyrics = True
+        begins: list[int] = []
+        for _text, begin, _end in entries:
+            begins.append(begin if begin >= 0 else (begins[-1] if begins else 0))
+        sug_chars: list[Character] = []
+        for index, (text, _begin, end) in enumerate(entries):
+            last = index == len(entries) - 1
+            release: Optional[int] = None
+            if end >= begins[index]:
+                if last:
+                    release = end
+                elif begins[index + 1] > end:
+                    release = end
+            sug_chars.append(
+                Character(
+                    char=text,
+                    check_count=1,
+                    timestamps=[begins[index]],
+                    sentence_end_ts=release,
+                    is_line_end=last,
+                    is_sentence_end=release is not None,
+                    singer_id=default_singer.id,
+                )
+            )
+        sentences.append(
+            Sentence(singer_id=default_singer.id, characters=sug_chars)
+        )
+    tag_lines = [
+        text
+        for text in (str(item).strip() for item in _list(info.get("AtTagsForSave")))
+        if text
+    ]
+    if not has_lyrics:
+        return None, has_ruby, tag_lines
+    return (
+        Project(singers=[default_singer], sentences=sentences),
+        has_ruby,
+        tag_lines,
+    )
+
+
+def _rebuild_sug_source(
+    info: dict,
+    base_dir: Path,
+    warnings: list[str],
+    label: str,
+) -> Optional[tuple[Path, TimingTrack]]:
+    """按 N3 内嵌数据在 n3proj 同目录落盘新 ``.sug``，并返回其解析轨道。"""
+    project, has_ruby, tag_lines = _sug_project_from_n3(info)
+    if project is None:
+        return None
+    relative_text = str(info.get("SourceLyricsRelativePath") or "").strip()
+    absolute_text = str(info.get("SourceLyricsPath") or "").strip()
+    source_name = Path(relative_text or absolute_text or "歌词")
+    target_dir = base_dir / source_name.parent if relative_text else base_dir
+    target = target_dir / f"{source_name.stem}{_N3_REBUILT_SUFFIX}.sug"
+    tags = {"custom": tag_lines} if tag_lines else None
+    try:
+        SugProjectParser.save(project, str(target), nicokara_tags=tags)
+    except Exception as exc:  # noqa: BLE001 — 重建失败退回原行为
+        warnings.append(f"{label}无法按 N3 数据重建 .sug 字幕源（{exc}）")
+        return None
+    track = timing_track_from_sug_project(
+        project, nicokara_tags=tags, base_dir=target_dir
+    )
+    if has_ruby:
+        warnings.append(
+            f"从 N3 重建的{label}不含注音（ルビ）数据，如需注音请恢复原字幕文件"
+        )
+    return target, track
+
+
+def _ensure_usable_subtitle_source(
+    info: dict,
+    path: Optional[Path],
+    track: Optional[TimingTrack],
+    base_dir: Path,
+    warnings: list[str],
+    label: str,
+) -> tuple[Optional[Path], Optional[TimingTrack]]:
+    """字幕文件缺失或行数与 N3 记录不一致时，以 N3 数据为准重建 ``.sug``。
+
+    N3 的 ``LineInfos`` 本身就是完整歌词快照（逐字文本 + 逐字时间），文件
+    丢失或被改动到行数对不上时，原行为是把布局/分页/逐字配色等行级信息
+    整体丢掉。这里改为以 N3 数据为准：物化成 ``<原文件名>_从N3重建.sug``
+    落在 n3proj 同目录，工程字幕源改指它——后续保存/重载都走 SUG 高保真
+    路径，不再经历 LRC 有损往返。原字幕文件一律不改动。无法重建（N3 无
+    行数据/写盘失败）时返回原状，行级导入退回按文本对齐的兜底路径。
+    """
+    n3_count = _n3_lyric_line_count(info)
+    if n3_count <= 0:
+        return path, track
+    if track is not None and (
+        sum(1 for line in track.lines if not line.is_blank) == n3_count
+    ):
+        return path, track
+    rebuilt = _rebuild_sug_source(info, base_dir, warnings, label)
+    if rebuilt is None:
+        return path, track
+    sug_path, sug_track = rebuilt
+    if track is None:
+        if path is not None and path.is_file():
+            warnings.append(f"{label}解析失败，已改用按 N3 数据重建的字幕源：{sug_path}")
+        else:
+            warnings.append(
+                f"{label}文件不存在，已按 N3 内嵌歌词数据重建：{sug_path}"
+            )
+    else:
+        our_count = sum(1 for line in track.lines if not line.is_blank)
+        warnings.append(
+            f"歌词行数与 N3 项目记录不一致（歌词 {our_count} 行 / N3 记录 "
+            f"{n3_count} 行），已按 N3 数据重建字幕源：{sug_path}"
+            "（原歌词文件未改动）"
+        )
+    return sug_path, sug_track
 
 
 def _stripped_n3_chars(line: dict) -> list[dict]:
@@ -1012,6 +1224,58 @@ def _animation_changes(
     return _signature_changes(default), default
 
 
+def _n3_line_key_text(line: dict) -> str:
+    """N3 行的对齐键：去 ruby、去 ``【…】`` 标签段后的可见正文。"""
+    return "".join(
+        str(char.get("Char") or "") for char in _stripped_n3_chars(line)
+    )
+
+
+def _our_line_key_text(line: TimingLine) -> str:
+    """解析行的对齐键：去行内 emoji 头像插入的合成标签字符。"""
+    return "".join(
+        char.text
+        for char in line.chars
+        if not _is_synthetic_emoji_tag_char(char.text)
+    )
+
+
+def _align_line_pairs(
+    our_texts: list[str], n3_texts: list[str]
+) -> list[tuple[int, int]]:
+    """按行文本做 LCS 对齐，返回 ``(our 序, n3 序)`` 匹配对（保持相对顺序）。
+
+    歌词文件在 N3 保存后被增删行时行号即错位，整段全等或整体放弃都会丢数据；
+    按文本对齐后，未改动的行（含副歌重复行，按出现顺序配对）仍能带上
+    N3 里的布局 / 分页 / 逐字配色。行数规模为数百，O(n·m) DP 足够快。
+    """
+    our_count, n3_count = len(our_texts), len(n3_texts)
+    if not our_count or not n3_count:
+        return []
+    dp = [[0] * (n3_count + 1) for _ in range(our_count + 1)]
+    for i in range(our_count - 1, -1, -1):
+        row = dp[i]
+        below = dp[i + 1]
+        our_text = our_texts[i]
+        for j in range(n3_count - 1, -1, -1):
+            if our_text == n3_texts[j]:
+                row[j] = below[j + 1] + 1
+            else:
+                row[j] = max(below[j], row[j + 1])
+    pairs: list[tuple[int, int]] = []
+    i = j = 0
+    while i < our_count and j < n3_count:
+        if our_texts[i] == n3_texts[j]:
+            pairs.append((i, j))
+            i += 1
+            j += 1
+        elif dp[i + 1][j] >= dp[i][j + 1]:
+            i += 1
+        else:
+            j += 1
+    return pairs
+
+
 def _per_line_payloads(
     line_infos: list[dict],
     track: TimingTrack,
@@ -1030,11 +1294,12 @@ def _per_line_payloads(
     Optional[list[Optional[dict[str, object]]]],
     Optional[list[Optional[dict[str, object]]]],
 ]:
-    """对齐 N3 歌词行与本模块解析行，导出布局、分页与逐字配色。
+    """对齐 N3 歌词行与本模块解析行，导出布局，分页与逐字配色。
 
     N3 ``LineInfos`` 里 Kind==1（Lyrics）的行与 LRC 非空行一一对应（空行/分页
     在 N3 里是 Empty/PageBreak，段落分隔 ParagraphBreak 是运行时插入的）。
-    逐行校验字符文本，一致才导入该行数据，避免歌词文件被改动后错位。
+    歌词文件在 N3 保存后被改动（行数增减 / 个别行改词）时按行文本 LCS 对齐：
+    对齐上的行照常导入，对不上的行保持默认值并提示，不再整段放弃。
     """
     n3_lines: list[dict] = []
     n3_breaks_before: list[str] = []
@@ -1050,12 +1315,21 @@ def _per_line_payloads(
     our_indexed = [(index, line) for index, line in enumerate(track.lines) if not line.is_blank]
     if not n3_lines:
         return None, None, None, None, None, None, None
-    if len(n3_lines) != len(our_indexed):
-        warnings.append(
-            "歌词行数与 N3 项目记录不一致（歌词文件可能已改动），"
-            "已跳过每行布局、分页与逐字配色导入"
+    pairs = _align_line_pairs(
+        [_our_line_key_text(line) for _, line in our_indexed],
+        [_n3_line_key_text(line) for line in n3_lines],
+    )
+    if len(pairs) < len(our_indexed) or len(pairs) < len(n3_lines):
+        counts = (
+            f"歌词 {len(our_indexed)} 行、N3 记录 {len(n3_lines)} 行"
+            if len(our_indexed) != len(n3_lines)
+            else f"共 {len(our_indexed)} 行"
         )
-        return None, None, None, None, None, None, None
+        warnings.append(
+            f"歌词与 N3 项目记录不一致（{counts}，歌词文件可能已改动）："
+            f"已按文本对齐 {len(pairs)} 行并导入其布局与逐字配色，"
+            "未对齐的行保持默认值"
+        )
 
     raw_layout_indices = [
         index if 0 <= index <= layout_limit else 0
@@ -1093,11 +1367,11 @@ def _per_line_payloads(
     guide_payload: list[Optional[dict[str, object]]] = [None] * len(track.lines)
     inline_guide_payload: list[Optional[dict[str, object]]] = [None] * len(track.lines)
     emoji_specs = emoji_specs or []
-    mismatched = 0
-    for (line_index, our_line), n3_line, break_before, page_layout_index in zip(
-        our_indexed, n3_lines, n3_breaks_before, page_layout_indices
-    ):
-        break_payload[line_index] = break_before
+    for our_position, n3_position in pairs:
+        line_index, our_line = our_indexed[our_position]
+        n3_line = n3_lines[n3_position]
+        break_payload[line_index] = n3_breaks_before[n3_position]
+        page_layout_index = page_layout_indices[n3_position]
         n3_chars = _stripped_n3_chars(n3_line)
         n3_text = "".join(str(char.get("Char") or "") for char in n3_chars)
         # 行内 emoji 头像插入的合成标签字符不属于 N3 可见正文，比对与逐字行走都要跳过。
@@ -1107,7 +1381,8 @@ def _per_line_payloads(
             if not _is_synthetic_emoji_tag_char(char.text)
         )
         if n3_text != our_text:
-            mismatched += 1
+            # LCS 匹配键与这里的比对口径一致，理论上不会触发；留作防线，
+            # 宁可单行退回默认值也不让逐字配色错位。
             continue
         layout_payload[line_index] = page_layout_index
         show_begin = n3_line.get("ShowBeginTime")
@@ -1160,8 +1435,6 @@ def _per_line_payloads(
             guide_payload[line_index] = guide_row
         if inline_row is not None:
             inline_guide_payload[line_index] = inline_row
-    if mismatched:
-        warnings.append(f"{mismatched} 行歌词文本与 N3 项目记录不一致，这些行的布局与逐字配色未导入")
     return (
         layout_payload,
         break_payload,

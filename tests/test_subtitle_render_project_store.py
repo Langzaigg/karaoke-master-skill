@@ -1741,6 +1741,44 @@ def test_dropped_n3proj_imports_complete_project_like_file_menu(
     assert win._project_dirty is True
 
 
+def test_n3_import_with_missing_lyrics_rebuilds_sug_end_to_end(
+    qapp, monkeypatch, tmp_path
+):
+    """字幕文件丢失时 N3 导入重建 .sug；GUI 应用后轨道与行级数据完整落地。"""
+    from krok_helper.subtitle_render.n3.project_import import load_n3proj
+    from tests.test_subtitle_render_n3proj_import import (
+        _project_payload,
+        _write_n3proj,
+    )
+
+    win = _make_window(qapp, monkeypatch)
+    payload = _project_payload(tmp_path)
+    payload["SourceInfo"]["SourceKind"] = 3
+    payload["SourceInfo"]["BackgroundColor"] = {"Web16": "000000"}
+    (tmp_path / "demo.lrc").unlink()
+
+    result = load_n3proj(_write_n3proj(tmp_path, payload))
+    sug = tmp_path / "demo_从N3重建.sug"
+    assert sug.is_file()
+    assert result.project_data["subtitle_path"] == str(sug)
+
+    win._apply_project_data(result.project_data)
+
+    assert win._subtitle_path == sug
+    track = win._timing_track
+    assert track is not None
+    assert [line.is_blank for line in track.lines] == [False, True, False]
+    # 行级数据按 N3 记录恢复：分页 / 布局 / 逐字配色 / 逐字起点
+    assert track.lines[2].break_before == "page"
+    assert track.lines[0].layout_index == 1
+    assert [char.role_label for char in track.lines[0].chars] == [
+        "標準配色",
+        "青配色",
+    ]
+    assert [char.start_ms for char in track.lines[0].chars] == [1000, 2000]
+    assert track.lines[0].end_ms == 3000
+
+
 def test_dropped_yurika_respects_unsaved_changes_confirmation(
     qapp, monkeypatch, tmp_path
 ):
