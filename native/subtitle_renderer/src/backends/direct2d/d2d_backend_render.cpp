@@ -598,6 +598,15 @@ ProbeResult Direct2DGpuBackend::renderFrameInternal(
         sharedInstanceTransformActive = true;
         impl_->realizationContext->DrawGeometryRealization(realization, brush);
     };
+    // 全有或全无（2026-10）：realization 的使用只看「本 backend 的预热已
+    // 整体完成」。预热线程逐任务异步发布，若渲染侧「存在即用」，同一字符
+    // 层会在 DrawGeometry 原路径与 realization 网格两条栅格化路径间逐字符、
+    // 逐帧切换（预热窗口内基元差 ±4 alpha）——多 worker 预览各持一份预热
+    // 进度，相邻帧键出自不同 worker 时显形为描边/主文字层来回跳动。
+    // 完成前一律原路径直描，完成后一律网格；每个 backend 至多一次整体
+    // 切换，帧内与 worker 间不再混合两条路径。
+    const bool realizationReady = impl_->realizationActive
+        && impl_->realizationPrewarmComplete.load(std::memory_order_acquire);
     const auto fillWithRealization = [&] (
         ID2D1GeometryRealization *realization,
         ID2D1Geometry *geometry,
@@ -605,12 +614,12 @@ ProbeResult Direct2DGpuBackend::renderFrameInternal(
         const D2D1_MATRIX_3X2_F &instanceTransform,
         bool eligible
     ) {
-        if (eligible && impl_->realizationActive && realization != nullptr) {
+        if (eligible && realizationReady && realization != nullptr) {
             drawSharedRealization(realization, brush, instanceTransform);
             count(frameDiagnostics.realizationHit);
             return;
         }
-        if (impl_->realizationActive && eligible) {
+        if (realizationReady && eligible) {
             count(frameDiagnostics.realizationMiss);
         }
         restoreRealizationBaseTransform();
@@ -626,11 +635,11 @@ ProbeResult Direct2DGpuBackend::renderFrameInternal(
         bool eligible
     ) {
         const auto start = Clock::now();
-        if (eligible && impl_->realizationActive && realization != nullptr) {
+        if (eligible && realizationReady && realization != nullptr) {
             drawSharedRealization(realization, brush, instanceTransform);
             count(frameDiagnostics.realizationHit);
         } else {
-            if (impl_->realizationActive && eligible) {
+            if (realizationReady && eligible) {
                 count(frameDiagnostics.realizationMiss);
             }
             restoreRealizationBaseTransform();
@@ -4636,8 +4645,12 @@ ProbeResult Direct2DGpuBackend::renderFrameInternal(
             }
             if (cacheable && impl_->glowBlurCacheMode != 3) {
                 // 烘焙：把多 pass blur 展平进 sourceRect 尺寸的缓存位图，
-                // 下一帧同签名直接 DrawBitmap。与合成路径逐 pass DrawImage
-                // 的串行 SourceOver 等价（同样从透明底开始）。
+                // 烘焙帧与命中帧统一走 DrawBitmap（见下方 cachedOwned 赋值）。
+                // 若烘焙帧走逐 pass DrawImage 而命中帧走 DrawBitmap，两条
+                // 路径在 clearRect 裁剪边界有 1-3 单位光晕尾差；多 worker
+                // 预览各持一份缓存、各自在不同帧发生 miss→hit 翻转，翻转
+                // 帧在相邻帧键出自不同 worker 时显形为装饰抖动。单一合成
+                // 路径后缓存冷热不再影响任何一帧的画面。
                 const float rectW = layer.sourceRect.right - layer.sourceRect.left;
                 const float rectH = layer.sourceRect.bottom - layer.sourceRect.top;
                 if (rectW >= 1.0f && rectH >= 1.0f
@@ -4693,11 +4706,13 @@ ProbeResult Direct2DGpuBackend::renderFrameInternal(
                         entry.sourceRect = layer.sourceRect;
                         entry.blurred = std::move(cacheBitmap);
                         entry.lastUsed = ++impl_->glowBlurCacheSerial;
+                        // 现烘现用：烘焙帧也画展平位图（与命中帧同一像素
+                        // 路径，见上）。正常模式与诊断 mode 4 的差别只在
+                        // 是否跨帧存储。
+                        layer.cachedOwned = entry.blurred;
                         if (impl_->glowBlurCacheMode == 4) {
-                            // 诊断 mode 4：不跨帧取缓存，本帧现烘现用——
-                            // 与关闭路径的 DrawImage 全链路同帧执行，用于
-                            // 隔离“烘焙/DrawBitmap 语义”与“跨帧过期”。
-                            layer.cachedOwned = std::move(entry.blurred);
+                            // 诊断 mode 4：不跨帧取缓存，每帧现烘现用——
+                            // 用于隔离“跨帧过期”变量。
                         } else if (impl_->glowBlurCache.size()
                             >= Impl::glowBlurCacheCapacity) {
                             auto victim = std::min_element(
@@ -6651,10 +6666,12 @@ ProbeResult Direct2DGpuBackend::renderFrameInternal(
                     anim._11 * anim._22 - anim._12 * anim._21
                 ) > 1.02f;
             }
-            // 存在即用（2026-10 用户二次确认）：usage 不设宽度门——字节
-            // 一致性由金标准比较点两侧同烘焙状态保证（等 prewarm 完成
-            // 或容差），而非阈值；任何阈值下预热窗口内都有 ±4 alpha 的
-            // 基元差。仅动画字走动态几何。
+            // 存在即用 + 整体门控（2026-10 用户二次确认后修订）：usage
+            // 不设宽度门，且 realization 只在 prewarmComplete 后启用
+            // （见 realizationReady）——旧口径下预热窗口内存在 ±4 alpha
+            // 的基元差（原路径 vs 网格逐字符切换），多 worker 各自预热
+            // 进度不同时显形为描边/主文字层逐帧跳动；门控后窗口内一律
+            // 原路径，窗口外一律网格。仅动画字走动态几何。
             const bool realizationEligible = !animated;
             if (layer == 0) {
                 if (charStyle.stroke2Width <= 0.0f) {

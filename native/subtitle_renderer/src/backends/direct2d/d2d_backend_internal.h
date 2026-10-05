@@ -304,9 +304,11 @@ struct Direct2DGpuBackend::Impl {
     // （无 Wiping 字、无入退场淡变、无逐字动画）每帧的 glow 源重绘与
     // 高斯模糊效果执行和上一帧逐位相同：utopia/缩放变换在合成阶段施加，
     // 源与模糊结果跟变换无关。命中时跳过源绘制与 blur 效果图，直接
-    // DrawBitmap 展平结果（与逐 pass DrawImage 的 SourceOver 串行合成
-    // 等价）。条目随 configure 整体失效（lines 向量清空重建，行指针
-    // 即行身份）；LRU 上限防止显存膨胀。
+    // DrawBitmap 展平结果。烘焙帧同样画展平位图（2026-10 统一）：缓存
+    // 冷热不改变任何一帧的画面——多 worker 预览各持一份缓存，各自独立
+    // 的 miss→hit 翻转不得引入跨 worker 可见的像素差。条目随 configure
+    // 整体失效（lines 向量清空重建，行指针即行身份）；LRU 上限防止显存
+    // 膨胀。
     struct GlowBlurCacheEntry {
         const CachedLine *line = nullptr;
         int styleIndex = -1;
@@ -323,15 +325,18 @@ struct Direct2DGpuBackend::Impl {
     std::uint64_t glowBlurCacheHits = 0;
     std::uint64_t glowBlurCacheMisses = 0;
     static constexpr std::size_t glowBlurCacheCapacity = 8;
-    // 默认开启（2026-10 用户目视验收通过：差异仅为 clearRect 裁剪边界处
-    // 光晕尾部 1-3 单位，逐帧 ~120px@1280 / ~44Kpx@2560，肉眼不可辨）。
-    // KROK_SUBTITLE_GPU_GLOW_CACHE=0 可关闭回退。
+    // 默认开启（2026-10 用户目视验收通过）。历史口径：烘焙帧逐 pass
+    // DrawImage、命中帧 DrawBitmap，两条路径在 clearRect 裁剪边界处差
+    // 光晕尾部 1-3 单位（逐帧 ~120px@1280 / ~44Kpx@2560，肉眼不可辨）；
+    // 2026-10 起烘焙帧与命中帧统一为 DrawBitmap，该差异不再出现在帧间。
+    // KROK_SUBTITLE_GPU_GLOW_CACHE=0 可关闭回退（全程逐 pass）。
     bool glowBlurCacheEnabled = direct2d::environmentFlagEnabled(
         "KROK_SUBTITLE_GPU_GLOW_CACHE",
         true
     );
     // 诊断模式：2 = 只烘焙不命中（隔离烘焙副作用）；3 = 只命中不烘焙
-    // （仅供已填充的缓存，诊断用）。默认 1 = 完整缓存。
+    // （仅供已填充的缓存，诊断用）；4 = 现烘现用不跨帧存储（隔离跨帧
+    // 过期变量）。默认 1 = 完整缓存（烘焙帧与命中帧同一像素路径）。
     int glowBlurCacheMode = 1;
 
     RenderScene scene;

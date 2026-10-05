@@ -3208,8 +3208,15 @@ void Direct2DGpuBackend::configure(const RenderScene &scene) {
                             impl_->realizationResources.erase(victim);
                         }
                     }
+                    // 被取消（pause/析构）的预热不得标记完成：渲染侧的整
+                    // 体门控（realizationReady）按 prewarmComplete 放行
+                    // realization 网格路径，半热状态若被置 true 会把「部分
+                    // 字符网格 + 部分字符原路径」锁死成常态（2026-10 多
+                    // worker 抖动的放大器之一）。取消即保持未完成，渲染继
+                    // 续原路径直到下一次 configure 重建预热。
                     impl_->realizationPrewarmComplete.store(
-                        true, std::memory_order_release
+                        !control->stop.load(std::memory_order_acquire),
+                        std::memory_order_release
                     );
                 }
                 control->done.store(true, std::memory_order_release);

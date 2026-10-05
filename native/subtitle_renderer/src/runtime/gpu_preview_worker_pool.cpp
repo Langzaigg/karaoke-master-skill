@@ -68,6 +68,11 @@ public:
         }
         ready_.notify_all();
         followerReady_.notify_all();
+        // follower 装配线程可能在 waitForRealizationPrewarm() 里等待其
+        // backend 的预热线程——先取消预热再 join，顺序与 pause() 一致。
+        for (auto &backend : backends_) {
+            backend->cancelRealizationPrewarm();
+        }
         if (followerConfigureThread_.joinable()) {
             followerConfigureThread_.join();
         }
@@ -115,11 +120,14 @@ public:
                 return;
             }
         }
-        if (followerConfigureThread_.joinable()) {
-            followerConfigureThread_.join();
-        }
+        // 先取消各 backend 的 realization 预热、再 join follower 装配线程：
+        // follower 装配含 waitForRealizationPrewarm()，不先停预热的话
+        // join 会与「等预热完成」互等成死锁。
         for (auto &backend : backends_) {
             backend->cancelRealizationPrewarm();
+        }
+        if (followerConfigureThread_.joinable()) {
+            followerConfigureThread_.join();
         }
     }
 
@@ -380,7 +388,19 @@ private:
                 }
                 nativeTrace("follower configure begin backend=%zu", index);
                 try {
-                    backends_[index]->configure(scene);
+                    // follower 不等首帧、后台全量预热 realization，且完成前
+                    // 不上岗（配合渲染侧的「全有或全无」门控）：多 worker 对
+                    // 同一帧键的像素路径必须一致——半热 follower 混帧会把
+                    // 预热窗口内 ±4 alpha 的基元差显形为逐层跳动（2026-10
+                    // G5 预览抖动根因）。清掉 defer 标志让预热随 configure
+                    // 立即启动（fresh backend 从未渲染、EMA 为 0，自适应调
+                    // 度不会因压力让路卡死）；此处的 join 由 pause()/析构
+                    // 「先 cancelRealizationPrewarm 再 join 本线程」的顺序
+                    // 保证可解除。
+                    krok::subtitle::native::RenderScene followerScene = scene;
+                    followerScene.deferRealizationPrewarmUntilFirstFrame = false;
+                    backends_[index]->configure(followerScene);
+                    backends_[index]->waitForRealizationPrewarm();
                 } catch (...) {
                     nativeTrace("follower configure FAILED backend=%zu", index);
                     return;
