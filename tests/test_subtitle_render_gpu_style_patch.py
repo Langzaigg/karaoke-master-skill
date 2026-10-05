@@ -64,6 +64,30 @@ def _extra_track() -> TimingTrack:
     )
 
 
+def _wait_for_realization_prewarm(
+    renderer,
+    *,
+    force_warp: bool = False,
+    timeout_s: float = 10.0,
+) -> None:
+    """字节金标准比较点须两侧同烘焙状态（2026-10 拆门后的口径）。
+
+    等预热完成再渲染：差分与全量两侧都是「全 realization」帧，比较才
+    与预热时序无关。
+    """
+    import time as _time
+
+    deadline = _time.monotonic() + timeout_s
+    diagnostics = renderer.gpu_diagnostics(force_warp=force_warp)
+    while (
+        not diagnostics.get("realization_prewarm_complete", True)
+        and _time.monotonic() < deadline
+    ):
+        _time.sleep(0.02)
+        diagnostics = renderer.gpu_diagnostics(force_warp=force_warp)
+    assert diagnostics["realization_prewarm_complete"] is True
+
+
 def _patch_style(**changes) -> Style:
     style = Style(
         font_family="Arial",
@@ -279,8 +303,8 @@ def test_configure_style_gpu_frame_matches_full_configure(qapp):
             prewarm_t_ms=500,
             worker_count=1,
             defer_followers=True,
-            defer_realizations_until_first_frame=True,
         )
+        _wait_for_realization_prewarm(renderer)
         checksum_full_a = render_checksum(renderer, 0)
 
         # 差分重配（改色 + 改粒子数量 → style 段与行级 bursts 同时变化）。
@@ -296,9 +320,11 @@ def test_configure_style_gpu_frame_matches_full_configure(qapp):
             prewarm_t_ms=500,
             worker_count=1,
         )
+        _wait_for_realization_prewarm(renderer)
         checksum_patch_b = render_checksum(renderer, 1)
 
-        # 同一新样式的全量重配：帧必须与差分逐字节一致。
+        # 同一新样式的全量重配：帧必须与差分逐字节一致。两侧都等预热
+        # 完成（比较点同烘焙状态），比较与预热时序无关。
         renderer.configure_gpu(
             track,
             style_b,
@@ -309,8 +335,8 @@ def test_configure_style_gpu_frame_matches_full_configure(qapp):
             prewarm_t_ms=500,
             worker_count=1,
             defer_followers=True,
-            defer_realizations_until_first_frame=True,
         )
+        _wait_for_realization_prewarm(renderer)
         checksum_full_b = render_checksum(renderer, 2)
 
         assert checksum_patch_b == checksum_full_b
@@ -466,7 +492,11 @@ def test_vector_glyphs_hash_gate_omits_unchanged_table():
         {"ok": True, "event": "configured"},
     ])
     renderer._send = payloads.append
-    renderer._read_until_event = lambda event, timeout_s=None: next(responses)
+    # 看门狗心跳续租后真实现会多传 heartbeat_lease_s（backend.py configure 路径），
+    # 假件必须按新签名收参。
+    renderer._read_until_event = (
+        lambda event, timeout_s=None, heartbeat_lease_s=None: next(responses)
+    )
 
     style = _patch_style()
     kwargs = {"width": 640, "height": 360, "fps": 60}

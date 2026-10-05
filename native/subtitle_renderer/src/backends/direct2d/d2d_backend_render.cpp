@@ -6648,12 +6648,11 @@ ProbeResult Direct2DGpuBackend::renderFrameInternal(
                     anim._11 * anim._22 - anim._12 * anim._21
                 ) > 1.02f;
             }
-            // 8px 使用侧门恢复（2026-10-05 回归复盘）：usage 必须与任务
-            // 生成同门（样式的纯函数）——「存在即用」会把预热进度泄漏进
-            // 帧字节，差分重配/池化路径间产生 ±4 alpha 的边缘 AA 分歧。
-            const bool realizationEligible = !animated
-                && std::max(charStyle.strokeWidth, 0.0f)
-                    >= Impl::realizationStrokeThreshold;
+            // 存在即用（2026-10 用户二次确认）：usage 不设宽度门——字节
+            // 一致性由金标准比较点两侧同烘焙状态保证（等 prewarm 完成
+            // 或容差），而非阈值；任何阈值下预热窗口内都有 ±4 alpha 的
+            // 基元差。仅动画字走动态几何。
+            const bool realizationEligible = !animated;
             if (layer == 0) {
                 if (charStyle.stroke2Width <= 0.0f) {
                     return;
@@ -7094,10 +7093,8 @@ ProbeResult Direct2DGpuBackend::renderFrameInternal(
                 const D2D1_MATRIX_3X2_F identityTransform =
                     D2D1::Matrix3x2F::Identity();
                 const bool rubyTransformed = rubyUnitTransformed(ruby, index);
-                // 与主字形同门（样式的纯函数，2026-10-05 回归复盘）。
-                const bool realizationEligible = !rubyTransformed
-                    && std::max(rubyStyle.rubyStrokeWidth, 0.0f)
-                        >= Impl::realizationStrokeThreshold;
+                // 与主字形同口径：存在即用（2026-10 用户二次确认）。
+                const bool realizationEligible = !rubyTransformed;
                 if (rubyStyle.rubyStroke2Width > 0.0f) {
                     if (rubyTransformed && animatedStroke2 != nullptr) {
                         fillCountedStroke(

@@ -3174,6 +3174,9 @@ def test_gpu_preview_worker_pool_bounds_in_flight_and_tags_out_of_order_frames(
             worker_count=2,
         )
         assert configured["worker_count"] == 2
+        # 字节金标准比较点须两侧同烘焙状态（2026-10 拆门后的口径）：
+        # 等预热完成再渲染，池化与串行两侧都是「全 realization」帧。
+        _wait_for_realization_prewarm(renderer)
         for frame_index, t_ms in enumerate((500, 1000)):
             renderer.begin_render_gpu_frame(
                 t_ms,
@@ -3202,6 +3205,7 @@ def test_gpu_preview_worker_pool_bounds_in_flight_and_tags_out_of_order_frames(
             fps=60,
             worker_count=1,
         )
+        _wait_for_realization_prewarm(renderer)
         serial_frames: dict[int, bytes] = {}
         for frame_index, t_ms in enumerate((500, 1000)):
             event = renderer.render_gpu_frame(
@@ -4084,17 +4088,34 @@ def test_gpu_realization_rapid_style_churn_discards_stale_prewarm(monkeypatch) -
             track, fine_style, width=640, height=360, fps=60,
             force_warp=False, prewarm_t_ms=750,
         )
-        diagnostics = _wait_for_realization_prewarm(renderer)
-        time.sleep(0.05)
+        storm_settled = _wait_for_realization_prewarm(renderer)
+        # 对照：同进程直接单独一次 fine 配置（干净代际）——风暴后的
+        # 定居计数必须与之一致，宽样式时代的陈旧任务/资源不得残留。
+        renderer.configure_gpu(
+            track, fine_style, width=640, height=360, fps=60,
+            force_warp=False, prewarm_t_ms=750,
+        )
+        control = _wait_for_realization_prewarm(renderer)
         frame = renderer.render_gpu_frame(750, force_warp=False)
 
-    assert diagnostics["realization_count"] == 0
-    assert frame["realization_hit"] == 0
+    # 细描边同样参与预热（2026-10 拆门，用户二次确认）：计数 > 0，
+    # 预热完成后整帧全命中、无 miss。
+    assert storm_settled["realization_count"] == control["realization_count"]
+    assert control["realization_count"] > 0
     assert frame["realization_miss"] == 0
+    assert frame["realization_hit"] > 0
 
 
 @pytest.mark.skipif(os.name != "nt", reason="Direct2D GPU backend is Windows-only")
 def test_gpu_realization_threshold_preserves_fine_stroke_pixels(monkeypatch) -> None:
+    """细描边同样参与 realization（2026-10 拆门），但不得劣化其像素。
+
+    口径（用户拍板）：realization 与直绘两种绘制基元的边缘 AA/覆盖允许
+    小差——差异字节 <1%，其中 >60 的大差 ≤32 字节（个别边缘像素的覆盖
+    重估）；真劣化（丢描边/错宽度/错色）是千字节级、三个数量级之上。
+    enabled 侧等预热完成后取「全 realization」帧，与 disabled 的
+    「全直绘」帧比较。
+    """
     monkeypatch.setenv("QT_QPA_PLATFORM", "offscreen")
     style = _g1_style(
         stroke_width_px=5,
@@ -4105,8 +4126,9 @@ def test_gpu_realization_threshold_preserves_fine_stroke_pixels(monkeypatch) -> 
         decoration_kind="none",
     )
 
-    def render(enabled: bool) -> tuple[dict, dict]:
+    def render(enabled: bool) -> tuple[dict, dict, bytes]:
         monkeypatch.setenv("KROK_GPU_REALIZATION", "1" if enabled else "0")
+        shm_key = f"test-gpu-fine-stroke-{uuid.uuid4().hex}"
         with NativeRendererProcess(_renderer_path(), response_timeout_s=15.0) as renderer:
             configured = renderer.configure_gpu(
                 _g1_track(), style, width=640, height=360, fps=60,
@@ -4114,15 +4136,35 @@ def test_gpu_realization_threshold_preserves_fine_stroke_pixels(monkeypatch) -> 
             )
             if enabled:
                 configured = _wait_for_realization_prewarm(renderer)
-            frame = renderer.render_gpu_frame(750, force_warp=False)
-        return configured, frame
+            event = renderer.render_gpu_frame(
+                750,
+                force_warp=False,
+                shm_key=shm_key,
+                include_checksum=False,
+            )
+            with SharedFrameRingReader.from_event(event) as reader:
+                payload = bytes(reader.read_frame(event).payload)
+        return configured, event, payload
 
-    enabled_diagnostics, enabled_frame = render(True)
-    _, disabled_frame = render(False)
+    enabled_diagnostics, enabled_frame, enabled_pixels = render(True)
+    _, _, disabled_pixels = render(False)
 
-    assert enabled_diagnostics["realization_count"] == 0
-    assert enabled_frame["realization_hit"] == 0
-    assert enabled_frame["checksum"] == disabled_frame["checksum"]
+    assert enabled_diagnostics["realization_count"] > 0
+    assert enabled_frame["realization_miss"] == 0
+    diffs = [
+        abs(int(a) - int(b))
+        for a, b in zip(enabled_pixels, disabled_pixels)
+        if a != b
+    ]
+    # 实测分布（2026-10-05）：0.45% 字节有差，绝大多数 ≤60（AA 重估），
+    # 仅 ~17 字节 >60（个别字形边缘的覆盖差，如 198→135）。真劣化（丢
+    # 描边/错宽度）是千字节级全差——双约束隔开三个数量级。
+    assert len(diffs) / len(enabled_pixels) < 0.01, (
+        f"differing bytes: {len(diffs)}/{len(enabled_pixels)}"
+    )
+    assert sum(1 for d in diffs if d > 60) <= 32, (
+        f"bytes with delta>60: {sum(1 for d in diffs if d > 60)}"
+    )
 
 
 @pytest.mark.skipif(os.name != "nt", reason="Direct2D GPU backend is Windows-only")
