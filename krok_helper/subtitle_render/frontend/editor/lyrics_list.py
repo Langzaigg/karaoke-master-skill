@@ -62,6 +62,7 @@ from qfluentwidgets import (
     PushButton as FluentPushButton,
     RoundMenu,
     SpinBox as FluentSpinBox,
+    SubtitleLabel,
     ToggleButton as FluentToggleButton,
     TransparentToolButton,
 )
@@ -290,29 +291,22 @@ def _animation_summary(
     return summary
 
 
-_DIALOG_NO_CHANGE = object()
-"""逐行特效弹窗三态开关的「不修改」哨兵（区别于真实值 None/True/False）。"""
-
-# 挂载行开关与反向走字的三态选项（value, label）——与右键菜单同口径。
+# 挂载行开关三档选项（value, label）——与右键菜单同口径；首项即中性档
+# （跟随默认），多行混合态未命中任何值时代为缺省。反向走字是二态布尔，
+# 用复选框承载（勾选 = 反向）。
 _HOST_SWITCH_ITEMS = (
-    (_DIALOG_NO_CHANGE, "不修改"),
     (None, "跟随默认（段首）"),
     (True, "强制开启"),
     (False, "强制关闭"),
-)
-_WIPE_SWITCH_ITEMS = (
-    (_DIALOG_NO_CHANGE, "不修改"),
-    (True, "反向走字"),
-    (False, "正向走字"),
 )
 
 
 class _LineAnimationDialog(ModelessDialog):
     """歌词列表逐行动画的紧凑编辑弹窗。
 
-    除入退场/唱字动画外，还承载三个行级开关——音量柱特效、指示灯特效
-    （挂载行三态覆盖）与反向走字；每个开关初始显示所选行的当前值
-    （多行混合时显示「不修改」），确认时只有被改动的开关才发信号。
+    除入退场/唱字动画外，还以独立分栏承载三个行级开关——音量柱特效、
+    指示灯特效（挂载行三态覆盖）与反向走字。开关与「继承全局设置」无关，
+    恒按选中值应用；多行混合时由调用方按中性档（跟随默认/正向）传入。
     """
 
     def __init__(
@@ -321,9 +315,9 @@ class _LineAnimationDialog(ModelessDialog):
         override: Optional[LineAnimationOverride],
         parent: Optional[QWidget] = None,
         *,
-        wipe_reverse: object = _DIALOG_NO_CHANGE,
-        volume_host: object = _DIALOG_NO_CHANGE,
-        lit_host: object = _DIALOG_NO_CHANGE,
+        wipe_reverse: bool = False,
+        volume_host: object = None,
+        lit_host: object = None,
     ) -> None:
         super().__init__(parent)
         self.setWindowTitle("逐行特效")
@@ -370,17 +364,12 @@ class _LineAnimationDialog(ModelessDialog):
             )
         self._select_by_data(self._volume_host_combo, volume_host)
         self._select_by_data(self._lit_host_combo, lit_host)
-        self._wipe_combo = _StableFluentComboBox(self)
-        for value, label in _WIPE_SWITCH_ITEMS:
-            self._wipe_combo.addItem(label, userData=value)
-        self._wipe_combo.setToolTip(
-            "反向消费本行时间戳（横排从右往左、竖排从下往上走字）；"
-            "正向 = 按正常顺序走字"
+        self._wipe_check = CheckBox("反向走字", self)
+        self._wipe_check.setChecked(bool(wipe_reverse))
+        self._wipe_check.setToolTip(
+            "勾选 = 反向消费本行时间戳（横排从右往左、竖排从下往上走字）；"
+            "不勾 = 按正常顺序走字"
         )
-        self._select_by_data(self._wipe_combo, wipe_reverse)
-        self._initial_volume_host = volume_host
-        self._initial_lit_host = lit_host
-        self._initial_wipe = wipe_reverse
         self._entry_duration = FluentSpinBox(self)
         self._exit_duration = FluentSpinBox(self)
         for spin in (self._entry_duration, self._exit_duration):
@@ -407,10 +396,17 @@ class _LineAnimationDialog(ModelessDialog):
         form.addRow("退场时长", self._exit_duration)
         form.addRow("唱字特效", self._karaoke_combo)
         form.addRow("唱字装饰粒子", self._sing_combo)
-        form.addRow("音量柱特效", self._volume_host_combo)
-        form.addRow("指示灯特效", self._lit_host_combo)
-        form.addRow("反向走字", self._wipe_combo)
         root.addLayout(form)
+
+        root.addSpacing(2)
+        switch_title = SubtitleLabel("本行开关", self)
+        root.addWidget(switch_title)
+        switch_form = QFormLayout()
+        switch_form.setSpacing(10)
+        switch_form.addRow("音量柱特效", self._volume_host_combo)
+        switch_form.addRow("指示灯特效", self._lit_host_combo)
+        switch_form.addRow("反向走字", self._wipe_check)
+        root.addLayout(switch_form)
 
         buttons = QHBoxLayout()
         buttons.addStretch(1)
@@ -439,24 +435,17 @@ class _LineAnimationDialog(ModelessDialog):
                 return
         combo.setCurrentIndex(0)
 
-    def _switch_value(self, combo: FluentComboBox, initial: object) -> object:
-        """开关当前选中值；与打开时的初值相同（或仍是「不修改」）时返回哨兵。"""
-        value = combo.currentData()
-        if value is initial:
-            return _DIALOG_NO_CHANGE
-        return value
-
     def volume_host_value(self) -> object:
-        """音量柱特效挂载行的目标值；``_DIALOG_NO_CHANGE`` = 未改动。"""
-        return self._switch_value(self._volume_host_combo, self._initial_volume_host)
+        """音量柱特效挂载行的目标值（None/True/False）。"""
+        return self._volume_host_combo.currentData()
 
     def lit_host_value(self) -> object:
-        """指示灯特效挂载行的目标值；``_DIALOG_NO_CHANGE`` = 未改动。"""
-        return self._switch_value(self._lit_host_combo, self._initial_lit_host)
+        """指示灯特效挂载行的目标值（None/True/False）。"""
+        return self._lit_host_combo.currentData()
 
     def wipe_reverse_value(self) -> object:
-        """反向走字目标值；``_DIALOG_NO_CHANGE`` = 未改动。"""
-        return self._switch_value(self._wipe_combo, self._initial_wipe)
+        """反向走字目标值（True/False）。"""
+        return bool(self._wipe_check.isChecked())
 
     def _sync_enabled(self, inherit: bool) -> None:
         for widget in (
@@ -3471,38 +3460,37 @@ class LyricsPanel(DropPanel):
         lines = [self._track.lines[row] for row in valid_rows]
         first = lines[0].animation_override
 
-        def uniform(getter):
+        def uniform(getter, default):
+            # 多行混合没有「不修改」档可显示：回退中性档（跟随默认/正向）。
             values = [getter(line) for line in lines]
             return (
                 values[0]
                 if all(value == values[0] for value in values)
-                else _DIALOG_NO_CHANGE
+                else default
             )
 
         dialog = _LineAnimationDialog(
             self._style,
             first,
             self,
-            wipe_reverse=uniform(lambda line: line.wipe_reverse),
-            volume_host=uniform(lambda line: line.volume_head_override),
-            lit_host=uniform(lambda line: line.lit_head_override),
+            wipe_reverse=uniform(lambda line: line.wipe_reverse, False),
+            volume_host=uniform(lambda line: line.volume_head_override, None),
+            lit_host=uniform(lambda line: line.lit_head_override, None),
         )
         if dialog.exec() == QDialog.DialogCode.Accepted:
             target_rows = list(valid_rows)
             self.animationOverrideRequested.emit(
                 target_rows, dialog.animation_override()
             )
-            # 行级开关只在弹窗内真的改动了才发（未改动返回「不修改」哨兵），
-            # 避免打开看一眼就确认把所选行的既有覆盖冲掉。
-            volume_host = dialog.volume_host_value()
-            if volume_host is not _DIALOG_NO_CHANGE:
-                self.volumeHostRequested.emit(target_rows, volume_host)
-            lit_host = dialog.lit_host_value()
-            if lit_host is not _DIALOG_NO_CHANGE:
-                self.litHostRequested.emit(target_rows, lit_host)
-            wipe = dialog.wipe_reverse_value()
-            if wipe is not _DIALOG_NO_CHANGE:
-                self.wipeReverseRequested.emit(target_rows, bool(wipe))
+            # 三个行级开关恒按选中值发（无「不修改」档）；宿主 handler
+            # 对等值有快路径，未改动的行不会产生可撤销编辑。
+            self.volumeHostRequested.emit(
+                target_rows, dialog.volume_host_value()
+            )
+            self.litHostRequested.emit(target_rows, dialog.lit_host_value())
+            self.wipeReverseRequested.emit(
+                target_rows, bool(dialog.wipe_reverse_value())
+            )
 
     def _edit_char_roles(self, row: int) -> None:
         """打开行内逐字符角色编辑器，确定后按整行标签列表发给宿主。"""
