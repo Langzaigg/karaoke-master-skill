@@ -13133,7 +13133,7 @@ def test_gpu_particle_stroke_style_survives_backend_recreation() -> None:
     style = _g1_style(
         sing_fx="note",
         fx_particle_color_mode="follow_before",
-        fx_particle_color_layers="decor",
+        fx_particle_color_layers="stroke",
         fx_particle_size_em=0.6,
         stroke_width_px=6,
         stroke2_enabled=True,

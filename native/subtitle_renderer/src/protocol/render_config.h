@@ -144,12 +144,17 @@ struct TimingLine {
         PaintFillSpec stroke2;
         double strokeWidthPx = 0.0;
         double stroke2WidthPx = 0.0;
-        // 取色层级「全有」的阴影层（2026-10）：行空间常量偏移的整剪影，
-        // 偏移为粒子尺寸基准的物理 px（规划期已按 size/字号同比缩放）。
-        bool hasShadow = false;
-        PaintFillSpec shadow;
-        double shadowOffsetX = 0.0;
-        double shadowOffsetY = 0.0;
+        // 取色层级「+装饰/全有」的装饰层（2026-10）：kind 由来源角色方案的
+        // decoration_kind 选定——shadow=行空间常量偏移剪影（offset_*_px）；
+        // glow=多级描边弥散晕（radius_px + concentration_level）。偏移/半径
+        // 均为粒子尺寸基准的物理 px（规划期已按 size/字号同比缩放）。
+        bool hasDecor = false;
+        QString decorKind;
+        PaintFillSpec decor;
+        double decorOffsetX = 0.0;
+        double decorOffsetY = 0.0;
+        double decorRadius = 0.0;
+        int decorConcentration = 0;
         // 行锚点星光的逐字颜色表（跟随模式 + 联动入退场）：动画仍是整行
         // 一条 burst，绘制端按每颗粒子落点所在字符取色（Python 预解析，
         // 旧 IR / 其余模式缺省为空）。

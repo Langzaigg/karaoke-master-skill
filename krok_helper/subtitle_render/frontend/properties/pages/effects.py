@@ -675,9 +675,10 @@ class EffectsPropertyPageBuilder:
         host._fx_particle_layers_combo.setToolTip(
             "取色层级（仅对从配色方案取色的四档生效：跟随字体·走字前/"
             "走字后/前后各一、复用配色方案）：仅实色=只取该态主文字色，"
-            "粒子呈纯色剪影（默认）；+描边=叠加该态描边层；+装饰=再叠加"
-            "二重描边层；全有=再叠加阴影层（阴影按粒子尺寸同比缩放、"
-            "偏移方向恒定，与文字阴影同口径）；改一次一直沿用"
+            "粒子呈纯色剪影（默认）；+描边=按角色方案的描边栈（方案启用"
+            "二重描边时一起加）、不加装饰；+装饰=不加描边、仅加装饰层；"
+            "全有=描边栈 + 装饰层，完全按角色方案。装饰层随角色方案的"
+            "装饰设置（阴影/发光）走；改一次一直沿用"
         )
         host._fx_particle_layers_combo.currentIndexChanged.connect(
             lambda _index: host._update_style(

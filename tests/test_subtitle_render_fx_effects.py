@@ -1331,7 +1331,7 @@ def test_particle_paint_spec_stroke_widths_scale_with_source_font():
         sing_fx="twinkle",
         fx_particle_size_em=0.5,  # 粒子 50px
         fx_particle_color_mode="follow_after",
-        fx_particle_color_layers="decor",
+        fx_particle_color_layers="stroke",
         karaoke_anim="none",
         stroke_width_px=8,
         stroke2_enabled=True,
@@ -1348,7 +1348,7 @@ def test_particle_paint_spec_stroke_widths_scale_with_source_font():
         sing_fx="twinkle",
         fx_particle_size_em=0.5,  # 粒子 10px，半边长 5px
         fx_particle_color_mode="follow_after",
-        fx_particle_color_layers="decor",
+        fx_particle_color_layers="stroke",
         karaoke_anim="none",
         stroke_width_px=40,
         stroke2_enabled=False,
@@ -1366,7 +1366,7 @@ def test_particle_paint_spec_stroke_widths_scale_with_source_font():
         font_size_px=100,
         sing_fx="twinkle",
         fx_particle_color_mode="follow_after",
-        fx_particle_color_layers="decor",
+        fx_particle_color_layers="stroke",
         karaoke_anim="none",
         stroke_width_px=8,
         stroke2_enabled=False,
@@ -1540,7 +1540,7 @@ def test_ripple_bursts_carry_no_stroke_and_spec_cache_reuses():
         sing_fx="twinkle",
         karaoke_anim="none",
         fx_particle_color_mode="follow_after",
-        fx_particle_color_layers="decor",
+        fx_particle_color_layers="stroke",
         stroke_width_px=8,
         stroke2_enabled=True,
         stroke2_width_px=4,
@@ -2236,15 +2236,16 @@ def test_d2d_geo_transition_gates_cover_particle_anims():
 
 
 def test_particle_color_layers_trim_source_decor():
-    """取色层级四档：solid（默认）/ stroke / decor / all 逐级裁层。"""
+    """取色层级四档（2026-10 用户口径）：solid（默认）/ +描边（不加装饰，
+    描边栈按方案）/ +装饰（不加描边，仅装饰层）/ 全有（描边栈 + 装饰）。"""
     from krok_helper.subtitle_render.domain.paint import (
         KaraokeColorState,
         KaraokeColors,
     )
     from krok_helper.subtitle_render.engine.style.style_semantics import solid_fill
 
-    def _style(layers: str) -> Style:
-        return Style(
+    def _style(layers: str, **extra) -> Style:
+        base = dict(
             font_size_px=100,
             sing_fx="twinkle",
             fx_particle_size_em=0.5,  # 粒子 50px → 缩放 0.5
@@ -2260,10 +2261,12 @@ def test_particle_color_layers_trim_source_decor():
                 after=KaraokeColorState(text=solid_fill("#FF5A6F"))
             ),
         )
+        base.update(extra)
+        return Style(**base)
 
-    def _burst(layers: str) -> dict:
+    def _burst(layers: str, **extra) -> dict:
         bursts = plan_line_bursts(
-            _style(layers), 0, 0, 1000, 900, [(0, 400)]
+            _style(layers, **extra), 0, 0, 1000, 900, [(0, 400)]
         )
         return next(b for b in bursts if b["kind"] == "twinkle")
 
@@ -2272,21 +2275,53 @@ def test_particle_color_layers_trim_source_decor():
     burst = _burst("solid")
     assert "paint" not in burst
     assert burst["color"] == "#FF5A6F"
-    # +描边：只有一层描边有宽；二重描边 0、无阴影键。
+    # +描边：按方案描边栈（方案启用二重描边 → 一起加），不加装饰。
     spec = _burst("stroke")["paint"]
     assert spec["stroke_width_px"] == pytest.approx(4.0)  # 8 × 0.5
-    assert spec["stroke2_width_px"] == 0.0
-    assert "shadow" not in spec
-    # +装饰：描边 + 二重描边。
-    spec = _burst("decor")["paint"]
-    assert spec["stroke_width_px"] == pytest.approx(4.0)
     assert spec["stroke2_width_px"] == pytest.approx(2.0)  # 4 × 0.5
-    assert "shadow" not in spec
-    # 全有：再叠加阴影（偏移按粒子尺寸同比缩放）。
+    assert "decor" not in spec
+    # 方案未启用二重描边：只加单描边（仍按方案）。
+    spec = _burst("stroke", stroke2_enabled=False)["paint"]
+    assert spec["stroke_width_px"] == pytest.approx(4.0)
+    assert spec["stroke2_width_px"] == 0.0
+    # +装饰：不加描边、仅装饰层（默认方案 decoration_kind=shadow → 偏移剪影）。
+    spec = _burst("decor")["paint"]
+    assert spec["stroke_width_px"] == 0.0
+    assert spec["stroke2_width_px"] == 0.0
+    assert spec["decor"]["kind"] == "shadow"
+    assert spec["decor"]["offset_x_px"] == pytest.approx(3.0)  # 6 × 0.5
+    assert spec["decor"]["offset_y_px"] == pytest.approx(2.0)  # 4 × 0.5
+    # 全有：描边栈 + 装饰层。
     spec = _burst("all")["paint"]
-    assert spec["shadow"]["mode"] == "solid"
-    assert spec["shadow_offset_x_px"] == pytest.approx(3.0)  # 6 × 0.5
-    assert spec["shadow_offset_y_px"] == pytest.approx(2.0)  # 4 × 0.5
+    assert spec["stroke_width_px"] == pytest.approx(4.0)
+    assert spec["stroke2_width_px"] == pytest.approx(2.0)
+    assert spec["decor"]["kind"] == "shadow"
+    # 装饰随角色方案的 decoration_kind：glow → 半径/浓度（走字后半径）。
+    glow_spec = _burst(
+        "all",
+        decoration_kind="glow",
+        glow_after_radius_px=12,
+        glow_concentration_level=1,
+    )["paint"]
+    assert glow_spec["decor"]["kind"] == "glow"
+    assert glow_spec["decor"]["radius_px"] == pytest.approx(6.0)  # 12 × 0.5
+    assert glow_spec["decor"]["concentration_level"] == 1
+    # 走字前档取 before 半径（每态各自的发光半径）。
+    before_glow = _burst(
+        "decor",
+        fx_particle_color_mode="follow_before",
+        decoration_kind="glow",
+        glow_before_radius_px=10,
+        glow_after_radius_px=30,
+    )["paint"]
+    assert before_glow["decor"]["radius_px"] == pytest.approx(5.0)
+    # decoration_kind=none：装饰档不产出装饰（退化为纯色 / 描边栈）。
+    none_spec = _burst("decor", decoration_kind="none")["paint"]
+    assert "decor" not in none_spec
+    assert none_spec["stroke_width_px"] == 0.0
+    none_all = _burst("all", decoration_kind="none")["paint"]
+    assert "decor" not in none_all
+    assert none_all["stroke_width_px"] == pytest.approx(4.0)
 
 
 def test_particle_color_layers_apply_to_dual_variants():
@@ -2297,7 +2332,7 @@ def test_particle_color_layers_apply_to_dual_variants():
         font_size_px=100,
         sing_fx="petal",
         fx_particle_color_mode="follow_mix",
-        fx_particle_color_layers="decor",
+        fx_particle_color_layers="all",
         karaoke_anim="none",
         stroke_width_px=8,
         stroke2_enabled=True,
@@ -2315,6 +2350,7 @@ def test_particle_color_layers_apply_to_dual_variants():
         "#123456", "#ABCDEF",
     }
     assert all(b["paint"]["stroke_width_px"] > 0.0 for b in petals)
+    assert all(b["paint"]["decor"]["kind"] == "shadow" for b in petals)
     # 默认仅实色档：同一配置不带规格（旧观感）。
     plain = Style(
         font_size_px=100,
@@ -2349,11 +2385,15 @@ def test_particle_color_layers_apply_to_dual_variants():
         if b["kind"] == "petal"
     ]
     assert all("paint" in b for b in role_petals)
-    assert all("shadow" in b["paint"] for b in role_petals)
+    assert all("decor" in b["paint"] for b in role_petals)
 
 
 def test_painter_particle_shadow_layer_smoke(qapp):
-    """CPU painter：全有档的阴影剪影层绘制不抛异常（含常量偏移）。"""
+    """CPU painter：装饰层（全有档）两种 kind 绘制不抛异常。
+
+    阴影（decoration_kind=shadow，常量偏移剪影）与发光（=glow，多级描边
+    弥散晕）都走一遍。
+    """
     from PyQt6.QtGui import QImage
 
     from krok_helper.subtitle_render.domain.timing import TimingChar, TimingTrack
@@ -2384,3 +2424,13 @@ def test_painter_particle_shadow_layer_smoke(qapp):
     img = QImage(800, 450, QImage.Format.Format_ARGB32_Premultiplied)
     img.fill(0xFF101010)
     paint_frame(img, track, 1300, style)
+    # 同档位换发光装饰：多级描边弥散晕路径同样可画（无异常）。
+    from dataclasses import replace as _replace
+
+    glow_style = _replace(
+        style, decoration_kind="glow", glow_after_radius_px=12,
+        glow_concentration_level=1,
+    )
+    img2 = QImage(800, 450, QImage.Format.Format_ARGB32_Premultiplied)
+    img2.fill(0xFF101010)
+    paint_frame(img2, track, 1300, glow_style)

@@ -5784,7 +5784,9 @@ ProbeResult Direct2DGpuBackend::renderFrameInternal(
                         && burst.stroke2.mode != "gradient_horizontal") {
                         stroke2Brush = layerBrush(burst.stroke2);
                     }
-                    if ((strokeEm >= 1.0f || stroke2Em >= 1.0f)
+                    if ((strokeEm >= 1.0f || stroke2Em >= 1.0f
+                            || (burst.hasDecor
+                                && burst.decorKind == "glow"))
                         && !impl_->fxRoundStrokeStyle) {
                         // 圆角连接/端点（painter QPen RoundJoin/RoundCap
                         // 同款）；按 Impl 缓存，随本实例 factory 生命周期。
@@ -5835,12 +5837,14 @@ ProbeResult Direct2DGpuBackend::renderFrameInternal(
                     const float alpha = std::clamp(
                         particle.alpha * globalOpacity, 0.0f, 1.0f
                     );
-                    if (burst.hasShadow) {
-                        // 阴影剪影层（取色层级「全有」，镜像 painter 的阴影
-                        // 通道与 paint_shadow_silhouette）：整剪影（外层轮廓
-                        // 笔宽 = 描边+二重描边）统一用阴影填充色，行空间常量
-                        // 偏移——先于旋转/缩放平移，偏移方向不随粒子自转。
-                        const auto shadowTransform = [&](float dx, float dy) {
+                    if (burst.hasDecor) {
+                        // 装饰层（取色层级「+装饰/全有」，镜像 painter）：
+                        // kind 由来源角色方案的 decoration_kind 选定——
+                        // shadow=行空间常量偏移剪影（外层轮廓笔宽 = 描边+
+                        // 二重描边，与 paint_shadow_silhouette 同口径）；
+                        // glow=多级描边近似弥散晕（与 kGlowHaloStrokes 转场
+                        // 配方同源，浓度档决定叠加趟数）。
+                        const auto decorTransform = [&](float dx, float dy) {
                             return D2D1::Matrix3x2F::Scale(
                                 particle.sizePx / 1000.0f,
                                 particle.sizePx / 1000.0f
@@ -5851,13 +5855,14 @@ ProbeResult Direct2DGpuBackend::renderFrameInternal(
                                 * D2D1::Matrix3x2F::Translation(dx, dy)
                                 * previousTransform;
                         };
-                        context->SetTransform(shadowTransform(
-                            particle.x + burst.shadowOffsetX,
-                            particle.y + burst.shadowOffsetY
-                        ));
-                        const auto shadowBrush = layerBrush(burst.shadow);
-                        if (shadowBrush) {
-                            shadowBrush->SetOpacity(alpha);
+                        const auto decorBrush = layerBrush(burst.decor);
+                        if (decorBrush
+                            && burst.decorKind == "shadow") {
+                            context->SetTransform(decorTransform(
+                                particle.x + burst.decorOffsetX,
+                                particle.y + burst.decorOffsetY
+                            ));
+                            decorBrush->SetOpacity(alpha);
                             const float outerEm = burst.sizePx > 0.0f
                                 ? (burst.strokeWidth + burst.stroke2Width)
                                     / burst.sizePx * 1000.0f
@@ -5865,19 +5870,64 @@ ProbeResult Direct2DGpuBackend::renderFrameInternal(
                             if (outerEm >= 1.0f && roundStyle) {
                                 context->DrawGeometry(
                                     spriteIt->second.Get(),
-                                    shadowBrush.Get(),
+                                    decorBrush.Get(),
                                     outerEm,
                                     roundStyle.Get()
                                 );
                             }
                             context->FillGeometry(
-                                spriteIt->second.Get(), shadowBrush.Get()
+                                spriteIt->second.Get(), decorBrush.Get()
                             );
+                            // 装饰只借一次变换：恢复主绘制变换。
+                            context->SetTransform(decorTransform(
+                                particle.x, particle.y
+                            ));
+                        } else if (decorBrush
+                            && burst.decorKind == "glow"
+                            && burst.decorRadius > 0.0f
+                            && roundStyle) {
+                            context->SetTransform(decorTransform(
+                                particle.x, particle.y
+                            ));
+                            const float spreadEm = burst.sizePx > 0.0f
+                                ? burst.decorRadius / burst.sizePx * 1000.0f
+                                : 0.0f;
+                            const int passes = std::max(
+                                burst.decorConcentration + 1, 1
+                            );
+                            for (int passIndex = 0; passIndex < passes;
+                                 ++passIndex) {
+                                const float passRadius =
+                                    spreadEm
+                                    * static_cast<float>(
+                                        passes - passIndex
+                                    )
+                                    / static_cast<float>(passes);
+                                if (passRadius <= 0.0f) {
+                                    continue;
+                                }
+                                for (const GlowHaloStroke &halo
+                                     : kGlowHaloStrokes) {
+                                    const float widthEm =
+                                        passRadius * halo.widthEm;
+                                    if (widthEm < 0.5f) {
+                                        continue;
+                                    }
+                                    decorBrush->SetOpacity(
+                                        alpha * halo.strength
+                                    );
+                                    context->DrawGeometry(
+                                        spriteIt->second.Get(),
+                                        decorBrush.Get(),
+                                        widthEm,
+                                        roundStyle.Get()
+                                    );
+                                }
+                            }
+                            context->SetTransform(decorTransform(
+                                particle.x, particle.y
+                            ));
                         }
-                        // 阴影只借一次变换：恢复主绘制变换。
-                        context->SetTransform(shadowTransform(
-                            particle.x, particle.y
-                        ));
                     }
                     if (hasCharColors) {
                         // 行锚点星光逐字取色：落点 → 最近字符（中点划分，

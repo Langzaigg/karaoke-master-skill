@@ -3887,14 +3887,28 @@ def _paint_line_fx_particles(
             stroke2_em = (
                 float(spec["stroke2_width_px"]) / max(burst_size, 1.0) * 1000.0
             )
-            # 阴影层（取色层级=全有）：行空间常量偏移的整剪影。
-            shadow_fill = (
-                _paint_fill_from_dict(spec["shadow"])
-                if spec.get("shadow") is not None
-                else None
-            )
-            shadow_dx = float(spec.get("shadow_offset_x_px", 0.0) or 0.0)
-            shadow_dy = float(spec.get("shadow_offset_y_px", 0.0) or 0.0)
+            # 装饰层（取色层级 +装饰/全有）：kind=shadow/glow 由来源角色
+            # 方案的 decoration_kind 选定（规划期解析、随 burst 下发；
+            # 2026-10 用户口径：装饰不固定阴影）。
+            decor_spec = spec.get("decor")
+            if isinstance(decor_spec, dict) and str(
+                decor_spec.get("kind", "") or ""
+            ) in {"shadow", "glow"}:
+                decor_kind = str(decor_spec["kind"])
+                decor_fill = _paint_fill_from_dict(decor_spec["fill"])
+                decor_dx = float(decor_spec.get("offset_x_px", 0.0) or 0.0)
+                decor_dy = float(decor_spec.get("offset_y_px", 0.0) or 0.0)
+                decor_radius = float(decor_spec.get("radius_px", 0.0) or 0.0)
+                decor_concentration = int(
+                    decor_spec.get("concentration_level", 0) or 0
+                )
+            else:
+                decor_kind = ""
+                decor_fill = None
+                decor_dx = 0.0
+                decor_dy = 0.0
+                decor_radius = 0.0
+                decor_concentration = 0
             # 涟漪 + 非横向渐变（纵向渐变/拼色）→ 径向映射：渐变轴映射到
             # 半径方向，每颗环按自己的扩散进度在渐变轴上采样一个实心色
             #（内圈新环=起点色，外圈老环=终点色；环是发丝线，跨环带的
@@ -3944,14 +3958,23 @@ def _paint_line_fx_particles(
             hgrad_box = None
             sprite_image = None
             sprite_extent = 512.0
-            shadow_fill = None
-            shadow_dx = 0.0
-            shadow_dy = 0.0
+            decor_kind = ""
+            decor_fill = None
+            decor_dx = 0.0
+            decor_dy = 0.0
+            decor_radius = 0.0
+            decor_concentration = 0
             color_key = str(burst["color"])
             fill_brush = brushes.get(color_key)
             if fill_brush is None:
                 fill_brush = QBrush(QColor(color_key))
                 brushes[color_key] = fill_brush
+        if decor_kind == "glow":
+            from krok_helper.subtitle_render.engine.render.elements.horizontal.transitions import (
+                GLOW_HALO_STROKES as glow_halo_strokes,
+            )
+        else:
+            glow_halo_strokes = ()
         if burst["anchor"] == "char":
             char_index = int(burst["char_index"])
             if char_index >= len(char_x_ranges):
@@ -3976,16 +3999,18 @@ def _paint_line_fx_particles(
                 continue
             painter.save()
             try:
-                painter.setOpacity(painter.opacity() * state.alpha)
-                if shadow_fill is not None:
-                    # 阴影剪影层（取色层级=全有）：整剪影（外层轮廓笔宽 =
+                particle_opacity = painter.opacity() * state.alpha
+                painter.setOpacity(particle_opacity)
+                if decor_fill is not None and decor_kind == "shadow":
+                    # 装饰层·阴影（取色层级 +装饰/全有，来源方案
+                    # decoration_kind=shadow）：整剪影（外层轮廓笔宽 =
                     # 描边+二重描边，与文字 paint_shadow_silhouette 同口径）
-                    # 以阴影填充色画在行空间常量偏移处——先于旋转/缩放平移
-                    # 到 (x+dx, y+dy)，保证偏移方向不随粒子自转。
+                    # 以装饰色画在行空间常量偏移处——先于旋转/缩放平移到
+                    # (x+dx, y+dy)，保证偏移方向不随粒子自转。
                     painter.save()
                     try:
                         painter.translate(
-                            state.x + shadow_dx, state.y + shadow_dy
+                            state.x + decor_dx, state.y + decor_dy
                         )
                         painter.rotate(state.rotation_deg)
                         scale = state.size_px / 1000.0
@@ -3993,10 +4018,10 @@ def _paint_line_fx_particles(
                         painter.setRenderHint(
                             QPainter.RenderHint.Antialiasing, True
                         )
-                        shadow_brush = _fx_particle_brush(shadow_fill)
+                        decor_brush = _fx_particle_brush(decor_fill)
                         outer_em = stroke_em + stroke2_em
                         if outer_em >= 1.0:
-                            pen_shadow = QPen(shadow_brush, outer_em)
+                            pen_shadow = QPen(decor_brush, outer_em)
                             pen_shadow.setJoinStyle(
                                 Qt.PenJoinStyle.RoundJoin
                             )
@@ -4007,10 +4032,63 @@ def _paint_line_fx_particles(
                             painter.setBrush(Qt.BrushStyle.NoBrush)
                             painter.drawPath(sprite)
                         painter.setPen(Qt.PenStyle.NoPen)
-                        painter.setBrush(shadow_brush)
+                        painter.setBrush(decor_brush)
                         painter.drawPath(sprite)
                     finally:
                         painter.restore()
+                elif decor_fill is not None and decor_kind == "glow":
+                    # 装饰层·发光（decoration_kind=glow）：多级描边近似高斯
+                    # 弥散晕（与 glow 转场既有配方 GLOW_HALO_STROKES 同源）；
+                    # 浓度档决定叠加趟数（blur 半径递减，与文字
+                    # glow_blur_radii 的 passes 口径一致）。偏移为零（不做
+                    # 位移），半径按粒子尺寸基准折算 em。
+                    pass_count = max(1, decor_concentration + 1)
+                    if decor_radius > 0.0:
+                        painter.save()
+                        try:
+                            painter.translate(state.x, state.y)
+                            painter.rotate(state.rotation_deg)
+                            scale = state.size_px / 1000.0
+                            painter.scale(scale, scale)
+                            painter.setRenderHint(
+                                QPainter.RenderHint.Antialiasing, True
+                            )
+                            decor_brush = _fx_particle_brush(decor_fill)
+                            painter.setBrush(Qt.BrushStyle.NoBrush)
+                            # QPen(QBrush) 重载要求宽度——占位 1.0，
+                            # 逐级 setWidthF。
+                            pen_glow = QPen(decor_brush, 1.0)
+                            pen_glow.setJoinStyle(
+                                Qt.PenJoinStyle.RoundJoin
+                            )
+                            pen_glow.setCapStyle(
+                                Qt.PenCapStyle.RoundCap
+                            )
+                            burst_size_px = max(float(burst_size), 1.0)
+                            for pass_index in range(pass_count):
+                                pass_radius = (
+                                    decor_radius
+                                    * (pass_count - pass_index)
+                                    / pass_count
+                                )
+                                if pass_radius <= 0.0:
+                                    continue
+                                spread_em = (
+                                    pass_radius / burst_size_px * 1000.0
+                                )
+                                for width_factor, strength in glow_halo_strokes:
+                                    width_em = spread_em * width_factor
+                                    if width_em < 0.5:
+                                        continue
+                                    pen_glow.setWidthF(width_em)
+                                    painter.setPen(pen_glow)
+                                    painter.setOpacity(
+                                        particle_opacity * strength
+                                    )
+                                    painter.drawPath(sprite)
+                        finally:
+                            painter.setOpacity(particle_opacity)
+                            painter.restore()
                 painter.translate(state.x, state.y)
                 painter.rotate(state.rotation_deg)
                 scale = state.size_px / 1000.0

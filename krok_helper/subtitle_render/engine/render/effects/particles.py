@@ -23,7 +23,10 @@ import math
 from collections import OrderedDict
 from dataclasses import dataclass
 
-from krok_helper.subtitle_render.domain.models import Style
+from krok_helper.subtitle_render.domain.models import (
+    Style,
+    normalize_glow_concentration_level,
+)
 from krok_helper.subtitle_render.domain.paint import KaraokeColorState, PaintFill
 from krok_helper.subtitle_render.engine.style.style_semantics import (
     appearance_role_source,
@@ -209,7 +212,8 @@ def particle_solid_color(style: Style, char_style: Style | None = None) -> str:
 
 
 # 取色层级（fx_particle_color_layers）：从来源配色态裁剪装饰层。
-# solid=仅实色 / stroke=+描边 / decor=+装饰（二重描边）/ all=全有（+阴影）。
+# solid=仅实色 / stroke=+描边（按方案的描边栈，不加装饰）/
+# decor=+装饰（仅装饰层，不加描边）/ all=全有（描边栈 + 装饰层，完全按方案）。
 PARTICLE_COLOR_LAYERS = ("solid", "stroke", "decor", "all")
 
 
@@ -219,20 +223,35 @@ def _state_paint_spec(
     size_px: float,
     *,
     layers: str,
+    after: bool,
     include_strokes: bool,
     fallback: str,
 ) -> dict[str, object] | None:
     """把一个配色态按**取色层级**折成 burst 级装饰规格（IR dict）。
 
-    ``layers``（``fx_particle_color_layers``）决定从该态取哪些层：
-    ``solid`` 仅实色（返回 ``None``——调用方退纯色剪影）；``stroke``
-    叠加描边层；``decor`` 再叠加二重描边层；``all`` 全有——再叠加阴影层
-    （``shadow`` 填充 + 已按粒子尺寸同比缩放的 ``shadow_offset_*_px``，
-    行空间常量偏移的剪影，与文字 ``paint_shadow_silhouette`` 同口径）。
-    描边宽度按 粒子尺寸/该来源字号 同比缩放（上限半个粒子边长，指示灯
-    装饰管线同款映射）。``include_strokes=False``（涟漪光环）描边/二重
-    描边/阴影全部不取——环体是发丝线，叠装饰会显著变粗（2026-10 用户
-    口径）。图片填充暂折为单独颜色（实色回退，两端一致）。
+    ``layers``（``fx_particle_color_layers``，2026-10 用户口径）：
+
+    - ``solid`` 仅实色——只有主文字色（返回 ``None``，调用方退纯色剪影）；
+    - ``stroke`` +描边——**按角色方案的描边栈**（方案启用二重描边时一起
+      加），**不加装饰**；
+    - ``decor`` +装饰——**不加描边**、仅加装饰层；
+    - ``all`` 全有——描边栈 + 装饰层，完全按角色方案。
+
+    装饰层**不固定阴影**：按来源角色方案的 ``decoration_kind`` 二选一——
+
+    - ``shadow``：行空间常量偏移的剪影（``offset_x/y_px`` 按 粒子尺寸/
+      来源字号 同比缩放），与文字 ``paint_shadow_silhouette`` 同口径；
+    - ``glow``：多级描边近似高斯弥散晕（``radius_px`` 同口径缩放 +
+      ``concentration_level``，``after`` 选走字前/后半径），与 glow 转场
+      的既有双端配方（``GLOW_HALO_STROKES``）同源；
+    - ``none``：装饰层不产出（``decor`` 档退化为纯色，``all`` 档退化为
+      +描边）。
+
+    装饰色取该态的 ``shadow`` 槽（文字发光/阴影同用此槽）。描边宽度按
+    粒子尺寸/该来源字号 同比缩放（上限半个粒子边长）。``include_strokes
+    =False``（涟漪光环）描边/二重描边/装饰全部不取——环体是发丝线，叠
+    装饰会显著变粗（2026-10 用户口径）。图片填充暂折为单独颜色（实色
+    回退，两端一致）。
     """
 
     if layers not in PARTICLE_COLOR_LAYERS or layers == "solid":
@@ -255,18 +274,17 @@ def _state_paint_spec(
             return paint_fill_to_dict(solid)
         return paint_fill_to_dict(fill)
 
-    want_stroke = include_strokes and layers in {"stroke", "decor", "all"}
-    want_stroke2 = include_strokes and layers in {"decor", "all"}
-    want_shadow = include_strokes and layers == "all"
+    want_strokes = include_strokes and layers in {"stroke", "all"}
+    want_decor = include_strokes and layers in {"decor", "all"}
     scale = float(size_px) / max(float(source.font_size_px or 0.0), 1.0)
     half = max(float(size_px) / 2.0, 1.0)
-    if want_stroke:
+    if want_strokes:
         stroke_width = min(
             max(float(source.stroke_width_px or 0) * scale, 0.0), half
         )
     else:
         stroke_width = 0.0
-    if want_stroke2:
+    if want_strokes:
         stroke2_raw = (
             max(int(source.stroke2_width_px or 0), 0)
             if source.stroke2_enabled
@@ -282,14 +300,40 @@ def _state_paint_spec(
         "stroke_width_px": round(stroke_width, 3),
         "stroke2_width_px": round(stroke2_width, 3),
     }
-    if want_shadow:
-        spec["shadow"] = _layer_fill(state.shadow)
-        spec["shadow_offset_x_px"] = round(
-            float(source.shadow_offset_x or 0) * scale, 3
-        )
-        spec["shadow_offset_y_px"] = round(
-            float(source.shadow_offset_y or 0) * scale, 3
-        )
+    if want_decor:
+        # 装饰层随来源角色方案的 decoration_kind 二选一（2026-10 用户口径：
+        # 不是固定阴影）——shadow=偏移剪影；glow=多级描边弥散晕（半径按
+        # 走字前/后取，跟随尺寸同比缩放）；none=不产出。
+        kind = str(getattr(source, "decoration_kind", "none") or "none")
+        if kind in {"shadow", "glow"}:
+            decor: dict[str, object] = {
+                "kind": kind,
+                "fill": _layer_fill(state.shadow),
+            }
+            if kind == "shadow":
+                decor["offset_x_px"] = round(
+                    float(source.shadow_offset_x or 0) * scale, 3
+                )
+                decor["offset_y_px"] = round(
+                    float(source.shadow_offset_y or 0) * scale, 3
+                )
+            else:
+                concentration = normalize_glow_concentration_level(
+                    getattr(source, "glow_concentration_level", 0)
+                )
+                radius = 0
+                if concentration >= 0:
+                    radius = int(
+                        (
+                            source.glow_after_radius_px
+                            if after
+                            else source.glow_before_radius_px
+                        )
+                        or 0
+                    )
+                decor["radius_px"] = round(max(radius, 0) * scale, 3)
+                decor["concentration_level"] = concentration
+            spec["decor"] = decor
     return spec
 
 
@@ -324,6 +368,8 @@ def particle_paint_spec(
         state,
         size_px,
         layers=layers,
+        # 走字前/后态：follow_after 与 role（走字后来源）用后侧发光半径。
+        after=mode != "follow_before",
         include_strokes=include_strokes,
         fallback=fallback,
     )
@@ -374,7 +420,7 @@ def particle_variant_paints(
     def _state_variants(source: Style) -> list[dict[str, object]]:
         colors = effective_karaoke_colors(source)
         out: list[dict[str, object]] = []
-        for state in (colors.before, colors.after):
+        for state, after in ((colors.before, False), (colors.after, True)):
             entry: dict[str, object] = {
                 "color": fill_to_solid_color(state.text, fallback)
             }
@@ -383,6 +429,7 @@ def particle_variant_paints(
                 state,
                 size_px,
                 layers=layers,
+                after=after,
                 include_strokes=include_strokes,
                 fallback=fallback,
             )
@@ -739,8 +786,9 @@ def plan_line_bursts(
         复用一份（见 :func:`_cached_particle_paint`）。涟漪光环不带描边
         （``include_strokes=False``）：环体是发丝线，叠描边显著变粗。
         取色层级（``fx_particle_color_layers``，仅来源配色四档生效）：默认
-        仅实色 = 纯色剪影；+描边 / +装饰 / 全有逐级叠加来源态的描边 /
-        二重描边 / 阴影层（见 :func:`_state_paint_spec`）。
+        仅实色 = 纯色剪影；+描边 = 按方案描边栈（不加装饰）；+装饰 = 仅
+        装饰层（不加描边，阴影/发光按方案）；全有 = 描边栈 + 装饰层（见
+        :func:`_state_paint_spec`）。
 
         ``line_anchor``（入退场星光）：跟随模式下附 ``char_colors`` 逐字
         颜色表——动画仍是整行一条 burst（扫过轨迹不变），绘制端按每颗粒

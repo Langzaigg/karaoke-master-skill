@@ -1510,24 +1510,40 @@ static void applyLineStyleSection(
                         ).toDouble(0.0),
                         0.0
                     );
-                    // 取色层级「全有」的阴影层（2026-10）：偏移为粒子尺寸
-                    // 基准的物理 px（规划期已按 size/字号同比缩放）。
-                    if (paintObject.value(
-                            QStringLiteral("shadow")
-                        ).isObject()) {
-                        burst.hasShadow = true;
-                        burst.shadow = paintFillSpec(
-                            paintObject.value(
-                                QStringLiteral("shadow")
-                            ).toObject(),
-                            burst.color
+                    // 取色层级「+装饰/全有」的装饰层（2026-10）：kind 由
+                    // 来源角色方案的 decoration_kind 选定（不固定阴影）。
+                    const QJsonObject decorObject = paintObject.value(
+                        QStringLiteral("decor")
+                    ).toObject();
+                    if (!decorObject.isEmpty()) {
+                        const QString decorKind = stringValue(
+                            decorObject, QStringLiteral("kind"), QString()
                         );
-                        burst.shadowOffsetX = paintObject.value(
-                            QStringLiteral("shadow_offset_x_px")
-                        ).toDouble(0.0);
-                        burst.shadowOffsetY = paintObject.value(
-                            QStringLiteral("shadow_offset_y_px")
-                        ).toDouble(0.0);
+                        if (decorKind == QStringLiteral("shadow")
+                            || decorKind == QStringLiteral("glow")) {
+                            burst.hasDecor = true;
+                            burst.decorKind = decorKind;
+                            burst.decor = paintFillSpec(
+                                decorObject.value(
+                                    QStringLiteral("fill")
+                                ).toObject(),
+                                burst.color
+                            );
+                            burst.decorOffsetX = decorObject.value(
+                                QStringLiteral("offset_x_px")
+                            ).toDouble(0.0);
+                            burst.decorOffsetY = decorObject.value(
+                                QStringLiteral("offset_y_px")
+                            ).toDouble(0.0);
+                            burst.decorRadius = decorObject.value(
+                                QStringLiteral("radius_px")
+                            ).toDouble(0.0);
+                            burst.decorConcentration = intValue(
+                                decorObject,
+                                QStringLiteral("concentration_level"),
+                                0
+                            );
+                        }
                     }
                 }
                 QJsonArray charColorsArray;

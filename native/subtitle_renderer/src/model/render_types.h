@@ -273,14 +273,18 @@ struct ParticleBurst {
     PaintStyle stroke2;
     float strokeWidth = 0.0f;
     float stroke2Width = 0.0f;
-    // 取色层级「全有」的阴影层（2026-10）：行空间常量偏移的整剪影——
-    // 外层轮廓笔宽 = 描边+二重描边、统一用 shadow 填充色，与文字
-    // paint_shadow_silhouette 同口径。偏移为物理 px（与 strokeWidth 同
-    // 基准，投影时随 scale 同比缩放）。
-    bool hasShadow = false;
-    PaintStyle shadow;
-    float shadowOffsetX = 0.0f;
-    float shadowOffsetY = 0.0f;
+    // 取色层级「+装饰/全有」的装饰层（2026-10）：kind 由来源角色方案的
+    // decoration_kind 选定——"shadow" 用 decor 色画行空间常量偏移的整剪影
+    // （偏移 decorOffsetX/Y，px，与 strokeWidth 同基准）；"glow" 用多级
+    // 描边近似弥散晕（半径 decorRadius px + decorConcentration 档，与
+    // kGlowHaloStrokes 配方同源）。fill 为装饰色（配色态 shadow 槽）。
+    bool hasDecor = false;
+    std::string decorKind;
+    PaintStyle decor;
+    float decorOffsetX = 0.0f;
+    float decorOffsetY = 0.0f;
+    float decorRadius = 0.0f;
+    int decorConcentration = 0;
     // 行锚点星光的逐字实色表（#RRGGBB；空 = 不启用）。
     std::vector<RgbaColor> charColors;
     bool operator==(const ParticleBurst &) const = default;
