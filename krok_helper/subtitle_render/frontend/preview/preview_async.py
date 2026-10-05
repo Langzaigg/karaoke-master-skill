@@ -192,6 +192,47 @@ def _env_int(name: str, default: int, *, minimum: int = 1) -> int:
     return max(int(value), int(minimum))
 
 
+class _GpuRestartBreaker:
+    """GPU sidecar 重启断路器（2026-10 看门狗方案）。
+
+    旧机制只有墙钟超时 + 1s 后无限重试：合法长任务（密集符号的场景构建/
+    realization 预热可达数十秒）被超时误杀，重启丢光进度后重付同样的工作、
+    再次超时——「活着却被反复重启」的西西弗斯循环，残留进程/共享环段随之
+    叠加。断路器在滑动窗口内记录失败重启次数，超限即熔断：本会话停用 GPU
+    预览、固定回退 Painter 并明确告知，循环在构造上被禁止。心跳续租
+    （backend.heartbeat_lease_s）负责让长任务不再被判死，本闸只兜底真故障。
+    """
+
+    def __init__(self, window_s: float | None = None, limit: int | None = None):
+        self.window_s = float(
+            window_s
+            if window_s is not None
+            else _env_int("KROK_SUBTITLE_GPU_RESTART_WINDOW_S", 60)
+        )
+        self.limit = int(
+            limit
+            if limit is not None
+            else _env_int("KROK_SUBTITLE_GPU_RESTART_LIMIT", 3)
+        )
+        self._restart_times: list[float] = []
+        self._open = False
+
+    @property
+    def open(self) -> bool:
+        return self._open
+
+    def record(self, now: float | None = None) -> bool:
+        """记录一次失败重启；返回本窗内累计次数是否已达熔断阈值。"""
+        current = time.monotonic() if now is None else now
+        self._restart_times = [
+            t for t in self._restart_times if current - t < self.window_s
+        ] + [current]
+        if len(self._restart_times) >= self.limit:
+            self._open = True
+            return True
+        return False
+
+
 def _default_native_preview_threads() -> int:
     return min(max(os.cpu_count() or 4, 1), 6)
 
@@ -725,6 +766,9 @@ class GpuAsyncSubtitleRenderer(QObject):
         self._playing = False
         self._stopped = False
         self._renderer_failed = False
+        # 重启断路器（见 _GpuRestartBreaker）：窗口内失败重启超限即熔断，
+        # 本渲染器生命周期内固定回退 Painter，禁止无限重启叠加。
+        self._gpu_restart_breaker = _GpuRestartBreaker()
         self._fallback_gate = _FallbackReportGate(
             self.fallback_occurred.emit, log_label="GPU 字幕预览回退"
         )
@@ -1287,6 +1331,27 @@ class GpuAsyncSubtitleRenderer(QObject):
                             duration_ms,
                         )
                     continue
+                if self._gpu_restart_breaker.open:
+                    # 断路器熔断（失败重启风暴）：不再触碰 GPU 路径——
+                    # 不 _ensure_renderer、不重配，非投机请求补 CPU 帧，
+                    # 投机请求静默丢弃。本会话由熔断时的上报向用户说明。
+                    if not speculative:
+                        now = time.monotonic()
+                        if now - self._last_fallback_emit >= 0.5:
+                            self._last_fallback_emit = now
+                            self._note("fallback_frames_emitted")
+                            self._emit_python_fallback(
+                                track,
+                                style,
+                                extra_tracks,
+                                width,
+                                height,
+                                dpr,
+                                t_ms,
+                                generation,
+                                duration_ms,
+                            )
+                    continue
                 if self._renderer_failed:
                     if time.monotonic() < self._retry_after:
                         if not speculative and self._playing:
@@ -1799,6 +1864,18 @@ class GpuAsyncSubtitleRenderer(QObject):
                         f"GPU 字幕预览异常，当前帧已回退 Painter，稍后会自动重试：{exc}"
                     )
                     self._close_renderer()
+                    if self._gpu_restart_breaker.record():
+                        print(
+                            f"[GPU 预览] {self._gpu_restart_breaker.window_s:.0f}s 内"
+                            f"第 {self._gpu_restart_breaker.limit} 次失败重启，断路器"
+                            "熔断：本会话停用 GPU 预览，固定回退 Painter",
+                            flush=True,
+                        )
+                        self._note("gpu_circuit_open")
+                        self._report_fallback(
+                            "GPU 预览短时间内反复重启，已停止自动重试并固定回退 "
+                            "Painter；关闭再打开预览（或重启应用）后可再次尝试。"
+                        )
                     if not speculative:
                         now = time.monotonic()
                         if now - self._last_fallback_emit >= 0.5:

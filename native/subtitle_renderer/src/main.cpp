@@ -16,6 +16,7 @@
 namespace {
 
 using krok::subtitle::native::protocol::kRenderIrSchema;
+using krok::subtitle::native::protocol::emitProgress;
 using krok::subtitle::native::protocol::parseRequestLine;
 using krok::subtitle::native::protocol::response;
 using krok::subtitle::native::protocol::writeJson;
@@ -61,6 +62,23 @@ int main(int argc, char **argv) {
     CommandRouter router;
     QObject commandContext;
     commandContext.moveToThread(app.thread());
+
+    // 看门狗存活心跳（2026-10）：sidecar 空闲时（暂停/播完/无任务、主
+    // 线程回事件循环等待命令）由定时器每秒喂狗；忙碌时由任务内的
+    // protocol::emitProgress 逐段喂（场景构建/realization 预热/逐帧导
+    // 出——那时主线程阻塞在 dispatch 里，本定时器发不出来，两层互补）。
+    // 主线程与所有工作线程同时停走（真死锁）时两层都停，GUI 的租期到
+    // 期即判死。
+    QTimer idleHeartbeat;
+    QObject::connect(
+        &idleHeartbeat, &QTimer::timeout,
+        &commandContext, []() {
+            krok::subtitle::native::protocol::emitProgress(
+                QStringLiteral("idle"), 0, 0
+            );
+        }
+    );
+    idleHeartbeat.start(1000);
 
     std::atomic<bool> inputOpen{true};
     std::thread reader([&router, &commandContext, &inputOpen]() {

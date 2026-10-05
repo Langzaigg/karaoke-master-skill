@@ -5480,3 +5480,124 @@ def test_native_preview_frame_cache_key_grid_roundtrip():
         snapped = cache.timestamp_for_key(key)
         assert cache.key_for(snapped) == key
         assert abs(snapped - raw_t) <= 1000 / 60 / 2 + 1
+
+
+# ---------------------------------------------------------------------------
+# 看门狗（2026-10）：progress 心跳续租 + GPU 重启断路器。
+# 旧机制纯墙钟超时（30s）+ 1s 后无限重试：合法长任务（密集符号场景构建/
+# realization 预热可达数十秒）被误杀，重启丢光进度后重付同样的工作再次超
+# 时——「活着却被反复重启」的西西弗斯循环。看门狗以进度心跳续租区分「忙
+# 碌」与「死锁」，断路器在窗口超限时熔断，禁止无限重启叠加。
+# ---------------------------------------------------------------------------
+
+def test_gpu_restart_breaker_trips_within_window():
+    from krok_helper.subtitle_render.frontend.preview.preview_async import (
+        _GpuRestartBreaker,
+    )
+
+    breaker = _GpuRestartBreaker(window_s=60.0, limit=3)
+    assert breaker.record(now=0.0) is False
+    assert breaker.record(now=1.0) is False
+    assert breaker.record(now=2.0) is True
+    assert breaker.open
+
+
+def test_gpu_restart_breaker_expires_old_restarts():
+    from krok_helper.subtitle_render.frontend.preview.preview_async import (
+        _GpuRestartBreaker,
+    )
+
+    breaker = _GpuRestartBreaker(window_s=60.0, limit=3)
+    breaker.record(now=0.0)
+    breaker.record(now=1.0)
+    # 旧记录滑出窗口后不计：t=70 时窗内只剩它自己。
+    assert breaker.record(now=70.0) is False
+    assert breaker.open is False
+
+
+def _fake_heartbeat_renderer(**attrs):
+    """构造不spawn进程的 NativeRendererProcess 测试件（心跳续租用）。"""
+    import collections
+    import queue as queue_mod
+    import threading
+
+    from krok_helper.subtitle_render.native.backend import NativeRendererProcess
+
+    proc = object.__new__(NativeRendererProcess)
+    proc._stdout_queue = queue_mod.Queue()
+    proc._event_backlog = collections.deque()
+    proc._stderr_tail = collections.deque(maxlen=80)
+    proc._stdout_noise_tail = collections.deque(maxlen=20)
+    proc._stderr_lock = threading.Lock()
+    proc._stdout_noise_lock = threading.Lock()
+    proc._last_heartbeat_monotonic = 0.0
+
+    class _FakeProcess:
+        pid = 424242
+
+        def poll(self):
+            return None
+
+    proc._process = _FakeProcess()
+    proc.response_timeout_s = 0.2
+    for key, value in attrs.items():
+        setattr(proc, key, value)
+    return proc
+
+
+def test_read_until_event_heartbeat_lease_keeps_busy_sidecar_alive():
+    """progress 心跳续租：目标事件晚于初始超时到达也能等到（不误杀忙碌 sidecar）。"""
+    from krok_helper.subtitle_render.native.backend import NativeRendererProcess
+
+    proc = _fake_heartbeat_renderer()
+
+    def late_heartbeat_then_target():
+        # 初始超时（0.2s）到期前推进心跳时间戳（任务内逐段喂狗），目标
+        # 事件在初始超时之后才送达——只有续租能救。
+        time.sleep(0.12)
+        proc._last_heartbeat_monotonic = time.monotonic()
+        time.sleep(0.25)
+        proc._stdout_queue.put(
+            '{"ok": true, "event": "gpu_configured"}'
+        )
+
+    threading.Thread(target=late_heartbeat_then_target, daemon=True).start()
+    payload = proc._read_until_event(
+        "gpu_configured", timeout_s=0.2, heartbeat_lease_s=5.0
+    )
+    assert payload["event"] == "gpu_configured"
+
+
+def test_read_until_event_heartbeat_stall_still_times_out():
+    """心跳停滞后超过租期必须照常超时（真死锁不被续租掩盖）。"""
+    from krok_helper.subtitle_render.native.backend import NativeRendererError
+
+    proc = _fake_heartbeat_renderer()
+    # 心跳时间戳保持远古值（从未喂狗）：租期不给任何信用。
+    with pytest.raises(NativeRendererError):
+        proc._read_until_event(
+            "gpu_configured", timeout_s=0.2, heartbeat_lease_s=0.3
+        )
+
+
+def test_enqueue_stdout_records_heartbeat_without_queueing():
+    """progress 心跳只刷新存活时间戳、不进响应队列——空闲喂狗不会堆积。"""
+    import io
+    import json as json_mod
+    import queue as queue_mod
+
+    proc = _fake_heartbeat_renderer()
+    stream = io.StringIO(
+        '{"ok":true,"event":"progress","phase":"idle","done":0,"total":0}' + "\n"
+        '{"ok": true, "event": "frame", "frame": 7}' + "\n"
+    )
+    proc._enqueue_stdout(stream)
+    lines = []
+    while True:
+        item = proc._stdout_queue.get_nowait()
+        if item is None:
+            break
+        lines.append(item)
+    assert len(lines) == 1
+    assert json_mod.loads(lines[0])["event"] == "frame"
+    assert proc._last_heartbeat_monotonic > 0.0

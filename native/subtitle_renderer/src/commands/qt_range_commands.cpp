@@ -192,6 +192,13 @@ void launchRenderRangeJob(
                 }
                 ++completedFrames;
                 resultReady.notify_all();
+                // 看门狗心跳：导出是分钟级长任务，逐帧上报进度（跨工作
+                // 线程均经 250ms 节流），GUI 续租等待。
+                krok::subtitle::native::protocol::emitProgress(
+                    QStringLiteral("range"),
+                    static_cast<std::uint64_t>(completedFrames.load()),
+                    static_cast<std::uint64_t>(timestamps.size())
+                );
             }
             --activeWorkers;
             resultReady.notify_all();

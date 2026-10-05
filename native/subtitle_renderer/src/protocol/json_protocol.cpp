@@ -1,5 +1,6 @@
 #include "json_protocol.h"
 
+#include <QtCore/QDateTime>
 #include <QtCore/QJsonDocument>
 #include <QtCore/QJsonParseError>
 
@@ -106,6 +107,20 @@ void writeJson(const QJsonObject &object) {
     const QJsonDocument document(object);
     std::cout << document.toJson(QJsonDocument::Compact).constData()
               << std::endl;
+}
+
+void emitProgress(const QString &phase, std::uint64_t done, std::uint64_t total) {
+    thread_local qint64 lastEmitMs = -(1LL << 30);
+    const qint64 nowMs = QDateTime::currentMSecsSinceEpoch();
+    if (done != total && nowMs - lastEmitMs < 250) {
+        return;
+    }
+    lastEmitMs = nowMs;
+    QJsonObject out = response(true, QStringLiteral("progress"));
+    out.insert(QStringLiteral("phase"), phase);
+    out.insert(QStringLiteral("done"), static_cast<double>(done));
+    out.insert(QStringLiteral("total"), static_cast<double>(total));
+    writeJson(out);
 }
 
 }  // namespace krok::subtitle::native::protocol

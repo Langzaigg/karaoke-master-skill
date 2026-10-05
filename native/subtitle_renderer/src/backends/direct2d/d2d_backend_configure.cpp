@@ -5,6 +5,11 @@
 #include "d2d_geometry_resources.h"
 #include "d2d_paint_resources.h"
 #include "d2d_runtime_support.h"
+// 本 TU 原本 Qt-free，局部变量名 slots 与 Qt 的关键字宏冲突——在本
+// TU 内禁用 signals/slots/emit 宏后再引入协议头（仅心跳上报用）。
+#define QT_NO_KEYWORDS
+#include "../../protocol/json_protocol.h"
+#undef QT_NO_KEYWORDS
 #include "../text_semantics.h"
 
 #include <d2d1_2.h>
@@ -767,7 +772,15 @@ void Direct2DGpuBackend::configure(const RenderScene &scene) {
         return translatedGeometry(entry->second.Get(), offsetX, offsetY, operation);
     };
 
-    for (std::size_t lineIndex = 0; lineIndex < scene.lines.size(); ++lineIndex) {
+    for (std::size_t lineIndex = 0; lineIndex < scene.lines.size();
+         ++lineIndex) {
+        // 看门狗心跳：场景构建是 configure 响应路径上的主线程长任务，
+        // 逐行上报进度让 GUI 续租等待（见 protocol::emitProgress）。
+        krok::subtitle::native::protocol::emitProgress(
+            QStringLiteral("scene"),
+            lineIndex,
+            scene.lines.size()
+        );
         const TextLine &sourceLine = scene.lines[lineIndex];
         const TextStyle &style = lineIndex < scene.lineStyles.size()
             ? scene.lineStyles[lineIndex]
@@ -3118,7 +3131,17 @@ void Direct2DGpuBackend::configure(const RenderScene &scene) {
                     sliceStart = Clock::now();
                 }
             };
+            // 看门狗心跳：逐任务上报。单个任务可能合法耗时数十秒（密集
+            // 矢量路径 × 宽描边的 CPU 细分），任务间的心跳保证「忙碌但在
+            // 推进」期间 GUI 的等待租期持续续期，不被墙钟超时误杀。
+            std::size_t taskIndex = 0;
             for (const Impl::RealizationTask &task : tasks) {
+                krok::subtitle::native::protocol::emitProgress(
+                    QStringLiteral("realize"),
+                    taskIndex,
+                    tasks.size()
+                );
+                ++taskIndex;
                 const auto waitStart = Clock::now();
                 if (!waitForFrameGap()) {
                     break;

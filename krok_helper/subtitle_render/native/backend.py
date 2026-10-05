@@ -60,6 +60,26 @@ def shared_memory_detach_timeout_s() -> float:
     return value if value > 0 else _DEFAULT_SHM_DETACH_TIMEOUT_S
 
 
+_DEFAULT_HEARTBEAT_LEASE_S = 10.0
+
+
+def heartbeat_lease_s() -> float:
+    """看门狗租期（秒）：sidecar 心跳（progress 事件）一次能续多久的等待。
+
+    ``KROK_SUBTITLE_HEARTBEAT_LEASE_S`` 覆盖。sidecar 的长任务（场景构建/
+    realization 预热/逐帧导出）每 250ms 上报心跳；租期必须远大于该节流间隔
+    （默认 10s = 连丢 40 拍才判死），只拦截真死锁，不误杀慢活。
+    """
+    raw = os.environ.get("KROK_SUBTITLE_HEARTBEAT_LEASE_S")
+    if raw is None or not raw.strip():
+        return _DEFAULT_HEARTBEAT_LEASE_S
+    try:
+        value = float(raw)
+    except ValueError:
+        return _DEFAULT_HEARTBEAT_LEASE_S
+    return value if value > 0 else _DEFAULT_HEARTBEAT_LEASE_S
+
+
 def abandoned_shared_memory_count() -> int:
     """detach 尚未返回的共享内存块数（含刚被放弃的那些，诊断用）。"""
     with _ABANDONED_SHARED_MEMORY_LOCK:
@@ -777,6 +797,10 @@ class NativeRendererProcess:
         self._stderr_tail: deque[str] = deque(maxlen=80)
         self._stdout_noise_tail: deque[str] = deque(maxlen=20)
         self._event_backlog: deque[dict[str, Any]] = deque()
+        # 看门狗心跳时间戳：管道线程见到 progress 事件就刷新（float 赋值
+        # 原子，无需锁）。sidecar 忙碌时任务内逐段上报、空闲时由存活
+        # 定时器上报（暂停/播完/无任务同样喂狗）；时间戳停走 = 真死锁。
+        self._last_heartbeat_monotonic: float = 0.0
         # 导唱符轮廓表哈希门的进程内记忆（None = 从未发过表，首次必发）。
         # 生命周期与本 sidecar 进程一致：重启即新实例、记忆清零。
         self._last_vector_glyphs_hash: str | None = None
@@ -934,7 +958,11 @@ class NativeRendererProcess:
                 self._last_vector_glyphs_hash = table_hash
         self._send({"cmd": "configure", "ir": ir})
         return self._expect_ok(
-            self._read_until_event("configured", timeout_s=self.configure_timeout_s)
+            self._read_until_event(
+                "configured",
+                timeout_s=self.configure_timeout_s,
+                heartbeat_lease_s=heartbeat_lease_s(),
+            )
         )
 
     def backend_info(self, *, force_warp: bool = False) -> dict[str, Any]:
@@ -1007,6 +1035,7 @@ class NativeRendererProcess:
             self._read_until_event(
                 "gpu_configured",
                 timeout_s=self.gpu_configure_timeout_s,
+                heartbeat_lease_s=heartbeat_lease_s(),
             )
         )
 
@@ -1055,6 +1084,7 @@ class NativeRendererProcess:
             self._read_until_event(
                 "gpu_configured",
                 timeout_s=self.gpu_configure_timeout_s,
+                heartbeat_lease_s=heartbeat_lease_s(),
             )
         )
 
@@ -1087,6 +1117,7 @@ class NativeRendererProcess:
             self._read_until_event(
                 "gpu_configured",
                 timeout_s=self.gpu_resize_timeout_s,
+                heartbeat_lease_s=heartbeat_lease_s(),
             )
         )
 
@@ -1400,7 +1431,9 @@ class NativeRendererProcess:
         self._send(
             payload
         )
-        return self._expect_ok(self._read_until_event("range_started"))
+        return self._expect_ok(self._read_until_event(
+            "range_started", heartbeat_lease_s=heartbeat_lease_s()
+        ))
 
     def cancel_generation(self, generation: int) -> dict[str, Any]:
         self._send({"cmd": "cancel_generation", "generation": int(generation)})
@@ -1484,17 +1517,61 @@ class NativeRendererProcess:
         event: str,
         *,
         timeout_s: float | None = None,
+        heartbeat_lease_s: float | None = None,
     ) -> dict[str, Any]:
+        """等待目标事件；``heartbeat_lease_s`` 非 None 时启用看门狗续租。
+
+        sidecar 的长任务（场景构建 / realization 预热 / 逐帧导出）会持续
+        上报 progress 心跳（250ms 节流）。每收到一拍就把截止时间续到
+        ``now + lease``——「忙碌但在推进」的 sidecar 永不被墙钟超时误杀
+        （超时上限 < 合法工作时长的西西弗斯循环由根上关闭）；心跳停滞
+        超过租期才判死（真死锁）。progress 是即发即弃遥测，不进积压队列。
+        """
         kept: deque[dict[str, Any]] = deque()
         while self._event_backlog:
             payload = self._event_backlog.popleft()
+            if payload.get("event") == "progress":
+                continue
             if payload.get("event") == event or not payload.get("ok", False):
                 self._event_backlog.extendleft(reversed(kept))
                 return payload
             kept.append(payload)
         self._event_backlog = kept
+        if heartbeat_lease_s is None:
+            while True:
+                payload = self._read_response(timeout_s=timeout_s, waiting_for=event)
+                if payload.get("event") == event or not payload.get("ok", False):
+                    return payload
+                self._event_backlog.append(payload)
+        # 看门狗租期：等待期间心跳时间戳每前进一次，就把截止续到
+        # 「最近心跳 + 租期」。sidecar 忙碌（任务内逐段上报）与空闲
+        # （存活定时器喂狗，暂停/播完/无任务同样上报）都会推进时间戳；
+        # 只有主线程与所有工作线程同时停走（真死锁）才会停滞——超过初
+        # 始超时与租期后照常判死，不会被续租掩盖。
+        base_deadline = time.monotonic() + self._resolved_timeout(timeout_s)
+        last_heartbeat = self._last_heartbeat_monotonic
+        deadline = max(base_deadline, last_heartbeat + heartbeat_lease_s)
         while True:
-            payload = self._read_response(timeout_s=timeout_s, waiting_for=event)
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                process = self._current_process()
+                raise NativeRendererError(
+                    self._format_timeout_error(
+                        process,
+                        timeout_s=self._resolved_timeout(timeout_s),
+                        waiting_for=event,
+                    )
+                )
+            payload = self._read_response_or_none(
+                timeout_s=remaining, waiting_for=event
+            )
+            if payload is None:
+                if self._last_heartbeat_monotonic > last_heartbeat:
+                    last_heartbeat = self._last_heartbeat_monotonic
+                    deadline = max(
+                        deadline, last_heartbeat + heartbeat_lease_s
+                    )
+                continue
             if payload.get("event") == event or not payload.get("ok", False):
                 return payload
             self._event_backlog.append(payload)
@@ -1540,6 +1617,14 @@ class NativeRendererProcess:
     def _enqueue_stdout(self, stream: Any) -> None:
         try:
             for line in iter(stream.readline, ""):
+                # progress 心跳是即发即弃遥测：只刷新存活时间戳，不进响
+                # 应队列——空闲存活心跳（sidecar 暂停/播完/无任务时的喂狗）
+                # 不会在队列里无界堆积，等待侧按时间戳续租（见
+                # _read_until_event 的 heartbeat_lease_s）。Compact JSON 的
+                # 键序固定，子串判定足够且免去每行完整解析。
+                if '"event":"progress"' in line:
+                    self._last_heartbeat_monotonic = time.monotonic()
+                    continue
                 self._stdout_queue.put(line)
         except (ValueError, OSError):
             # close() 在 join 超时后会直接关闭管道以解除 readline 阻塞；
