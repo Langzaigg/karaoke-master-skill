@@ -9151,7 +9151,7 @@ def test_preview_player_controls_auto_hide_and_restore(qapp):
     assert preview._bottom_controls.isVisible() is True
 
 
-def test_preview_player_idle_timeout_keeps_controls_while_mouse_inside(qapp, monkeypatch):
+def test_preview_player_idle_timeout_hides_controls_even_with_mouse_inside(qapp, monkeypatch):
     win = mw.SubtitleRenderWindow(embedded=False)
     preview = win._preview_window
     preview.show()
@@ -9161,9 +9161,12 @@ def test_preview_player_idle_timeout_keeps_controls_while_mouse_inside(qapp, mon
 
     preview._on_controls_idle_timeout()
 
+    # 2026-10 起空闲即隐藏，不再因「光标停在窗口内」续期：G6 输入转发
+    # 修复后光标悬停也持续有 mouse move，underMouse 恒真会让控件永不隐藏。
+    # 顶栏（标题栏）保留，底栏隐藏；任何移动经 eventFilter 重新唤出。
     assert preview._top_controls.isVisible() is True
-    assert preview._bottom_controls.isVisible() is True
-    assert preview._hide_controls_timer.isActive() is True
+    assert preview._bottom_controls.isVisible() is False
+    assert preview._hide_controls_timer.isActive() is False
 
 
 def test_preview_player_transport_bar_uses_overlay_style(qapp):
@@ -9630,7 +9633,8 @@ def test_main_window_gpu_preferences_are_local_and_persisted(qapp, monkeypatch):
     win = mw.SubtitleRenderWindow(embedded=True, settings_provider=provider)
     assert win._gpu_preview_check.text() == "使用 GPU 渲染字幕预览"
     assert win._gpu_export_check.text() == "使用 GPU 渲染字幕导出"
-    assert "使用 AMD 硬件编码时会在后台近似换算" in win._export_crf_spin.toolTip()
+    assert "AMD AMF (QVBR) 会在后台换算" in win._export_crf_spin.toolTip()
+    assert "AMD AMF (CQP) 则直接作为固定量化参数直通" in win._export_crf_spin.toolTip()
     calls = []
     monkeypatch.setattr(
         win._preview_panel,
