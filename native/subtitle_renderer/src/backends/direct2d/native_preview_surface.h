@@ -38,6 +38,14 @@ private:
     HWND parentWindow_ = nullptr;
     int width_ = 0;
     int height_ = 0;
+    // 最近一次实际下发的子窗口矩形（客户区物理像素）。present 每帧都会调
+    // ensureWindow——几何未变时跳过 SetWindowPos，避免按呈现节拍做窗口管
+    // 理操作（低端 DWM 上与视频呈现层互相搅动 = 频闪，2026-10）。-1 表示
+    // 尚未放置（窗口刚建 / close 后重建）。
+    int placedX_ = -1;
+    int placedY_ = -1;
+    int placedWidth_ = -1;
+    int placedHeight_ = -1;
     Microsoft::WRL::ComPtr<IDXGISwapChain1> swapChain_;
     Microsoft::WRL::ComPtr<IDCompositionDevice> compositionDevice_;
     Microsoft::WRL::ComPtr<IDCompositionTarget> compositionTarget_;

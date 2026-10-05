@@ -208,6 +208,12 @@ class SubtitleGraphicsItem(QGraphicsItem):
         self.update()
 
     def clear_async_image(self) -> None:
+        if self._async_image is None:
+            # G6 到点呈现每拍都会清一次（_on_native_frame_presented）——空图
+            # 时也无条件 update() 会让视口按呈现节拍整块重绘（含底下视频项
+            # 区域），弱合成器上表现为频闪（2026-10 低配机报告）。无图可清
+            # 即零操作；真有 CPU 残留图时才清并触发一次重绘。
+            return
         self._async_image = None
         self.update()
 

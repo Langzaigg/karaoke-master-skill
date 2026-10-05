@@ -172,10 +172,17 @@ void NativePreviewSurface::ensureWindow(const NativePreviewTarget &target) {
         }
         parentWindow_ = parent;
     }
-    if (!SetWindowPos(
-            window_, HWND_TOP, target.x, target.y, target.width, target.height,
-            SWP_NOACTIVATE | SWP_SHOWWINDOW)) {
-        throw BackendError("SetWindowPos(native preview) failed");
+    if (placedX_ != target.x || placedY_ != target.y
+        || placedWidth_ != target.width || placedHeight_ != target.height) {
+        if (!SetWindowPos(
+                window_, HWND_TOP, target.x, target.y, target.width, target.height,
+                SWP_NOACTIVATE | SWP_SHOWWINDOW)) {
+            throw BackendError("SetWindowPos(native preview) failed");
+        }
+        placedX_ = target.x;
+        placedY_ = target.y;
+        placedWidth_ = target.width;
+        placedHeight_ = target.height;
     }
     pumpWindowMessages();
 }
@@ -346,6 +353,11 @@ void NativePreviewSurface::close() noexcept {
         window_ = nullptr;
     }
     parentWindow_ = nullptr;
+    // 窗口已销毁：下次重建必须重新放置（placed 记忆随窗口失效）。
+    placedX_ = -1;
+    placedY_ = -1;
+    placedWidth_ = -1;
+    placedHeight_ = -1;
 }
 
 }  // namespace krok::subtitle::native

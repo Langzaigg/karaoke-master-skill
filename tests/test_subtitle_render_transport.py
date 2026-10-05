@@ -5859,3 +5859,92 @@ def test_gpu_native_frame_store_default_matches_g5_cache_formula(qapp, monkeypat
         assert renderer._native_frame_store_capacity == 25  # noqa: SLF001
     finally:
         renderer.stop()
+
+
+def test_gpu_native_frame_failure_keeps_sidecar_alive(qapp, monkeypatch):
+    """G6 帧级瞬态失败不杀 sidecar（频闪三笔之三，2026-10）。
+
+    杀进程 = DComp 子窗口随进程销毁，字幕层整层消失、1 秒重启后闪现——
+    低配机上反复发生就是频闪。帧级失败（streak 耗尽进 renderer_failed）
+    必须保留进程与子窗口，屏幕冻结在最后一帧呈现上；断路器熔断与
+    configure 阶段失败（楔死信号）才走杀进程链。
+    """
+    from krok_helper.subtitle_render.frontend.preview import preview_async as pa
+    from krok_helper.subtitle_render.domain.models import Style, TimingTrack
+    from krok_helper.subtitle_render.native.backend import NativeRendererError
+
+    close_calls = {"n": 0}
+
+    class FakeGpuProcess:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def start(self):
+            return {"ok": True, "event": "ready"}
+
+        def configure_gpu(self, *args, **kwargs):
+            return {"ok": True, "event": "gpu_configured", "native_preview": True}
+
+        def resize_gpu_target(self, *args, **kwargs):
+            return {"ok": True, "event": "gpu_configured", "worker_count": 1}
+
+        def render_gpu_frame_direct(self, t_ms, **kwargs):
+            raise NativeRendererError("bounded frame timeout (simulated)")
+
+        def close(self):
+            close_calls["n"] += 1
+
+    monkeypatch.setattr(pa, "gpu_native_preview_enabled", lambda: True)
+    monkeypatch.setattr(pa, "NativeRendererProcess", FakeGpuProcess)
+    renderer = pa.GpuAsyncSubtitleRenderer(320, 180)
+    try:
+        renderer.set_native_target(12345, 0, 0, 320, 180)
+        renderer.set_state(TimingTrack(), Style())
+        renderer.request(1000)
+        deadline = time.monotonic() + 5.0
+        while time.monotonic() < deadline:
+            qapp.processEvents()
+            if renderer.stats_snapshot()["renderer_failures"] >= 1:
+                break
+            time.sleep(0.01)
+        stats = renderer.stats_snapshot()
+        assert stats["renderer_failures"] >= 1, "应到达失败链"
+        # 帧级 streak 重试链先走满（streak 1..4），第 5 次失败才进失败链。
+        assert stats["frame_error_retries"] >= 4
+        assert close_calls["n"] == 0, "G6 帧级失败不得杀 sidecar（子窗口须存活）"
+        assert stats["gpu_circuit_open"] == 0, "单次失败不应熔断"
+    finally:
+        renderer.stop()
+
+
+def test_clear_async_image_is_noop_without_residual_image():
+    """clear_async_image 空图零操作（频闪三笔之一，2026-10）。
+
+    G6 到点呈现每拍都清一次：空图时再无条件 update() 会让视口按呈现节拍
+    整块重绘（含视频区域），弱合成器上表现为频闪。真有 CPU 残留图时仍须
+    清掉并重绘一次（双绘防护语义不变）。
+    """
+    from PyQt6.QtGui import QImage
+
+    from krok_helper.subtitle_render.frontend.preview.preview_graphics import (
+        SubtitleGraphicsItem,
+    )
+
+    item = SubtitleGraphicsItem(320, 180)
+    updates = {"n": 0}
+    original_update = item.update
+
+    def counting_update(*args, **kwargs):
+        updates["n"] += 1
+        return original_update(*args, **kwargs)
+
+    item.update = counting_update
+    # 空图清零：零操作。
+    item.clear_async_image()
+    assert updates["n"] == 0
+    # 有残留图：清掉并触发一次重绘（G5→G6 切换/失败恢复的 CPU 幽灵帧防护）。
+    item.set_async_image(QImage(4, 4, QImage.Format.Format_ARGB32_Premultiplied))
+    updates["n"] = 0
+    item.clear_async_image()
+    assert updates["n"] == 1
+    assert item._async_image is None  # noqa: SLF001

@@ -1948,12 +1948,28 @@ class GpuAsyncSubtitleRenderer(QObject):
                         self._needs_configure = True
                         self._needs_target_resize = False
                     self._note("renderer_failures")
+                    breaker_open = self._gpu_restart_breaker.record()
+                    if (
+                        self._native_preview
+                        and not breaker_open
+                        and not isinstance(exc, _ConfigPhaseError)
+                    ):
+                        # G6 帧级失败保留 sidecar 与 DComp 子窗口（2026-10 低配
+                        # 机频闪主源）：杀进程会让字幕层整层消失，1 秒后重启再
+                        # 闪现——弱机上反复发生就是频闪。保留进程时屏幕冻结在
+                        # 最后一帧呈现上，重试走同进程重配。真楔死由两条既有
+                        # 通路收尾：断路器熔断（breaker_open）与 configure 阶段
+                        # 失败（_ConfigPhaseError——native 楔死时重发死进程只会
+                        # 白等超时，2026-10 拖大后永久卡死的教训），两者照旧
+                        # 杀进程重建。
+                        pass
+                    else:
+                        self._close_renderer()
                     self._note_backend_mode("cpu")
                     self._report_fallback(
                         f"GPU 字幕预览异常，当前帧已回退 Painter，稍后会自动重试：{exc}"
                     )
-                    self._close_renderer()
-                    if self._gpu_restart_breaker.record():
+                    if breaker_open:
                         print(
                             f"[GPU 预览] {self._gpu_restart_breaker.window_s:.0f}s 内"
                             f"第 {self._gpu_restart_breaker.limit} 次失败重启，断路器"
