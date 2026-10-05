@@ -5,6 +5,9 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 
+from krok_helper.subtitle_render.engine.export.encoder_select import (
+    DEFAULT_VIDEO_BITRATE_MBPS,
+)
 from krok_helper.subtitle_render.domain.background import BackgroundSource
 from krok_helper.subtitle_render.domain.models import Style
 from krok_helper.subtitle_render.domain.timing import TimingTrack
@@ -87,3 +90,5 @@ class RenderJob:
     """Frame-rendering process count; ``None`` selects the automatic policy."""
     extra_tracks: tuple[TimingTrack, ...] = ()
     """Additional subtitle sources composited after the primary track."""
+    bitrate_mbps: int = DEFAULT_VIDEO_BITRATE_MBPS
+    """Average video bitrate in Mbps for VideoToolbox encoding."""

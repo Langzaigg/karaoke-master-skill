@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import pytest
+
 from krok_helper.subtitle_render.engine.export import encoder_select as enc
 
 
@@ -151,3 +153,48 @@ def test_auto_hevc_picks_hevc_hardware_and_falls_back_to_x265(monkeypatch):
 def test_normalize_video_codec_falls_back_to_h264():
     assert enc.normalize_video_codec("hevc") == "hevc"
     assert enc.normalize_video_codec("av1") == "h264"
+
+
+@pytest.mark.parametrize("codec", ["h264", "hevc"])
+def test_auto_videotoolbox_uses_bitrate_and_reports_encoder(monkeypatch, codec):
+    """仅当前格式支持 VideoToolbox 时，使用码率参数并返回编码器名称；另一格式回退 CPU。"""
+    monkeypatch.setattr(
+        enc, "_available_encoders", lambda _: frozenset({f"{codec}_videotoolbox"})
+    )
+    options = enc.video_encoder_options(
+        "ffmpeg", "auto", crf=18, preset="slow", codec=codec, bitrate_mbps=32,
+    )
+    assert options == [
+        "-c:v", f"{codec}_videotoolbox", "-allow_sw", "0", "-b:v", "32000000",
+        *(["-tag:v", "hvc1"] if codec == "hevc" else []),
+    ]
+    assert enc.resolved_encoder_label("ffmpeg", "auto", codec) == (
+        f"Apple VideoToolbox({codec}_videotoolbox)"
+    )
+    other_codec = "hevc" if codec == "h264" else "h264"
+    assert enc.resolve_encoder_mode("ffmpeg", "auto", other_codec) == "cpu"
+
+
+@pytest.mark.parametrize("hardware,expected", [
+    ("h264_nvenc", "nvenc"), ("h264_qsv", "qsv"), ("h264_amf", "amf_cqp"),
+])
+def test_videotoolbox_preserves_existing_auto_priority(monkeypatch, hardware, expected):
+    """NVENC、QSV 或 AMF 与 VideoToolbox 同时可用时，自动选择前者。"""
+    monkeypatch.setattr(
+        enc, "_available_encoders", lambda _: frozenset({hardware, "h264_videotoolbox"})
+    )
+    assert enc.resolve_encoder_mode("ffmpeg", "auto") == expected
+
+
+@pytest.mark.parametrize("codec", ["h264", "hevc"])
+def test_explicit_videotoolbox_bitrate_is_independent_of_quality(codec):
+    """质量值为 0 或 51 时，VideoToolbox 均使用指定的平均码率。"""
+    for crf in (0, 51):
+        options = enc.video_encoder_options(
+            "ffmpeg", "videotoolbox", crf=crf, preset="medium", codec=codec,
+            bitrate_mbps=25,
+        )
+        assert options == [
+            "-c:v", f"{codec}_videotoolbox", "-allow_sw", "0", "-b:v", "25000000",
+            *(["-tag:v", "hvc1"] if codec == "hevc" else []),
+        ]

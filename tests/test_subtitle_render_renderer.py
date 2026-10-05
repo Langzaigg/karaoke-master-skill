@@ -1191,7 +1191,12 @@ def test_gpu_export_runtime_failure_restarts_with_painter(monkeypatch, tmp_path)
     assert any("进度会重新从 0 开始计数" in message for message in logs)
 
 
-def test_render_retries_amf_initialization_failure_with_cpu(monkeypatch, tmp_path):
+@pytest.mark.parametrize("mode,encoder,error", [
+    ("amf", "h264_amf", "CreateComponent failed with error AMF_OUT_OF_MEMORY"),
+    ("videotoolbox", "h264_videotoolbox", "Cannot create compression session: -12915"),
+])
+def test_render_retries_hardware_initialization_failure_with_cpu(monkeypatch, tmp_path, mode, encoder, error):
+    """模拟硬编初始化失败后从头使用 CPU 重试，并使用保存的质量值。"""
     job = replace(
         _job(tmp_path),
         width=2,
@@ -1199,13 +1204,13 @@ def test_render_retries_amf_initialization_failure_with_cpu(monkeypatch, tmp_pat
         fps=2,
         duration_ms=1_000,
         gpu_export_enabled=False,
-        encoder_mode="amf",
+        encoder_mode=mode,
+        crf=22,
+        bitrate_mbps=35,
     )
     failed = _FakeRenderProcess(job.output_path)
     failed.returncode = 1
-    failed.stdout = [
-        b"[h264_amf] CreateComponent failed with error AMF_OUT_OF_MEMORY\n"
-    ]
+    failed.stdout = [f"[{encoder}] {error}\n".encode()]
     succeeded = _FakeRenderProcess(job.output_path)
     processes = [failed, succeeded]
     commands: list[list[str]] = []
@@ -1224,16 +1229,26 @@ def test_render_retries_amf_initialization_failure_with_cpu(monkeypatch, tmp_pat
     monkeypatch.setattr(renderer.subprocess, "Popen", fake_popen)
 
     assert render_subtitle_video(job, logger=logs.append) == job.output_path
-    assert "h264_amf" in commands[0]
+    assert encoder in commands[0]
     assert "libx264" in commands[1]
+    # CPU 重试使用保存的 CRF 22，命令中没有平均码率参数。
+    assert commands[1][commands[1].index("-crf") + 1] == "22"
+    assert "-b:v" not in commands[1]
+    if mode == "videotoolbox":
+        assert commands[0][commands[0].index("-b:v") + 1] == "35000000"
+        assert any("平均码率 35 Mbps" in message for message in logs)
     assert any("已自动切换 CPU 编码" in message for message in logs)
     assert any("进度会重新从 0 开始" in message for message in logs)
 
 
-def test_render_retries_amf_broken_pipe_with_cpu(monkeypatch, tmp_path):
-    class _BrokenAmfStdin(_FakeRenderStdin):
+@pytest.mark.parametrize("mode,encoder", [
+    ("amf", "h264_amf"), ("videotoolbox", "h264_videotoolbox"),
+])
+def test_render_retries_hardware_broken_pipe_with_cpu(monkeypatch, tmp_path, mode, encoder):
+    """硬编初始化失败并导致写帧断管时，从头使用 CPU 重试。"""
+    class _BrokenHardwareStdin(_FakeRenderStdin):
         def write(self, _payload):
-            raise BrokenPipeError("AMF encoder exited during initialization")
+            raise BrokenPipeError("hardware encoder exited during initialization")
 
     job = replace(
         _job(tmp_path),
@@ -1242,12 +1257,12 @@ def test_render_retries_amf_broken_pipe_with_cpu(monkeypatch, tmp_path):
         fps=2,
         duration_ms=1_000,
         gpu_export_enabled=False,
-        encoder_mode="amf",
+        encoder_mode=mode,
     )
     failed = _FakeRenderProcess(job.output_path)
-    failed.stdin = _BrokenAmfStdin()
+    failed.stdin = _BrokenHardwareStdin()
     failed.returncode = 1
-    failed.stdout = [b"[h264_amf] Error while opening encoder\n"]
+    failed.stdout = [f"[{encoder}] Error while opening encoder\n".encode()]
     succeeded = _FakeRenderProcess(job.output_path)
     processes = [failed, succeeded]
     commands: list[list[str]] = []
@@ -1265,7 +1280,7 @@ def test_render_retries_amf_broken_pipe_with_cpu(monkeypatch, tmp_path):
     monkeypatch.setattr(renderer.subprocess, "Popen", fake_popen)
 
     assert render_subtitle_video(job) == job.output_path
-    assert "h264_amf" in commands[0]
+    assert encoder in commands[0]
     assert "libx264" in commands[1]
 
 
@@ -1281,6 +1296,38 @@ def test_amf_retry_filter_rejects_unrelated_ffmpeg_failure():
         ["ffmpeg", "-c:v", "libx264", "out.mp4"],
         deque(["Error while opening encoder"]),
     ) is False
+
+
+@pytest.mark.parametrize("codec", ["h264", "hevc"])
+def test_videotoolbox_retry_filter_rejects_unrelated_failure(codec):
+    """VideoToolbox 初始化失败时回退 CPU，磁盘写满时不回退。"""
+    command = ["ffmpeg", "-c:v", f"{codec}_videotoolbox", "out.mp4"]
+    for error in (
+        "Cannot create compression session: -12915",
+        "The hardware encoder may be busy, or not supported",
+        "Error setting bitrate property: -12900",
+        f"Unknown encoder '{codec}_videotoolbox'",
+    ):
+        assert renderer._should_retry_encoder_with_cpu(command, deque([error]))
+    assert not renderer._should_retry_encoder_with_cpu(command, deque(["No space left on device"]))
+
+
+@pytest.mark.parametrize("codec", ["h264", "hevc"])
+def test_videotoolbox_command_uses_explicit_bitrate(tmp_path, codec):
+    """4K/120fps 导出命令使用任务指定的 25 Mbps，且不包含质量值参数。"""
+    job = replace(_job(tmp_path), encoder_mode="videotoolbox", codec=codec,
+                  width=3840, height=2160, fps=120, crf=18, bitrate_mbps=25)
+    command = build_render_command("ffmpeg", job, duration_ms=1000)
+    assert command[command.index("-b:v") + 1] == "25000000"
+    assert "-q:v" not in command and "-crf" not in command
+
+
+@pytest.mark.parametrize("bitrate", [0, 2001])
+def test_validate_job_rejects_invalid_average_bitrate(tmp_path, bitrate):
+    """直接构造的任务使用 0 或 2001 Mbps 时，导出前校验报错。"""
+    job = replace(_job(tmp_path), encoder_mode="videotoolbox", bitrate_mbps=bitrate)
+    with pytest.raises(ProcessingError, match="平均码率"):
+        validate_render_job(job)
 
 
 def test_encoder_retry_filter_covers_nvenc_and_qsv_init_failures():
