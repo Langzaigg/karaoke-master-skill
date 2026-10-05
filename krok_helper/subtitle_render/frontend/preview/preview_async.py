@@ -1678,6 +1678,16 @@ class GpuAsyncSubtitleRenderer(QObject):
                         if event.get("render_ms") in (None, 0.0):
                             event["render_ms"] = render_event.get("render_ms", 0.0)
                         self._native_note_presented(generation, render_t, event)
+                        if _env_enabled("KROK_SUBTITLE_NATIVE_DUMP_PNG", "0"):
+                            # 调试：G6 暂停态 present 后，把同一 t 的纹理按
+                            # 读回路径落 PNG（与 present 内容同源同尺寸），
+                            # 供三路一致性探针取「用户可观测点」的帧。
+                            self._dump_presented_frame_png(
+                                renderer,
+                                int(render_t),
+                                generation,
+                                force_warp,
+                            )
                         # 后续记账/emit 一律用实际渲染的时间戳。
                         t_ms = render_t
                     else:
@@ -2708,6 +2718,59 @@ class GpuAsyncSubtitleRenderer(QObject):
                 if self._render_ms_ema <= 0.0
                 else self._render_ms_ema * 0.7 + render_ms * 0.3
             )
+
+    def _dump_presented_frame_png(
+        self,
+        renderer,
+        t_ms: int,
+        generation: int,
+        force_warp: bool,
+    ) -> None:
+        """调试：G6 present 后把同 t 纹理按读回路径落 PNG（env 门控）。
+
+        与屏幕抓图不同，这条路径拿到的是 sidecar 刚 present 的那份渲染
+        纹理本身（同一 D2D 场景、同 t 重渲，像素级一致），不受 DComp 无法
+        BitBlt / 窗口遮挡 / 缩放映射的影响。失败只打日志，不影响出帧。
+        """
+        try:
+            import tempfile
+
+            with self._condition:
+                shm_key = self._shm_key
+            if not shm_key:
+                return
+            event = None
+            for _ in range(2):   # present 后立即重渲可能撞已知 D2D 死锁，重试一次
+                try:
+                    event = renderer.render_gpu_frame(
+                        t_ms,
+                        force_warp=force_warp,
+                        generation=generation,
+                        frame_index=0,
+                        shm_key=shm_key,
+                        include_checksum=False,
+                        slot_count=1,
+                    )
+                    break
+                except NativeRendererError:
+                    time.sleep(0.3)
+            if event is None:
+                print("[native-dump] render retry exhausted", flush=True)
+                return
+            event_key = str(event.get("shm_key") or "")
+            if self._reader is None or self._reader.shm_key != event_key:
+                if self._reader is not None:
+                    self._reader.close()
+                self._reader = SharedFrameRingReader.from_event(event)
+            image = self._reader.read_qimage(event)
+            out_dir = os.path.join(tempfile.gettempdir(), "consistency")
+            os.makedirs(out_dir, exist_ok=True)
+            path = os.path.join(out_dir, f"g6_{int(t_ms)}.png")
+            image.save(path)
+            print(f"[native-dump] {path}", flush=True)
+            self._note("native_frame_png_dumped")
+        except Exception as exc:  # pragma: no cover - 调试路径
+            print(f"[native-dump] failed: {exc}", flush=True)
 
     def _may_emit(self, t_ms: int, generation: int) -> bool:
         with self._condition:
