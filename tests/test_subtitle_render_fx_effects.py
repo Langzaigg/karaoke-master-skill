@@ -222,21 +222,25 @@ def test_plan_line_bursts_kinds_and_windows():
         char_windows=[(1200, 1600), (1600, 1600), (1600, 3000)],
     )
     kinds = [burst["kind"] for burst in bursts]
-    # 入场动画：星光整行扫过（line 锚点、固定 14 颗、白色默认档）。
-    assert kinds.count("sparkle") == 1
+    # 入场动画：星光整行扫过（line 锚点、固定 14 颗拆樱花粉双色 7+7）。
+    assert kinds.count("sparkle") == 2
     sparkle = bursts[0]
     assert sparkle["anchor"] == "line"
     assert sparkle["start_ms"] == 1000
-    assert sparkle["count"] == 14
+    assert sparkle["count"] == 7
     assert sparkle["sweep"] == 1
-    assert sparkle["color"] == "#FFFFFF"
+    assert {b["color"] for b in bursts if b["kind"] == "sparkle"} == {
+        "#FFB7C5", "#FFD7E0",
+    }
     assert sparkle["size_px"] == pytest.approx(100 * 0.40)
-    # 退场动画涟漪：逐字（3 字），尾窗钳制下同点发射，双环。
-    assert kinds.count("ripple") == 3
+    # 退场动画涟漪：逐字（3 字），尾窗钳制下同点发射，双色拆 2+1 环。
+    assert kinds.count("ripple") == 6
     exit_ripples = [b for b in bursts if b["kind"] == "ripple"]
     assert {b["start_ms"] for b in exit_ripples} == {3880}
-    assert [b["char_index"] for b in exit_ripples] == [0, 1, 2]
-    assert all(b["anchor"] == "char" and b["count"] == 3 for b in exit_ripples)
+    assert [b["char_index"] for b in exit_ripples] == [0, 0, 1, 1, 2, 2]
+    assert sorted({b["count"] for b in exit_ripples}) == [1, 2]
+    assert all(b["anchor"] == "char" for b in exit_ripples)
+    assert {b["color"] for b in exit_ripples} == {"#FFB7C5", "#FFD7E0"}
     # 唱字（旋钮档）：零时长字符不发射；星光并入出入场运动学后每字数量
     # = max(5, count//2)（默认 7，2026-10 密度对齐出入场观感）。
     assert kinds.count("twinkle") == 2
@@ -385,16 +389,20 @@ def test_plan_line_bursts_anim_kinds_and_sing_ripple():
         [(1200, 1600), (1600, 2000), (2000, 3000)],
     )
     kinds = [burst["kind"] for burst in bursts]
-    # 音符入场：逐字错峰（3 字 → 步距 175），每字 3 颗，固定白档。
-    assert kinds.count("note") == 3
+    # 音符入场：逐字错峰（3 字 → 步距 175），每字 3 颗拆樱花粉双色 2+1。
+    assert kinds.count("note") == 6
     notes = [b for b in bursts if b["kind"] == "note"]
-    assert [b["start_ms"] for b in notes] == [1000, 1175, 1350]
-    assert all(b["count"] == 3 and b["color"] == "#FFFFFF" for b in notes)
-    # 消散退场：像素方块、固定档（max(4, 14//2)=7 颗/字）。
-    assert kinds.count("dissolve") == 3
+    assert [b["start_ms"] for b in notes] == [1000, 1000, 1175, 1175, 1350, 1350]
+    assert sorted({b["count"] for b in notes}) == [1, 2]
+    assert {b["color"] for b in notes} == {"#FFB7C5", "#FFD7E0"}
+    # 消散退场：像素方块、固定默认档（7 颗/字拆双色 4+3）。
+    assert kinds.count("dissolve") == 6
     dissolve = next(b for b in bursts if b["kind"] == "dissolve")
-    assert dissolve["count"] == 7
+    assert dissolve["count"] == 4
     assert dissolve["size_px"] == pytest.approx(100 * 0.40 * 0.75)
+    assert {b["color"] for b in bursts if b["kind"] == "dissolve"} == {
+        "#FFB7C5", "#FFD7E0",
+    }
     # 唱字涟漪：每字两圈细环、旋钮尺寸 ×3.6（三个窗都非零时长）。
     assert kinds.count("ripple") == 3
     sing_ripple = next(b for b in bursts if b["kind"] == "ripple")
@@ -429,8 +437,11 @@ def test_burst_particles_window_and_shapes():
         Style(exit_anim="ripple", exit_fade_ms=600, karaoke_anim="none"),
         0, None, 2000, 1900, [(0, 100)],
     )
-    ripple = ripple_bursts[0]
-    assert ripple["kind"] == "ripple" and ripple["count"] == 3
+    # 固定默认档拆樱花粉双色（3 环 → 2+1）；环级物理用合成 3 环 burst 验。
+    assert [b["kind"] for b in ripple_bursts[:2]] == ["ripple", "ripple"]
+    assert sorted(b["count"] for b in ripple_bursts[:2]) == [1, 2]
+    ripple = {**ripple_bursts[0], "count": 3}
+    assert ripple["kind"] == "ripple"
     # 水波纹：第 2 环延迟 150ms、第 3 环 300ms 出生；各环完整走完「小→大」。
     first_only = burst_particles_at(ripple, ripple["start_ms"] + 50, 0.0, 0.0, 0, 0)
     assert len(first_only) == 1
@@ -732,11 +743,12 @@ def test_plan_line_bursts_assemble_and_dissolve():
         [(1200, 1600), (1600, 2000), (2000, 3000)],
     )
     kinds = [burst["kind"] for burst in bursts]
-    assert kinds.count("assemble") == 3
-    assert kinds.count("dissolve") == 3
+    # 固定默认档樱花粉双色：每字 7 颗拆 4+3（拆后总量守恒）。
+    assert kinds.count("assemble") == 6
+    assert kinds.count("dissolve") == 6
     assemble = next(b for b in bursts if b["kind"] == "assemble")
     assert assemble["anchor"] == "char"
-    assert assemble["count"] == 7  # 固定档 max(4, 14//2)，不吃旋钮
+    assert assemble["count"] == 4  # 固定档 max(4, 14//2)=7 拆双色
     assert assemble["start_ms"] == 1000
     assert assemble["end_ms"] == 1000 + 320
     dissolve = next(b for b in bursts if b["kind"] == "dissolve")
@@ -852,9 +864,9 @@ def test_sing_particles_skip_whitespace_chars():
     # 空格（1600 起）不发射唱字粒子。
     assert 1600 not in sing_starts
     assert sorted(sing_starts) == [1200, 2000]
-    # 入场涟漪仍按整行逐字（3 枚，含空格位）。
+    # 入场涟漪仍按整行逐字（3 字 × 固定档双色 2+1 拆），含空格位。
     ripples = [b for b in bursts if b["kind"] == "ripple"]
-    assert [b["char_index"] for b in ripples] == [0, 1, 2]
+    assert [b["char_index"] for b in ripples] == [0, 0, 1, 1, 2, 2]
 
 
 # ---------------------------------------------------------------------------
@@ -1019,12 +1031,14 @@ def test_fx_apply_to_entry_exit_switch_plans():
 
     windows = [(1200, 1600), (1600, 3000)]
     off = plan_line_bursts(_style(), 0, 1000, 4000, 3900, windows)
-    assemble = next(b for b in off if b["kind"] == "assemble")
+    # 默认关：入退场动画粒子固定默认档 = 樱花粉双色（14//2=7 拆 4+3）
+    # + 固定尺寸（40% × 0.75），唱字吃旋钮。
+    assemble_off = [b for b in off if b["kind"] == "assemble"]
+    assert sorted(b["count"] for b in assemble_off) == [3, 3, 4, 4]  # 2 字 × (4+3)
+    assert {b["color"] for b in assemble_off} == {"#FFB7C5", "#FFD7E0"}
+    for burst in assemble_off:
+        assert burst["size_px"] == pytest.approx(100 * 0.40 * 0.75)
     twinkle = next(b for b in off if b["kind"] == "twinkle")
-    # 默认关：入退场动画粒子固定白档 + 固定尺寸（40% × 0.75），唱字吃旋钮。
-    assert assemble["color"] == "#FFFFFF"
-    assert assemble["size_px"] == pytest.approx(100 * 0.40 * 0.75)
-    assert assemble["count"] == 7  # 数量固定档不吃旋钮
     assert twinkle["color"] == "#FF8800"
     assert twinkle["size_px"] == pytest.approx(50.0)
 
@@ -1057,7 +1071,7 @@ def test_fx_apply_to_entry_exit_switch_plans():
         windows,
     )
     assert next(b for b in follow if b["kind"] == "assemble")["color"] == "#EE7700"
-    # 关闭联动时模式只影响唱字粒子，入退场动画粒子仍是固定白档。
+    # 关闭联动时模式只影响唱字粒子，入退场动画粒子仍是固定樱花粉默认档。
     follow_off = plan_line_bursts(
         _style(
             fx_particle_color_mode="follow_after",
@@ -1069,9 +1083,9 @@ def test_fx_apply_to_entry_exit_switch_plans():
         3900,
         windows,
     )
-    assert (
-        next(b for b in follow_off if b["kind"] == "assemble")["color"] == "#FFFFFF"
-    )
+    assert {
+        b["color"] for b in follow_off if b["kind"] == "assemble"
+    } == {"#FFB7C5", "#FFD7E0"}
     assert next(b for b in follow_off if b["kind"] == "twinkle")["color"] == "#EE7700"
 
 
@@ -1137,10 +1151,10 @@ def test_painter_paints_per_burst_particle_color(qapp):
     """CPU painter 按 burst 颜色绘制（与 D2D burst.color 同口径）。
 
     2026-10 发现的历史分歧：painter 此前把所有 burst 一律画成
-    ``fx_particle_color``，而 GPU 侧入退场动画粒子按规划是固定白色——
-    旋钮色非白时两后端画面不一致。这里用「无粒子基线」逐像素差分验证
-    跟随字体两档的唱字粒子按行配色着色（字形本体两帧完全一致，差分
-    只剩粒子贡献）。
+    ``fx_particle_color``，而 GPU 侧入退场动画粒子按规划走固定默认档
+    （现为樱花粉双色）——旋钮色非默认时两后端画面不一致。这里用「无粒子
+    基线」逐像素差分验证跟随字体两档的唱字粒子按行配色着色（字形本体
+    两帧完全一致，差分只剩粒子贡献）。
     """
     from PyQt6.QtGui import QImage
 
@@ -1738,7 +1752,7 @@ def test_entry_exit_sparkle_follows_first_char_role():
     note = next(b for b in bursts if b["kind"] == "note")
     assert sparkle["color"] == "#40E0FF", sparkle["color"]
     assert note["color"] == "#40E0FF"
-    # 联动关闭（默认）：入退场维持固定白档。
+    # 联动关闭（默认）：入退场维持固定樱花粉默认档。
     off = plan_line_bursts(
         Style(
             **{
@@ -1753,9 +1767,9 @@ def test_entry_exit_sparkle_follows_first_char_role():
         windows,
         char_styles=char_styles,
     )
-    assert (
-        next(b for b in off if b["kind"] == "sparkle")["color"] == "#FFFFFF"
-    )
+    assert {
+        b["color"] for b in off if b["kind"] == "sparkle"
+    } == {"#FFB7C5", "#FFD7E0"}
     # 星光画在主文字前（2026-10 用户复调：背后看不清），音符在前。
     assert sparkle["front"] is True
     assert note["front"] is True
@@ -1853,19 +1867,23 @@ def test_plan_line_bursts_petal_entry_exit_sing():
         style, 0, 1000, 4200, 4100,
         [(1200, 1600), (1600, 2000), (2000, 3000)],
     )
-    # 入场花瓣：逐字错峰（3 字 → 步距 175），每字 3 颗，固定白档；
-    # 位置偏移全部 box 比例（不带字号行程，travel 恒 0）。
+    # 入场花瓣：逐字错峰（3 字 → 步距 175），每字 3 颗拆固定樱花粉双色
+    # 2+1；位置偏移全部 box 比例（不带字号行程，travel 恒 0）。
     entry = [b for b in bursts if b["kind"] == "petal" and b["sweep"] == 1]
-    assert len(entry) == 3
-    assert [b["start_ms"] for b in entry] == [1000, 1175, 1350]
-    assert all(b["count"] == 3 and b["color"] == "#FFFFFF" for b in entry)
+    assert len(entry) == 6
+    assert [b["start_ms"] for b in entry] == [
+        1000, 1000, 1175, 1175, 1350, 1350,
+    ]
+    assert sorted({b["count"] for b in entry}) == [1, 2]
+    assert {b["color"] for b in entry} == {"#FFB7C5", "#FFD7E0"}
     assert all(b["travel_px"] == 0.0 for b in entry)
     # 退场花瓣：sweep=-1，自 max(行末, 显示末回溯) 起排布（与音符同款：
     # 尾窗不足 120ms 时护栏推到 显示末-120，错峰压缩为 0，burst 窗口
     # 规划到自然播完、画面随行消失截断）。
     exit_petals = [b for b in bursts if b["kind"] == "petal" and b["sweep"] == -1]
-    assert len(exit_petals) == 3
-    assert [b["start_ms"] for b in exit_petals] == [4080, 4080, 4080]
+    assert len(exit_petals) == 6
+    assert {b["start_ms"] for b in exit_petals} == {4080}
+    assert {b["color"] for b in exit_petals} == {"#FFB7C5", "#FFD7E0"}
     # 唱字花瓣：sweep=0、每字 max(3, 14//3)=4 颗、尺寸吃旋钮（40% 字号）。
     sing = [b for b in bursts if b["kind"] == "petal" and b["sweep"] == 0]
     assert len(sing) == 3
@@ -1937,7 +1955,7 @@ def test_petal_two_color_variant_split():
     assert petals[0]["seed"] != petals[1]["seed"]
     assert all("paint" not in b for b in petals)  # 双色档不带装饰规格
     # 奇数数量：余数归第一条（唱字档数量吃旋钮：9 → 每字 3 → 2+1；
-    # 入退场动画粒子默认固定白档不拆双色，开联动后才吃颜色模式）。
+    # 入退场动画粒子走固定樱花粉默认档、与这里独立）。
     odd = Style(
         sing_fx="petal",
         fx_particle_color_mode="sakura",

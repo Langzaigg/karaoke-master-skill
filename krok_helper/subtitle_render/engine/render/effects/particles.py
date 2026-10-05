@@ -59,11 +59,12 @@ PETAL_LIFE_MS = 900
 # 「默认颜色」档的两种樱花粉：规划器拆双 burst 随机混发（每颗粒子一色）。
 SAKURA_PINK_A = "#FFB7C5"
 SAKURA_PINK_B = "#FFD7E0"
-# 出入场动画驱动的粒子（星光/涟漪/音符/拼接/消散）默认用固定默认档；
-# 开启 ``fx_apply_to_entry_exit`` 后颜色与尺寸改吃粒子旋钮（数量仍固定）。
+# 出入场动画驱动的粒子（星光/涟漪/音符/花瓣/拼接/消散）默认用固定默认档：
+# 樱花粉双色随机混发 + 40% 字号（2026-10 用户口径：出入场粒子用「默认
+# 颜色」的樱花色，而不是单独颜色的默认白）；开启 ``fx_apply_to_entry_exit``
+# 后颜色与尺寸改吃粒子旋钮（数量仍固定）。
 ANIM_PARTICLE_SIZE_EM = 0.40
 ANIM_PARTICLE_COUNT = 14
-ANIM_PARTICLE_COLOR = "#FFFFFF"
 # sparkle 整句扫过的额外错峰时长（按粒子横向位置从一端排到另一端）。
 SPARKLE_SWEEP_MS = 350
 # 星光族（sparkle/twinkle）纵向锚点分布：以锚点中心为原点的行高比例。
@@ -632,7 +633,7 @@ def plan_line_bursts(
     + 已按粒子尺寸缩放的描边宽，见 :func:`particle_paint_spec`），两条
     后端优先按 ``paint`` 绘制；双色档（单独颜色双槽 / ``sakura`` /
     ``follow_mix`` 前后实色 / ``role``+花瓣）改拆两条实色变体 burst
-    （数量对半、种子错开）。入退场动画粒子默认固定白档，开启
+    （数量对半、种子错开）。入退场动画粒子默认固定樱花粉双色档，开启
     ``fx_apply_to_entry_exit`` 后改吃粒子旋钮的颜色与尺寸（数量恒固定）。
     ``line_index`` 参与种子，保证同曲目每行轨迹不同且重开可复现。
     ``char_visible``（与 char_windows 等长）：False = 空白字符（空格等
@@ -679,7 +680,7 @@ def plan_line_bursts(
         line_anchor: bool = False,
         petal: bool = False,
     ) -> list[dict[str, object]]:
-        """burst 的颜色规格**列表**：固定白档 / 实色回退 (+ 非单色模式的
+        """burst 的颜色规格**列表**：固定樱花粉档 / 实色回退 (+ 非单色模式的
         paint 规格) / 双色档的变体规格列表（见 :func:`particle_variant_paints`）。
 
         规格按「样式 × 角色方案 × 尺寸 × 是否涟漪」缓存——同一组合全帧
@@ -697,7 +698,9 @@ def plan_line_bursts(
         """
 
         if anim and not apply_to_anim:
-            return [{"color": ANIM_PARTICLE_COLOR}]
+            # 固定默认档 = 樱花粉双色随机混发（2026-10 用户口径：出入场
+            # 粒子用「默认颜色」的樱花色，而非单独颜色的默认白）。
+            return [{"color": SAKURA_PINK_A}, {"color": SAKURA_PINK_B}]
         mode = str(getattr(style, "fx_particle_color_mode", "color") or "color")
         if (
             line_anchor

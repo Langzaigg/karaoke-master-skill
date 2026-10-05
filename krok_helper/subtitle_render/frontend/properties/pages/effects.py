@@ -666,9 +666,9 @@ class EffectsPropertyPageBuilder:
         )
         host._fx_size_spin = self._spin_factory(5, 200, suffix=" %")
         host._fx_size_spin.setToolTip(
-            "唱字装饰粒子的尺寸（相对主字号的百分比）：星光/音符按此边长，"
-            "涟漪按 3.6 倍扩散；开启「入退场同用」后也作用于入退场动画粒子，"
-            "否则入退场动画粒子用固定默认档"
+            "唱字装饰粒子的尺寸（相对主字号的百分比）：星光/音符/花瓣按此"
+            "边长，涟漪按 3.6 倍扩散；开启「入退场同用」后也作用于入退场"
+            "动画粒子，否则入退场动画粒子用固定默认档"
         )
         host._fx_size_spin.valueChanged.connect(
             lambda value: host._update_style(fx_particle_size_em=value / 100.0)
@@ -704,9 +704,9 @@ class EffectsPropertyPageBuilder:
         host._fx_apply_check = CheckBox("仅唱字", section)
         host._fx_apply_check.setToolTip(
             "勾选（默认）：粒子的颜色与尺寸仅作用于唱字装饰粒子，入场/退场"
-            "动画携带的粒子用固定默认档（白色、40% 字号，数量恒固定）；"
+            "动画携带的粒子用固定默认档（樱花粉双色、40% 字号，数量恒固定）；"
             "取消勾选：颜色与尺寸也应用于入场/退场动画粒子（星光/涟漪/音符/"
-            "拼接/消散，颜色模式同样生效）"
+            "花瓣/拼接/消散，颜色模式同样生效）"
         )
         # 语义反转：勾选「仅唱字」= fx_apply_to_entry_exit 为 False。
         host._fx_apply_check.toggled.connect(
