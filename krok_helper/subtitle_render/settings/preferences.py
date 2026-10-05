@@ -13,6 +13,10 @@ from dataclasses import dataclass, field, fields, replace
 from typing import Any, Optional
 from uuid import uuid4
 
+from krok_helper.subtitle_render.engine.export.encoder_select import (
+    DEFAULT_VIDEO_BITRATE_MBPS,
+    normalize_video_bitrate_mbps,
+)
 from krok_helper.subtitle_render.serialization.compat import merge_extensible_value
 from krok_helper.subtitle_render.domain.models import (
     LYRICS_LAYOUT_FIELDS,
@@ -216,6 +220,7 @@ class AppOutputPreferenceValues:
     allowed_render_workers: tuple[int, ...]
     output_format: str = "mp4"
     gpu_direct_present: bool = False
+    bitrate_mbps: object = DEFAULT_VIDEO_BITRATE_MBPS
 
 
 @dataclass(frozen=True)
@@ -636,6 +641,7 @@ def update_app_output_preferences(
     render_workers: object,
     allowed_render_workers: tuple[int, ...],
     output_format: str = "mp4",
+    bitrate_mbps: object = DEFAULT_VIDEO_BITRATE_MBPS,
 ) -> dict:
     """Return the app-local output settings while preserving unknown keys."""
     from krok_helper.subtitle_render.engine.export.render_job import OUTPUT_FORMATS
@@ -656,6 +662,7 @@ def update_app_output_preferences(
             "codec": str(codec),
             "preset": str(preset),
             "crf": int(crf) if isinstance(crf, int) and 0 <= crf <= 51 else 18,
+            "bitrate_mbps": normalize_video_bitrate_mbps(bitrate_mbps),
             "render_workers": (
                 int(render_workers)
                 if isinstance(render_workers, int)
@@ -779,6 +786,7 @@ def prepare_app_preferences(
             codec=output.codec,
             preset=output.preset,
             crf=output.crf,
+            bitrate_mbps=output.bitrate_mbps,
             render_workers=output.render_workers,
             allowed_render_workers=output.allowed_render_workers,
             output_format=output.output_format,

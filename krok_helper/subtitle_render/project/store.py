@@ -25,6 +25,9 @@ from pathlib import Path
 from typing import Any, Optional
 from uuid import uuid4
 
+from krok_helper.subtitle_render.engine.export.encoder_select import (
+    DEFAULT_VIDEO_BITRATE_MBPS,
+)
 from krok_helper.subtitle_render.domain.models import PROJECT_FILE_SUFFIX
 
 PROJECT_SCHEMA_VERSION = 4
@@ -517,10 +520,12 @@ def project_output_payload(
     output_path: str,
     codec: str = "h264",
     native_export_enabled: bool = False,
+    bitrate_mbps: int = DEFAULT_VIDEO_BITRATE_MBPS,
 ) -> dict[str, Any]:
     return {
         "encoder_mode": encoder_mode,
         "crf": int(crf),
+        "bitrate_mbps": int(bitrate_mbps),
         "preset": preset,
         "codec": codec,
         "output_path": output_path,

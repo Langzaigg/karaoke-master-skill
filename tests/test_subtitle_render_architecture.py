@@ -3436,6 +3436,8 @@ def test_export_view_has_one_frontend_owner() -> None:
     }
     coordinator_helpers = {
         "sync_export_preset_enabled",
+        # 主窗口调用同步函数，控件更新实现仍由 export_view 持有。
+        "sync_export_quality_controls",
     }
     owned_members = {
         "ExportWorkspaceControls",

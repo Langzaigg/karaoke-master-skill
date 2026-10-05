@@ -211,6 +211,8 @@ def validate_render_job(job: RenderJob) -> None:
             raise ProcessingError(f"不支持的视频编码: {job.codec}")
         if not 0 <= job.crf <= 51:
             raise ProcessingError("CRF 必须在 0 到 51 之间。")
+        if not 1 <= job.bitrate_mbps <= 2000:
+            raise ProcessingError("平均码率必须在 1 到 2000 Mbps 之间。")
         if job.preset not in CPU_PRESETS:
             raise ProcessingError(f"不支持的 CPU preset: {job.preset}")
     if not str(job.output_path).strip():

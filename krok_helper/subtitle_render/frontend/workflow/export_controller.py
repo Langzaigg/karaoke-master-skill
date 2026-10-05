@@ -6,6 +6,9 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from krok_helper.subtitle_render.engine.export.encoder_select import (
+    DEFAULT_VIDEO_BITRATE_MBPS,
+)
 from krok_helper.errors import ProcessingError
 from krok_helper.subtitle_render.domain.background import BackgroundSource
 from krok_helper.subtitle_render.engine.export.render_job import (
@@ -51,6 +54,7 @@ class ExportJobInputs:
     gpu_export_enabled: bool
     render_workers: int | None
     output_format: str = OUTPUT_FORMAT_MP4
+    bitrate_mbps: int = DEFAULT_VIDEO_BITRATE_MBPS
 
 
 @dataclass(frozen=True)
@@ -113,6 +117,7 @@ class ExportJobController:
             include_audio=inputs.include_audio,
             encoder_mode=inputs.encoder_mode,
             crf=inputs.crf,
+            bitrate_mbps=inputs.bitrate_mbps,
             preset=inputs.preset,
             codec=inputs.codec,
             output_format=output_format,

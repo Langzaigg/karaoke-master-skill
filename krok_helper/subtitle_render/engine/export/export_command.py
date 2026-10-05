@@ -264,6 +264,7 @@ def build_render_command(
                 crf=job.crf,
                 preset=job.preset,
                 codec=job.codec,
+                bitrate_mbps=job.bitrate_mbps,
             )
         )
         command.extend(["-pix_fmt", "yuv420p"])

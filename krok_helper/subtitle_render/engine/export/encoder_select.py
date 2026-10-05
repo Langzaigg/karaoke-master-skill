@@ -6,13 +6,14 @@ import subprocess
 from functools import lru_cache
 from typing import Literal
 
-EncoderMode = Literal["cpu", "auto", "nvenc", "qsv", "amf_qvbr", "amf_cqp"]
+EncoderMode = Literal["cpu", "auto", "nvenc", "qsv", "amf_qvbr", "amf_cqp", "videotoolbox"]
 VideoCodec = Literal["h264", "hevc"]
 
 ENCODER_CPU = "cpu"
 ENCODER_AUTO = "auto"
 ENCODER_NVENC = "nvenc"
 ENCODER_QSV = "qsv"
+ENCODER_VIDEOTOOLBOX = "videotoolbox"
 ENCODER_AMF_QVBR = "amf_qvbr"
 ENCODER_AMF_CQP = "amf_cqp"
 # 4.3.x 及更早版本保存的旧值。QVBR 仅在用户显式选择时生效（含 legacy
@@ -23,6 +24,7 @@ ENCODER_MODES: set[str] = {
     ENCODER_AUTO,
     ENCODER_NVENC,
     ENCODER_QSV,
+    ENCODER_VIDEOTOOLBOX,
     ENCODER_AMF_QVBR,
     ENCODER_AMF_CQP,
 }
@@ -30,6 +32,7 @@ ENCODER_MODES: set[str] = {
 CODEC_H264 = "h264"
 CODEC_HEVC = "hevc"
 VIDEO_CODECS: set[str] = {CODEC_H264, CODEC_HEVC}
+DEFAULT_VIDEO_BITRATE_MBPS = 10
 
 # (codec, mode) → ffmpeg 编码器名。auto 解析成具体硬编模式后再查表。
 _CODEC_ENCODER_NAMES: dict[str, dict[str, str]] = {
@@ -37,6 +40,7 @@ _CODEC_ENCODER_NAMES: dict[str, dict[str, str]] = {
         ENCODER_CPU: "libx264",
         ENCODER_NVENC: "h264_nvenc",
         ENCODER_QSV: "h264_qsv",
+        ENCODER_VIDEOTOOLBOX: "h264_videotoolbox",
         ENCODER_AMF_QVBR: "h264_amf",
         ENCODER_AMF_CQP: "h264_amf",
     },
@@ -44,6 +48,7 @@ _CODEC_ENCODER_NAMES: dict[str, dict[str, str]] = {
         ENCODER_CPU: "libx265",
         ENCODER_NVENC: "hevc_nvenc",
         ENCODER_QSV: "hevc_qsv",
+        ENCODER_VIDEOTOOLBOX: "hevc_videotoolbox",
         ENCODER_AMF_QVBR: "hevc_amf",
         ENCODER_AMF_CQP: "hevc_amf",
     },
@@ -79,6 +84,19 @@ def normalize_cpu_preset(preset: str) -> str:
     return preset if preset in CPU_PRESETS else "medium"
 
 
+def normalize_video_bitrate_mbps(value: object) -> int:
+    """Restore a valid average bitrate, using the default for old preferences."""
+    return value if isinstance(value, int) and 1 <= value <= 2000 else DEFAULT_VIDEO_BITRATE_MBPS
+
+
+def resolve_encoder_mode(ffmpeg_path: str, mode: str, codec: str = CODEC_H264) -> str:
+    """Resolve automatic selection using the available encoders for this codec."""
+    selected = normalize_encoder_mode(mode)
+    if selected == ENCODER_AUTO:
+        return _best_available_hardware_encoder(ffmpeg_path, codec) or ENCODER_CPU
+    return selected
+
+
 def amf_qvbr_quality_level(crf: int) -> int:
     """Map UI quality to the inverse AMF QVBR scale (UI 18 -> QVBR 26)."""
     normalized_crf = max(0, min(51, int(crf)))
@@ -96,17 +114,22 @@ def video_encoder_options(
     crf: int,
     preset: str,
     codec: str = CODEC_H264,
+    bitrate_mbps: int = DEFAULT_VIDEO_BITRATE_MBPS,
 ) -> list[str]:
     """Build ffmpeg video encoder options for the selected mode/codec."""
-    selected = normalize_encoder_mode(mode)
+    selected = resolve_encoder_mode(ffmpeg_path, mode, codec)
     codec = normalize_video_codec(codec)
-    if selected == ENCODER_AUTO:
-        selected = _best_available_hardware_encoder(ffmpeg_path, codec) or ENCODER_CPU
 
     names = _CODEC_ENCODER_NAMES[codec]
     crf = max(0, min(51, int(crf)))
     # MP4 里 HEVC 打 hvc1 tag（默认 hev1 在 Apple 系播放器上不识别）
     hevc_tag = ["-tag:v", "hvc1"] if codec == CODEC_HEVC else []
+    if selected == ENCODER_VIDEOTOOLBOX:
+        return [
+            "-c:v", names[ENCODER_VIDEOTOOLBOX], "-allow_sw", "0",
+            "-b:v", str(normalize_video_bitrate_mbps(bitrate_mbps) * 1_000_000),
+            *hevc_tag,
+        ]
     if selected == ENCODER_NVENC:
         return ["-c:v", names[ENCODER_NVENC], "-preset", "p4", "-cq", str(crf), *hevc_tag]
     if selected == ENCODER_QSV:
@@ -158,15 +181,14 @@ def video_encoder_options(
 
 def resolved_encoder_label(ffmpeg_path: str, mode: str, codec: str = CODEC_H264) -> str:
     """Human-readable encoder label for status logs."""
-    selected = normalize_encoder_mode(mode)
+    selected = resolve_encoder_mode(ffmpeg_path, mode, codec)
     codec = normalize_video_codec(codec)
-    if selected == ENCODER_AUTO:
-        selected = _best_available_hardware_encoder(ffmpeg_path, codec) or ENCODER_CPU
     names = _CODEC_ENCODER_NAMES[codec]
     encoder_name = names.get(selected, names[ENCODER_CPU])
     base = {
         ENCODER_NVENC: "NVIDIA NVENC",
         ENCODER_QSV: "Intel QSV",
+        ENCODER_VIDEOTOOLBOX: "Apple VideoToolbox",
         ENCODER_AMF_QVBR: "AMD AMF(QVBR)",
         ENCODER_AMF_CQP: "AMD AMF(CQP)",
     }.get(selected)
@@ -179,7 +201,7 @@ def _best_available_hardware_encoder(ffmpeg_path: str, codec: str = CODEC_H264) 
     encoders = _available_encoders(ffmpeg_path)
     names = _CODEC_ENCODER_NAMES[normalize_video_codec(codec)]
     # auto 模式解析到 A 卡时走 CQP；QVBR 必须用户显式选择。
-    for mode in (ENCODER_NVENC, ENCODER_QSV, ENCODER_AMF_CQP):
+    for mode in (ENCODER_NVENC, ENCODER_QSV, ENCODER_AMF_CQP, ENCODER_VIDEOTOOLBOX):
         if names[mode] in encoders:
             return mode
     return None

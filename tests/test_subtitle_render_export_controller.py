@@ -48,6 +48,7 @@ def _inputs(tmp_path: Path) -> ExportJobInputs:
         include_audio=True,
         encoder_mode="nvenc",
         crf=23,
+        bitrate_mbps=25,
         preset="slow",
         codec="h265",
         gpu_export_enabled=True,
@@ -76,6 +77,8 @@ def test_export_job_controller_builds_complete_engine_contract(tmp_path) -> None
         "slow",
         "h265",
     )
+    # 输入的 25 Mbps 传入导出任务。
+    assert job.bitrate_mbps == 25
     assert job.native_export_enabled is False
     assert job.gpu_export_enabled is True
     assert job.render_workers == 16
