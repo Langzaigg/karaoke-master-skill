@@ -139,28 +139,44 @@ def style_for_role(style: Style, role_label: str | None) -> Style:
 def auto_appearance_basis(style: Style, track: object) -> Style:
     """「跟随字体」（auto/role 外观档）大小推导的基准样式。
 
-    主轨每个非空白字符按 ``role_label`` 归桶（未命中 ``custom_style_schemes``
-    的标签与无标签一并计入全局默认桶）；最高频桶命中真实角色方案时返回
-    ``style_for_role(style, name)`` 叠加后的完整样式，否则原样返回全局样式。
-    平票取先出现者（Counter 首遇序），对同一轨道稳定。
+    统计口径与装饰源同构：信号（灯/柱）只挂段首行，auto 档配色取**所在
+    段首行第一个非空白字符**的角色方案——大小的推导基准同样只统计
+    **信号宿主行**：每个段首行按其第一个非空白字符的 ``role_label`` 投
+    一票（未命中 ``custom_style_schemes``/无标签计入全局默认桶），最高频
+    票命中真实角色方案时返回 ``style_for_role(style, name)`` 叠加后的完整
+    样式，否则原样返回全局样式。平票取先出现的段首行（首遇序），对同一
+    轨道稳定。非宿主行的角色分布不参与——段内其他行挂什么角色不影响
+    灯/柱该配的字号。
 
-    为什么是「项目最高频角色」而不是全局主样式：指示灯/音量柱的 auto 档
-    大小要「配合实际唱到的字」，而角色项目的正文大多逐字挂着角色方案，
-    全局主样式的字号可能与画面主字号差一截。为什么只数主轨：auto 档大小
-    是场景级单值（native IR 只物化一份、所有字幕源共用），副字幕源的
-    角色分布不该劫持主歌词的画面口径。
+    为什么只数主轨：auto 档大小是场景级单值（native IR 只物化一份、所有
+    字幕源共用），副字幕源的角色分布不该劫持主歌词的画面口径。信号模块
+    全关、竖排或无宿主行时返回全局样式（旧口径）。
     """
+    if track is None:
+        return style
+    # 函数内导入：display.signal → page.plan 一侧导入面更宽，顶层互引容易
+    # 成环（同 horizontal.layout 的 in-function import 处理）。宿主行判定
+    # 复用渲染热路径同一入口——排版区间内命中 ``signal_heads`` 缓存。
+    from krok_helper.subtitle_render.engine.layout.display.signal import (
+        signal_head_context,
+    )
+
+    heads = signal_head_context(track, style)
+    if not heads:
+        return style
     schemes = style.custom_style_schemes
     counts: Counter = Counter()
-    for line in getattr(track, "lines", None) or ():
-        for char in getattr(line, "chars", None) or ():
-            text = getattr(char, "text", "")
-            if not text or text.isspace():
-                continue
-            label = getattr(char, "role_label", None)
-            counts[label if label in schemes else None] += 1
-    if not counts:
-        return style
+    for index in sorted(heads):
+        chars = getattr(track.lines[index], "chars", None) or ()
+        first_role = next(
+            (
+                char.role_label
+                for char in chars
+                if getattr(char, "text", "") and not char.text.isspace()
+            ),
+            None,
+        )
+        counts[first_role if first_role in schemes else None] += 1
     dominant, _ = counts.most_common(1)[0]
     if dominant is None:
         return style

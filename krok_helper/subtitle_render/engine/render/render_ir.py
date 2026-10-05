@@ -208,10 +208,11 @@ def build_render_ir(
     # 局部复用仅对已知 scope 生效;未知值按全量。
     use_plan_cache = relayout_scope in {"titles", "paint"}
     with layout_pass():
-        # 「跟随字体」大小推导基准（主轨最高频角色方案）在 pass 顶部登记：
-        # IR 内不只 style 段物化尺寸，行布局（正文拓宽带/union 摆放）同样
-        # 消费信号尺寸，必须与 style 段同一基准；native 只拿物化后的数值。
-        # 主轨恒为本函数 track 参数（与 CPU paint_frame_to_painter 同口径）。
+        # 「跟随字体」大小推导基准（主轨信号宿主行最高频首角色方案）在
+        # pass 顶部登记：IR 内不只 style 段物化尺寸，行布局（正文拓宽带/
+        # union 摆放）同样消费信号尺寸，必须与 style 段同一基准；native
+        # 只拿物化后的数值。主轨恒为本函数 track 参数（与 CPU
+        # paint_frame_to_painter 同口径）。
         set_signal_auto_basis(style, track)
         # 主轨与附加轨共用一张轮廓表：同一 SVG 导唱符全片只序列化一次。
         glyph_table = VectorGlyphTable()
@@ -379,7 +380,7 @@ def build_style_patch_ir(
                         layout_table=layout_table,
                     )
                 )
-        # 推导基准同 build_render_ir：主轨最高频角色方案（pass 顶部登记），
+        # 推导基准同 build_render_ir：主轨信号宿主行口径（pass 顶部登记），
         # 差分载荷与全量 configure 物化出同一组数值。
         return {
             "schema": RENDER_IR_SCHEMA,

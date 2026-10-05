@@ -1278,8 +1278,9 @@ class PropertyPanel(QWidget):
         """推送「跟随字体」大小推导基准的主轨（auto/role 档回显同源渲染）。
 
         轨道内容或角色标注变化后由宿主重推（轨道对象就地修改，不能做
-        身份短路）；面板重刷指示灯/音量柱的 auto 档回显推导值——尺寸
-        spin 在 auto/role 档停用，纯回显，不会打断输入中的控件。
+        身份短路）；面板重刷指示灯/音量柱的 auto 档回显推导值——基准 =
+        主轨信号宿主行（段首行）最高频首角色方案，与渲染入口同一口径。
+        尺寸 spin 在 auto/role 档停用，纯回显，不会打断输入中的控件。
         """
         self._auto_appearance_track = track
         if self._style_synced:
@@ -4555,8 +4556,8 @@ class PropertyPanel(QWidget):
             control.setEnabled(image_mode)
         # auto/role 模式下大小/颜色由主文字推导：控件停用但回显推导值，让
         # 用户看到「自动配合字体」实际产出的数字与颜色。推导基准 = 主轨
-        # 最高频角色方案（与渲染入口同一口径，宿主经 set_auto_appearance_track
-        # 推送轨道；未推送时回退全局主样式）。
+        # 信号宿主行最高频首角色方案（与渲染入口同一口径，宿主经
+        # set_auto_appearance_track 推送轨道；未推送时回退全局主样式）。
         lit_auto_basis = auto_appearance_basis(self._style, self._auto_appearance_track)
         lit_display_style = resolve_lit_appearance(
             self._style, auto_basis=lit_auto_basis
@@ -4625,7 +4626,7 @@ class PropertyPanel(QWidget):
         )
         # auto/role 模式下大小/颜色由主文字推导：控件停用但回显推导值，让
         # 用户看到「自动配合字体」实际产出的数字与颜色（基准同上：主轨
-        # 最高频角色方案）。
+        # 信号宿主行最高频首角色方案）。
         volume_display_style = resolve_volume_appearance(
             self._style, auto_basis=lit_auto_basis
         )

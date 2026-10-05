@@ -2686,7 +2686,8 @@ def test_volume_auto_appearance_disables_and_displays_derived_controls(qapp):
 
 def test_auto_appearance_echo_follows_dominant_role_scheme(qapp):
     # 「跟随字体」auto 档回显与渲染同源：宿主推送主轨后，尺寸推导基准切到
-    # 最高频角色方案（字号 200 → 灯/柱 100），不再是全局主样式（100 → 50）。
+    # 信号宿主行最高频首角色方案（单段轨首行挂「主」，字号 200 → 灯/柱
+    # 100），不再是全局主样式（100 → 50）。
     panel = PropertyPanel()
     panel.set_style(
         Style(

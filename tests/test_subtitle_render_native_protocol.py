@@ -2335,9 +2335,9 @@ def test_build_render_ir_materializes_lit_auto_appearance():
 
 
 def test_build_render_ir_auto_size_follows_dominant_role_scheme():
-    # 「跟随字体」大小推导基准 = 主轨最高频使用的角色方案（非空白字符计数），
-    # 不是全局主样式：角色工程里画面主字号来自主导角色。IR 物化与 CPU
-    # painter（paint_frame_to_painter 入口登记）同源，native 只消费数值。
+    # 「跟随字体」大小推导基准 = 主轨信号宿主行（段首行）最高频首角色
+    # 方案，不是全局主样式：角色工程里画面主字号来自主导角色。IR 物化与
+    # CPU painter（paint_frame_to_painter 入口登记）同源，native 只消费数值。
     track = TimingTrack(
         lines=[
             TimingLine(
@@ -2366,10 +2366,11 @@ def test_build_render_ir_auto_size_follows_dominant_role_scheme():
 
     ir = build_render_ir(track, style, width=640, height=360, fps=30)
 
-    # 主导角色「主」字号 200：整体高度/灯边长 = 200 × 50% = 100。
+    # 单段轨首行是唯一宿主行，其第一个非空白字符挂「主」（字号 200）：
+    # 整体高度/灯边长 = 200 × 50% = 100。
     assert ir["style"]["volume_size"] == 100
     assert ir["style"]["lit_size"] == 100
-    # 无角色字符占多数时基准回到全局主样式（100 × 50% = 50，旧口径）。
+    # 宿主行首字无角色 → 全局默认桶唯一票，基准回全局主样式（50，旧口径）。
     plain_ir = build_render_ir(
         TimingTrack(
             lines=[

@@ -7977,9 +7977,9 @@ class SubtitleRenderWindow(QWidget):
             self._preview_panel.set_track(self._timing_track)
         else:
             self._sync_extra_tracks_to_preview()
-        # 角色分布变了，「跟随字体」的推导基准（主轨最高频角色方案）可能
-        # 翻转——面板 auto 档回显跟着重算（副轨编辑对主轨基准无影响，重推
-        # 幂等）。
+        # 角色分布变了，「跟随字体」的推导基准（主轨信号宿主行最高频首
+        # 角色方案）可能翻转——面板 auto 档回显跟着重算（副轨编辑对主轨
+        # 基准无影响，重推幂等）。
         self._property_panel.set_auto_appearance_track(self._timing_track)
         affected_rows = (rows,) if isinstance(rows, int) else rows
         for row in affected_rows:

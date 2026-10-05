@@ -1734,8 +1734,8 @@ def volume_auto_values(
     ``signal._draw_volume_lit_group``。取整统一半向上（与面板浮点回显
     口径相同），避免 banker's rounding 抖动。
 
-    ``basis`` 是推导源样式：「跟随字体」要配合**画面实际主字号**，角色
-    工程里它是主轨最高频角色方案叠加后的样式（见
+    ``basis``：推导源样式——「跟随字体」要配合**信号宿主行实际唱到的
+    字号**，角色工程里它是主轨段首行最高频首角色方案叠加后的样式（见
     ``style_semantics.auto_appearance_basis``）；缺省用全局主样式（旧口径）。
     """
     source = basis if basis is not None else style

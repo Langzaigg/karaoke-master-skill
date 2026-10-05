@@ -2030,64 +2030,92 @@ def test_lit_auto_size_ratio_scales_geometry(qapp):
     assert tiny.lit_size == 5
 
 
-def test_auto_appearance_basis_counts_dominant_role():
-    # 「跟随字体」大小推导基准的计数口径：主轨非空白字符按角色归桶，
-    # 未命中方案表（含无标签）计入全局默认桶；最高频桶命中真实方案时
-    # 叠加该方案，否则原样返回全局样式（旧口径零开销路径）。
+def test_auto_appearance_basis_counts_signal_host_lines():
+    # 「跟随字体」大小推导基准的统计口径：只统计信号宿主行（段首行），
+    # 每行按第一个非空白字符的角色投一票——与 auto 档装饰源（段首行
+    # 第一个角色）同构；非宿主行的角色分布不参与。
     from krok_helper.subtitle_render.engine.style.style_semantics import (
         auto_appearance_basis,
     )
 
     style = Style(
+        volume_enabled=True,
+        section_gap_ms=1000,
         custom_style_schemes={
             "主": SubtitleStyleScheme(font_size_px=200),
             "副": SubtitleStyleScheme(font_size_px=40),
-        }
+        },
     )
 
-    def track(*labels: str | None) -> TimingTrack:
-        return TimingTrack(
-            lines=[
-                TimingLine(
-                    chars=[
-                        TimingChar(text="あ", start_ms=1000, role_label=label)
-                        for label in labels
-                    ],
-                    end_ms=2000,
-                )
-            ]
+    def mkline(pairs, start, end):
+        return TimingLine(
+            chars=[
+                TimingChar(text=text, start_ms=start, role_label=role)
+                for text, role in pairs
+            ],
+            end_ms=end,
         )
 
-    dominant = auto_appearance_basis(style, track("主", "主", "副"))
-    assert dominant.font_size_px == 200
-    # 无标签占多数 → 全局默认桶胜出。
-    plain = auto_appearance_basis(style, track(None, "主"))
-    assert plain is style
-    # 未知标签（方案表悬空）与无标签同桶，不影响主导方案胜出。
-    unknown = auto_appearance_basis(style, track("幽灵", "幽灵", "主", "主", "主"))
-    assert unknown.font_size_px == 200
-    ghost_majority = auto_appearance_basis(style, track("幽灵", "幽灵", "主"))
-    assert ghost_majority is style
-    # 空白字符不计数：唯一非空白字符挂「副」。
-    spaced = TimingTrack(
+    # L1/L3/L4 是段首行（行间奏 > section_gap），分别投 主/副/主；
+    # L2 是段内行，三个「副」字符不参与——「主」仍以 2:1 胜出。
+    track = TimingTrack(
         lines=[
-            TimingLine(
-                chars=[
-                    TimingChar(text=" ", start_ms=1000, role_label="主"),
-                    TimingChar(text="あ", start_ms=1000, role_label="副"),
-                ],
-                end_ms=2000,
-            )
+            mkline([("あ", "主"), ("い", None)], 0, 1000),
+            mkline([("あ", "副")] * 3, 1100, 2000),
+            mkline([("あ", "副"), ("い", None)], 5000, 6000),
+            mkline([("あ", "主")], 9000, 10_000),
         ]
     )
-    assert auto_appearance_basis(style, spaced).font_size_px == 40
+    assert auto_appearance_basis(style, track).font_size_px == 200
+
+    # 段首行首字无标签 → 全局默认桶胜出，返回原对象（旧口径零开销路径）。
+    plain = TimingTrack(
+        lines=[
+            mkline([("あ", None)], 0, 1000),
+            mkline([("あ", None)], 5000, 6000),
+        ]
+    )
+    assert auto_appearance_basis(style, plain) is style
+
+    # 段首行首字空白（如前导空格）→ 跳过空白取第一个非空白字符的角色；
+    # 段内行的「主」再多也不投票。
+    space_leading = TimingTrack(
+        lines=[
+            mkline([(" ", "主"), ("あ", "副")], 0, 1000),
+            mkline([("あ", "主"), ("あ", "主")], 1100, 2000),
+        ]
+    )
+    assert auto_appearance_basis(style, space_leading).font_size_px == 40
+
+    # 未知标签（方案表悬空）计入全局默认桶；平票取先出现的段首行。
+    ghost_then_role = TimingTrack(
+        lines=[
+            mkline([("あ", "幽灵")], 0, 1000),
+            mkline([("あ", "主")], 5000, 6000),
+        ]
+    )
+    assert auto_appearance_basis(style, ghost_then_role) is style
+    tie_first_wins = TimingTrack(
+        lines=[
+            mkline([("あ", "副")], 0, 1000),
+            mkline([("あ", "主")], 5000, 6000),
+        ]
+    )
+    assert auto_appearance_basis(style, tie_first_wins).font_size_px == 40
+
+    # 信号模块全关（无宿主行）/竖排/无轨道：回退全局主样式。
+    disabled = Style(custom_style_schemes=style.custom_style_schemes)
+    assert auto_appearance_basis(disabled, track) is disabled
+    vertical = replace(style, vertical=True)
+    assert auto_appearance_basis(vertical, track) is vertical
+    assert auto_appearance_basis(style, None) is style
 
 
 def test_volume_auto_size_follows_dominant_role_scheme(qapp):
-    # 「跟随字体」物化走主轨最高频角色方案（不是全局主样式）：主导字号
-    # 更大 → 柱组更宽 → union 宽度更大、柱组左缘更靠左（居中行里柱体向
-    # 左扩、文字锚定不动）。paint_frame_to_painter 入口登记基准，这里走
-    # 同一登记 + 布局通道验证。
+    # 「跟随字体」物化走主轨信号宿主行最高频首角色方案（不是全局主样式）：
+    # 宿主行主导字号更大 → 柱组更宽 → union 宽度更大、柱组左缘更靠左
+    # （居中行里柱体向左扩、文字锚定不动）。paint_frame_to_painter 入口
+    # 登记基准，这里走同一登记 + 布局通道验证。
     from krok_helper.subtitle_render.engine.layout.layout_context import layout_pass
     from krok_helper.subtitle_render.engine.render.elements.signal import (
         set_signal_auto_basis,

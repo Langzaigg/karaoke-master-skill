@@ -1004,10 +1004,10 @@ def paint_frame_to_painter(
         style_with_output_scanline(style, logical_h), logical_h
     )
     with layout_pass():
-        # 「跟随字体」大小推导基准（主轨最高频角色方案）在区间顶部登记一次，
-        # 深处的信号布局/绘制物化点经 _signal_auto_basis 取同一份；主轨恒为
-        # 本函数的 track 参数——native IR 只物化一份基准值给全部字幕源，
-        # CPU 侧副轨也必须用主轨基准，两后端才会一致。
+        # 「跟随字体」大小推导基准（主轨信号宿主行最高频首角色方案）在
+        # 区间顶部登记一次，深处的信号布局/绘制物化点经 _signal_auto_basis
+        # 取同一份；主轨恒为本函数的 track 参数——native IR 只物化一份基准
+        # 值给全部字幕源，CPU 侧副轨也必须用主轨基准，两后端才会一致。
         _set_signal_auto_basis(style, track)
         if track is not None:
             _paint_track_to_painter(
@@ -2168,7 +2168,7 @@ def _resolve_sayatoo_line_layouts(
     # 只有音量柱插入字幕行首并参与 union；形状灯悬浮，不改变文字布局。
     # 形状灯 auto 外观（灯大小跟随主文字字号）在这里物化：signal_y 的
     # y 锚点要拿推导后的灯尺寸（与 signal.resolve_signal_layers 同门）。
-    # 推导基准同入口登记的主轨最高频角色方案（无登记时回退全局主样式）。
+    # 推导基准同入口登记的主轨信号宿主行口径（无登记时回退全局主样式）。
     _auto_basis = _signal_auto_basis(style)
     signal_layout_style = (
         _volume_style(style, auto_basis=_auto_basis)

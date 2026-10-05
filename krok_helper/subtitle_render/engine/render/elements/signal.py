@@ -165,8 +165,8 @@ def volume_style(style: Style, *, auto_basis: Style | None = None) -> Style:
 
     auto 外观模式在这里先行物化（大小/颜色跟随主文字），保证布局 union、
     绘制与 native IR（render_ir 同样经过 resolve_volume_appearance）三处
-    消费到同一组数值。``auto_basis`` 是「跟随字体」推导源（主轨最高频
-    角色方案），与 render_ir / painter 布局入口同源传入。
+    消费到同一组数值。``auto_basis`` 是「跟随字体」推导源（主轨信号宿主
+    行最高频首角色方案），与 render_ir / painter 布局入口同源传入。
     """
     style = resolve_volume_appearance(style, auto_basis=auto_basis)
     return replace(
@@ -182,11 +182,14 @@ def volume_style(style: Style, *, auto_basis: Style | None = None) -> Style:
 
 
 def set_signal_auto_basis(style: Style, primary_track: TimingTrack | None) -> None:
-    """渲染入口登记「跟随字体」大小推导基准（主轨最高频角色方案）。
+    """渲染入口登记「跟随字体」大小推导基准（主轨信号宿主行口径）。
 
-    只在排版区间内生效（区间外是独立工具调用，回退全局主样式旧口径）。
-    基准以 ``id(style)`` 为键：入口做完输出高度换算后传入换算后的 style
-    对象，深处的物化点用同一个对象取值。每帧一次计数，区间内复用。
+    基准 = 主轨段首行最高频首角色方案叠加全局样式（与 auto 档装饰源
+    「段首行第一个角色」同构，见 ``auto_appearance_basis``）。只在排版
+    区间内生效（区间外是独立工具调用，回退全局主样式旧口径）。基准以
+    ``id(style)`` 为键：入口做完输出高度换算后传入换算后的 style 对象，
+    深处的物化点用同一个对象取值。每帧一次计数，区间内复用（宿主行判定
+    命中 ``signal_heads`` 同一缓存）。
     """
     cache = getattr(_LAYOUT_PASS, "signal_auto_basis", None)
     if cache is None:
