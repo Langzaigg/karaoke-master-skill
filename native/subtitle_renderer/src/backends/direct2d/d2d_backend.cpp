@@ -97,6 +97,18 @@ Direct2DGpuBackend::sharedDeviceResources() const noexcept {
     return device_.sharedResources();
 }
 
+bool Direct2DGpuBackend::realizationPrewarmComplete() const noexcept {
+    return impl_->realizationPrewarmComplete.load(std::memory_order_acquire);
+}
+
+bool Direct2DGpuBackend::realizationPoolReady() const noexcept {
+    return impl_->realizationPoolReady.load(std::memory_order_acquire);
+}
+
+void Direct2DGpuBackend::setRealizationPoolReady(bool ready) noexcept {
+    impl_->realizationPoolReady.store(ready, std::memory_order_release);
+}
+
 void Direct2DGpuBackend::waitForRealizationPrewarm() {
     if (impl_->realizationThread.joinable()) {
         impl_->realizationThread.join();

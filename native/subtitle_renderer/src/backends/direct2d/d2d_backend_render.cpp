@@ -623,15 +623,17 @@ ProbeResult Direct2DGpuBackend::renderFrameInternal(
         sharedInstanceTransformActive = true;
         impl_->realizationContext->DrawGeometryRealization(realization, brush);
     };
-    // 全有或全无（2026-10）：realization 的使用只看「本 backend 的预热已
-    // 整体完成」。预热线程逐任务异步发布，若渲染侧「存在即用」，同一字符
-    // 层会在 DrawGeometry 原路径与 realization 网格两条栅格化路径间逐字符、
-    // 逐帧切换（预热窗口内基元差 ±4 alpha）——多 worker 预览各持一份预热
-    // 进度，相邻帧键出自不同 worker 时显形为描边/主文字层来回跳动。
-    // 完成前一律原路径直描，完成后一律网格；每个 backend 至多一次整体
-    // 切换，帧内与 worker 间不再混合两条路径。
+    // 全有或全无（2026-10）：realization 的使用看两个门——本 backend 的预热
+    // 是否完成 + 全池同步门（池每次提交任务前刷新，b 方案）。预热线程逐任务
+    // 异步发布，若渲染侧「存在即用」，同一字符层会在 DrawGeometry 原路径与
+    // realization 网格两条栅格化路径间逐字符、逐帧切换（预热窗口内基元差
+    // ±4 alpha）——多 worker 预览各持一份预热进度，相邻帧键出自不同 worker
+    // 时显形为描边/主文字层来回跳动。门控后：全池任一 worker 预热未完成时
+    // 一律原路径直描，全员完成后一起切网格；切换只发生在任务提交边界，
+    // 帧内与 worker 间不再混合两条路径。
     const bool realizationReady = impl_->realizationActive
-        && impl_->realizationPrewarmComplete.load(std::memory_order_acquire);
+        && impl_->realizationPrewarmComplete.load(std::memory_order_acquire)
+        && impl_->realizationPoolReady.load(std::memory_order_acquire);
     const auto fillWithRealization = [&] (
         ID2D1GeometryRealization *realization,
         ID2D1Geometry *geometry,

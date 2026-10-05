@@ -41,6 +41,14 @@ public:
     void waitForRealizationPrewarm();
     void adoptSharedGlyphResources(const Direct2DGpuBackend &source);
 
+    // ---- realization「全池同步门」（2026-10 G5 多 worker 抖动修复 b 方案）----
+    // 池在每次提交渲染任务前刷新：任一在岗 worker 预热未完成则全池走原路径
+    // 直描，全员完成后一起切换到 realization 网格。渲染侧读 realizationReady，
+    // 池侧调 refreshRealizationPoolReady 更新。
+    bool realizationPrewarmComplete() const noexcept;
+    bool realizationPoolReady() const noexcept;
+    void setRealizationPoolReady(bool ready) noexcept;
+
 private:
     // frameStoreIndex >= 0 时渲染进帧仓槽（G6 直画），否则进共享 scratch
     // 目标（G5 回读路径）。见 Impl::frameStore 的注释。

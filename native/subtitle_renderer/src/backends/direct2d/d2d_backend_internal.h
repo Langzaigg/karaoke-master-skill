@@ -386,6 +386,12 @@ struct Direct2DGpuBackend::Impl {
     std::thread realizationThread;
     std::vector<RetiredRealizationWorker> retiredRealizationWorkers;
     std::atomic<bool> realizationPrewarmComplete{true};
+    // realization「全池同步门」（2026-10 G5 多 worker 抖动修复 b 方案）：
+    // 池在每次提交渲染任务前按「所有在岗 worker 的预热是否完成」刷新，渲染
+    // 侧据此决定整帧走网格还是原路径。默认 true = 非池路径（G6 直画、无池
+    // 渲染）保持旧行为（仅按本 backend 预热完成放行）；池路径由 submit 前的
+    // 刷新覆盖，未刷新前不会有任务进队。
+    std::atomic<bool> realizationPoolReady{true};
     std::atomic<bool> renderActive{false};
     std::atomic<bool> firstFrameCompleted{false};
     std::atomic<std::int64_t> lastRenderCompletedMs{0};
