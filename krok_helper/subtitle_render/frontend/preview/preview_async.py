@@ -883,6 +883,7 @@ class GpuAsyncSubtitleRenderer(QObject):
             "configure_count": 0,
             "renderer_failures": 0,
             "renderer_restarts": 0,
+            "gpu_circuit_open": 0,
             "fallback_frames": 0,
             "fallback_failures": 0,
             "capability_fallbacks": 0,
@@ -2808,8 +2809,12 @@ class GpuAsyncSubtitleRenderer(QObject):
             return self._backend_mode
 
     def _note(self, key: str) -> None:
+        # 统计打点绝不抛错：未知键按 0 起计而非 KeyError——本方法跑在
+        # 预览 worker 线程里，任何异常都会杀死线程导致 GPU/CPU 预览同
+        # 时永久停摆（2026-10 用户实测：断路器熔断路径的未注册键
+        # gpu_circuit_open 曾把「优雅回退 Painter」变成预览全死）。
         with self._stats_lock:
-            self._stats[key] += 1
+            self._stats[key] = self._stats.get(key, 0) + 1
 
     def _note_max_pending(self, value: int) -> None:
         with self._stats_lock:
