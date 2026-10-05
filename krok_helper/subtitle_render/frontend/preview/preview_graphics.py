@@ -102,6 +102,20 @@ _RENDER_PROGRESS_STALL_S = 1.0
 """进度事件停驻超过该时长视为进入无刻度等待（sidecar 场景构建/首帧实现），
 徽标撤掉冻结的百分比，只显示阶段无关的倒计时。"""
 
+_RENDER_SIDECAR_STAGE_FRESH_S = 3.0
+"""sidecar 心跳阶段快照的新鲜期：超过视为该阶段已结束/无活跃任务。"""
+
+_RENDER_SIDECAR_STAGE_LABELS = {
+    "scene": "场景构建",
+    "realize": "字形烘焙",
+    "d2d-realize": "字形模具烘焙",
+    "d2d-widen": "描边展开",
+    "d2d-protected": "描边保护展开",
+    "range": "逐帧渲染",
+}
+"""sidecar 看门狗心跳的阶段名 → 徽标中文标签（idle 不展示：无任务状态
+不该顶掉 Python 侧的进度文本）。"""
+
 
 class _RenderBusyBadge(QWidget):
     """预览画布角落的「字幕渲染」徽标：半透明 pill + 阶段/百分比文本。
@@ -717,6 +731,37 @@ class PreviewGraphicsView(QGraphicsView):
         remaining = sorted(history)[len(history) // 2] - elapsed
         return remaining if remaining > 0.05 else None
 
+    def _sidecar_stage_text(self, now: float) -> Optional[str]:
+        """sidecar 心跳阶段文本（忙碌徽标用）；无新鲜阶段返回 None。
+
+        快照来自 GPU 预览 worker 的 progress_snapshot()（backend 管道线程
+        整体替换发布，GUI 线程无锁读）。D2D 大任务（描边展开/字形模具
+        烘焙）期间 Python 侧进度停驻，这正是「卡在哪一段」的地面真相；
+        idle 心跳不展示——空闲不该顶掉 Python 侧的进度文本。
+        """
+        renderer = self._async_renderer
+        snapshot_getter = getattr(renderer, "progress_snapshot", None)
+        if not callable(snapshot_getter):
+            return None
+        try:
+            snapshot = snapshot_getter()
+        except Exception:  # noqa: BLE001 - 徽标轮询绝不向 GUI 抛错
+            return None
+        if not isinstance(snapshot, dict):
+            return None
+        phase = str(snapshot.get("phase", ""))
+        label = _RENDER_SIDECAR_STAGE_LABELS.get(phase)
+        if label is None:
+            return None
+        at = float(snapshot.get("at", 0.0) or 0.0)
+        if now - at > _RENDER_SIDECAR_STAGE_FRESH_S:
+            return None
+        done = int(snapshot.get("done", 0) or 0)
+        total = int(snapshot.get("total", 0) or 0)
+        if total > 0:
+            return f"字幕渲染 · {label}中 {done}/{total}"
+        return f"字幕渲染 · {label}中"
+
     def _update_render_busy_badge(self) -> None:
         since = self._render_pending_since
         if since is None:
@@ -727,6 +772,10 @@ class PreviewGraphicsView(QGraphicsView):
         elapsed = now - since
         if elapsed < _RENDER_BUSY_DELAY_S and not self._render_busy_badge.isVisible():
             return
+        # sidecar 心跳阶段（地面真相）优先：D2D 大任务期间 Python 侧进度
+        # 必然停驻，旧的 stalled 分支只剩阶段无关倒计时——现在能精确到
+        # 「描边展开中 / 字形模具烘焙中 128/598」。
+        sidecar_stage = self._sidecar_stage_text(now)
         # 进度事件停驻超阈值 = 进入无 Python 刻度的等待段（sidecar 场景构建 /
         # 首帧实现）：撤掉冻结的百分比，但保留阶段名，让用户看得出卡在哪一段。
         stalled = (
@@ -734,7 +783,9 @@ class PreviewGraphicsView(QGraphicsView):
             and self._render_progress_at is not None
             and now - self._render_progress_at > _RENDER_PROGRESS_STALL_S
         )
-        if stalled:
+        if sidecar_stage is not None:
+            text = sidecar_stage
+        elif stalled:
             label = self._render_progress_label
             text = f"字幕渲染 · {label}中" if label else "字幕渲染"
         else:

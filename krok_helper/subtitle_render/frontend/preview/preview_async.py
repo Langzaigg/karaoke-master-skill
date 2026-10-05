@@ -2030,6 +2030,22 @@ class GpuAsyncSubtitleRenderer(QObject):
     def _report_fallback(self, message: str) -> None:
         self._fallback_gate.report(message)
 
+    def progress_snapshot(self):
+        """最近一拍 sidecar 心跳阶段（GUI 线程轮询，见忙碌徽标）。
+
+        快照 dict 由 backend 管道线程整体替换发布，这里无锁转读；
+        进程未起/测试假件没有该接口时返回 None。G5/G6 共用同一
+        sidecar，两模式都能取到阶段。
+        """
+        renderer = self._renderer_owner.process
+        snapshot = getattr(renderer, "progress_snapshot", None)
+        if not callable(snapshot):
+            return None
+        try:
+            return snapshot()
+        except Exception:  # noqa: BLE001 - 轮询路径绝不向 GUI 抛错
+            return None
+
     def _ensure_renderer(self) -> NativeRendererProcess:
         return self._renderer_owner.ensure()
 

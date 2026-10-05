@@ -5601,3 +5601,57 @@ def test_enqueue_stdout_records_heartbeat_without_queueing():
     assert len(lines) == 1
     assert json_mod.loads(lines[0])["event"] == "frame"
     assert proc._last_heartbeat_monotonic > 0.0
+    # 阶段快照同步记录（GUI 忙碌徽标显示「卡在哪一段」用）。
+    snapshot = proc.progress_snapshot()
+    assert snapshot is not None
+    assert snapshot["phase"] == "idle"
+    assert snapshot["done"] == 0 and snapshot["total"] == 0
+
+
+def test_busy_badge_prefers_fresh_sidecar_stage(qapp, monkeypatch):
+    """徽标阶段文本优先用 sidecar 心跳阶段（D2D 大任务的地面真相）。"""
+    from krok_helper.subtitle_render.frontend.preview import preview_graphics as pg
+    from krok_helper.subtitle_render.frontend.preview.preview_graphics import PreviewGraphicsView
+
+    class FakeRenderer:
+        def __init__(self, snapshot):
+            self._snapshot = snapshot
+
+        def progress_snapshot(self):
+            return self._snapshot
+
+    graphics = PreviewGraphicsView()
+    try:
+        now = time.monotonic()
+        # 带计数的 realize 阶段（新鲜）→ 显示中文标签 + done/total。
+        graphics._async_renderer = FakeRenderer({  # noqa: SLF001
+            "phase": "realize", "done": 128, "total": 598, "at": now - 0.2,
+        })
+        assert graphics._sidecar_stage_text(time.monotonic()) == (  # noqa: SLF001
+            "字幕渲染 · 字形烘焙中 128/598"
+        )
+        # D2D 大任务阶段（无计数）→ 只有标签。
+        graphics._async_renderer = FakeRenderer({  # noqa: SLF001
+            "phase": "d2d-widen", "done": 0, "total": 0, "at": time.monotonic(),
+        })
+        assert graphics._sidecar_stage_text(time.monotonic()) == (  # noqa: SLF001
+            "字幕渲染 · 描边展开中"
+        )
+        # idle 不展示（无任务状态不顶掉 Python 侧进度文本）。
+        graphics._async_renderer = FakeRenderer({  # noqa: SLF001
+            "phase": "idle", "done": 0, "total": 0, "at": time.monotonic(),
+        })
+        assert graphics._sidecar_stage_text(time.monotonic()) is None  # noqa: SLF001
+        # 过期快照视为阶段已结束。
+        graphics._async_renderer = FakeRenderer({  # noqa: SLF001
+            "phase": "realize", "done": 1, "total": 9, "at": now - 30.0,
+        })
+        assert graphics._sidecar_stage_text(time.monotonic()) is None  # noqa: SLF001
+        # CPU 渲染器（无 progress_snapshot 接口）→ None，徽标回落旧行为。
+        graphics._async_renderer = object()  # noqa: SLF001
+        assert graphics._sidecar_stage_text(time.monotonic()) is None  # noqa: SLF001
+        graphics._async_renderer = None  # noqa: SLF001 - 还原，避免 close 调 stop
+    finally:
+        graphics.close()
+        graphics.deleteLater()
+        qapp.processEvents()

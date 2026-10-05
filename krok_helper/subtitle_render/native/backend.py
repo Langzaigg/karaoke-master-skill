@@ -801,6 +801,10 @@ class NativeRendererProcess:
         # 原子，无需锁）。sidecar 忙碌时任务内逐段上报、空闲时由存活
         # 定时器上报（暂停/播完/无任务同样喂狗）；时间戳停走 = 真死锁。
         self._last_heartbeat_monotonic: float = 0.0
+        # 最近一拍心跳的阶段快照（phase/done/total/at）：GUI 忙碌徽标
+        # 显示「卡在哪一段」（场景构建/字形烘焙/描边展开…）。dict 整体
+        # 替换发布，跨线程读取无需加锁。
+        self._progress_snapshot: dict[str, Any] | None = None
         # 导唱符轮廓表哈希门的进程内记忆（None = 从未发过表，首次必发）。
         # 生命周期与本 sidecar 进程一致：重启即新实例、记忆清零。
         self._last_vector_glyphs_hash: str | None = None
@@ -812,6 +816,15 @@ class NativeRendererProcess:
     @property
     def is_running(self) -> bool:
         return self._process is not None and self._process.poll() is None
+
+    def progress_snapshot(self) -> dict[str, Any] | None:
+        """最近一拍 sidecar 心跳的阶段快照（phase/done/total/at）。
+
+        at 为本进程 time.monotonic() 读数；None = 尚未收到任何心跳。
+        供 GUI 忙碌徽标显示「卡在哪一段」（场景构建/字形烘焙/描边展开）；
+        阶段是否「新鲜」由调用方按 at 判定。
+        """
+        return self._progress_snapshot
 
     @property
     def process_id(self) -> int | None:
@@ -1624,6 +1637,19 @@ class NativeRendererProcess:
                 # 键序固定，子串判定足够且免去每行完整解析。
                 if '"event":"progress"' in line:
                     self._last_heartbeat_monotonic = time.monotonic()
+                    try:
+                        progress = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
+                    if isinstance(progress, dict) and "phase" in progress:
+                        # 阶段快照（GUI 忙碌徽标显示「卡在哪一段」用）：
+                        # dict 整体替换发布，读侧无锁拿一致视图。
+                        self._progress_snapshot = {
+                            "phase": str(progress.get("phase", "")),
+                            "done": int(progress.get("done", 0) or 0),
+                            "total": int(progress.get("total", 0) or 0),
+                            "at": self._last_heartbeat_monotonic,
+                        }
                     continue
                 self._stdout_queue.put(line)
         except (ValueError, OSError):
