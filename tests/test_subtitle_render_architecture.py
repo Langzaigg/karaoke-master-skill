@@ -4214,8 +4214,7 @@ def test_subtitle_render_window_delegates_n3_import_commands() -> None:
         and isinstance(node.func.value, ast.Attribute)
         and node.func.value.attr == "_n3_import_controller"
     }
-    assert controller_calls == {"choose_path", "load", "rebase_style_for_video"}
-
+    assert controller_calls == {"choose_path", "load"}
 
 def test_subtitle_render_window_delegates_preview_window_state() -> None:
     window_path = ROOT / "frontend" / "main_window.py"
@@ -5311,7 +5310,7 @@ def test_subtitle_render_window_delegates_project_identity_adoption() -> None:
     method_names = {
         "_new_project",
         "_open_project_path",
-        "_import_n3_project_path",
+        "_finish_n3_import",
         "_restore_recovery_candidate",
     }
     for method in window_class.body:

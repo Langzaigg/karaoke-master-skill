@@ -600,6 +600,17 @@ def invalidate_n3_font_caches() -> None:
     _get_n3_font_catalog.cache_clear()
     _resolve_qt_font_family_cached.cache_clear()
     try:
+        from krok_helper.subtitle_render.engine.text.font_weight import (
+            clear_font_weight_cache,
+        )
+
+        # face_inventory 是进程级缓存；Qt 字体登记变化后必须一并清掉，
+        # 否则注册/注销应用字体的测试会把旧的空 inventory 快照留给后续
+        # 用例（如 Yu Gothic 多面字重测试读到 []）。
+        clear_font_weight_cache()
+    except Exception:
+        pass
+    try:
         from strange_uta_game.frontend import font_cache
 
         # Qt registry changes do not alter font files on disk, so the
