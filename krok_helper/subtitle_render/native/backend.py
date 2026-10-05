@@ -308,9 +308,15 @@ class SharedFrameRingReader:
         if pixel_format is None:
             raise NativeRendererError(f"unsupported shared frame pixel format id: {format_id}")
         if slot_offset + header_payload_offset != payload_offset:
-            raise NativeRendererError("shared frame payload offset does not match slot header")
+            # 事件与槽内来自不同的写入门类/帧（槽被覆写）：过时槽的
+            # 布局形态，与 frame_index/t_ms 错配同类，按丢帧处理。
+            raise StaleSharedFrameSlotError(
+                "shared frame payload offset does not match slot header"
+            )
         if header_payload_bytes != payload_bytes:
-            raise NativeRendererError("shared frame payload byte count does not match slot header")
+            raise StaleSharedFrameSlotError(
+                "shared frame payload byte count does not match slot header"
+            )
         self._validate_header_matches_event(
             frame_ready_event,
             generation=generation,
@@ -414,9 +420,13 @@ class SharedFrameRingReader:
             }:
                 raise NativeRendererError(f"unsupported shared frame pixel format id: {format_id}")
             if slot_offset + header_payload_offset != payload_offset:
-                raise NativeRendererError("shared frame payload offset does not match slot header")
+                raise StaleSharedFrameSlotError(
+                    "shared frame payload offset does not match slot header"
+                )
             if header_payload_bytes != payload_bytes:
-                raise NativeRendererError("shared frame payload byte count does not match slot header")
+                raise StaleSharedFrameSlotError(
+                    "shared frame payload byte count does not match slot header"
+                )
             self._validate_header_matches_event(
                 frame_ready_event,
                 generation=generation,
