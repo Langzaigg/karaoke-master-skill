@@ -297,6 +297,9 @@ struct TextLine {
     // Sayatoo signal lamps (every lit style) attach only to each section's
     // first page's first line; the painter stamps this flag in the render IR.
     bool signalHead = false;
+    // 分模块宿主旗标（协议注释见 render_config.h）：柱组/形状灯各自门控。
+    bool volumeHead = false;
+    bool litHead = false;
     // 「真一组」渐变带正文侧拓宽闸门（协议注释见 render_config.h）。
     bool signalBandJoin = false;
     // Python 在源加载入口已把整行时间戳严格逆序的行镜像理顺为顺序，仅保留

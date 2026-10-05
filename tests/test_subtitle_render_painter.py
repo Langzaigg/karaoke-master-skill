@@ -2111,6 +2111,64 @@ def test_auto_appearance_basis_counts_signal_host_lines():
     assert auto_appearance_basis(style, None) is style
 
 
+def test_signal_head_overrides_per_module():
+    # 挂载行开关（特效行开关）：音量柱/指示灯各自的宿主行 = 段首基线
+    # ∪ 强制开 − 强制关；并集供显示过滤；逐行 lead 只算该行实际挂载的模块。
+    from krok_helper.subtitle_render.engine.layout.layout_context import layout_pass
+    from krok_helper.subtitle_render.engine.layout.display.signal import (
+        lit_signal_head_context,
+        signal_head_context,
+        signal_host_context,
+        signal_host_lead_map,
+        volume_signal_head_context,
+    )
+
+    def mk(start, end, vol=None, lit=None):
+        line = TimingLine(chars=[TimingChar(text="あ", start_ms=start)], end_ms=end)
+        line.volume_head_override = vol
+        line.lit_head_override = lit
+        return line
+
+    # 三段（段间奏 > section_gap）：段首 = 行 0/2/4。
+    style = Style(
+        volume_enabled=True,
+        lit_enabled=True,
+        lit_style="circle",
+        section_gap_ms=1000,
+        volume_duration_ms=2000,
+        signals_duration_ms=1000,
+    )
+    track = TimingTrack(
+        lines=[
+            mk(0, 1000, vol=False),  # 段首柱强制关
+            mk(1100, 2000),
+            mk(5000, 6000),
+            mk(6100, 7000, lit=True),  # 段内灯强制开
+            mk(9000, 10_000, lit=False),  # 段首灯强制关
+        ]
+    )
+    with layout_pass():
+        assert sorted(signal_head_context(track, style)) == [0, 2, 4]
+        assert sorted(volume_signal_head_context(track, style)) == [2, 4]
+        assert sorted(lit_signal_head_context(track, style)) == [0, 2, 3]
+        assert sorted(signal_host_context(track, style)) == [0, 2, 3, 4]
+        leads = signal_host_lead_map(track, style)
+    # 行0 柱关灯开 → 只算灯提前量；行2 双模块 → 取最大；行3 仅灯；行4 仅柱。
+    assert leads == {0: 1000, 2: 2000, 3: 1000, 4: 2000}
+
+    # legacy lit_style="volume" 工程的柱组走 volume 覆盖口径（同一个开关）。
+    legacy = replace(style, volume_enabled=False, lit_style="volume")
+    with layout_pass():
+        assert sorted(volume_signal_head_context(track, legacy)) == [2, 4]
+        assert lit_signal_head_context(track, legacy) is None
+    # 信号模块全关 / 竖排：无宿主。
+    disabled = replace(style, volume_enabled=False, lit_enabled=False)
+    vertical = replace(style, vertical=True)
+    with layout_pass():
+        assert signal_host_context(track, disabled) is None
+        assert signal_host_context(track, vertical) is None
+
+
 def test_volume_auto_size_follows_dominant_role_scheme(qapp):
     # 「跟随字体」物化走主轨信号宿主行最高频首角色方案（不是全局主样式）：
     # 宿主行主导字号更大 → 柱组更宽 → union 宽度更大、柱组左缘更靠左
@@ -2151,6 +2209,38 @@ def test_volume_auto_size_follows_dominant_role_scheme(qapp):
     small = layout_with(16)
     assert big.total_w > small.total_w
     assert big.signal_x < small.signal_x
+
+
+def test_volume_head_override_removes_union_participation(qapp):
+    # 挂载行开关（特效行开关）落到 painter 布局：段首行强制关柱后，
+    # 该行不再参与信号 union（signal_x 为 None、行宽回到纯文字），
+    # 取消覆盖即恢复。形状灯不受影响（悬浮，不占 union）。
+    from krok_helper.subtitle_render.engine.layout.layout_context import layout_pass
+
+    line = TimingLine(chars=[TimingChar(text="あ", start_ms=1000)], end_ms=2000)
+    style = Style(
+        font_size_px=32,
+        volume_enabled=True,
+        volume_appearance_mode="auto",
+        volume_duration_ms=1000,
+        volume_waiting_time_ms=0,
+        volume_time_offset_ms=0,
+    )
+
+    def layout_for(volume_override):
+        line.volume_head_override = volume_override
+        track = TimingTrack(lines=[line])
+        with layout_pass():
+            return _sayatoo_layout_for(track, style, 500)
+
+    default_layout = layout_for(None)
+    assert default_layout.signal_x is not None
+    suppressed = layout_for(False)
+    assert suppressed.signal_x is None
+    # 柱组不再参与 union：文字回到纯文字居中（不再为柱让位）。
+    assert suppressed.text_x < default_layout.text_x
+    # 恢复默认（None）后 union 回来。
+    assert layout_for(None).signal_x is not None
 
 
 def _lit_auto_pixel_base(**overrides) -> dict:

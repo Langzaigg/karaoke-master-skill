@@ -134,6 +134,8 @@ struct Direct2DGpuBackend::Impl {
         int compositeOrder = 0;
         int lane = 0;
         bool signalHead = false;
+        bool volumeHead = false;
+        bool litHead = false;
         // 「真一组」渐变带正文侧拓宽闸门（协议注释见 render_config.h）：
         // configure 据此拓宽第一角色的横向渐变跨度左缘。
         bool signalBandJoin = false;

@@ -1316,9 +1316,18 @@ def _bind_undo_host(track, extra_sources=()):
         "_restore_display_override",
         "_restore_animation_overrides",
         "_restore_wipe_reverse_rows",
+        "_restore_volume_host_rows",
+        "_restore_lit_host_rows",
         "_on_line_animation_override_requested",
         "_on_wipe_reverse_edited",
         "_on_wipe_reverse_requested",
+        "_on_volume_host_edited",
+        "_on_lit_host_edited",
+        "_on_volume_host_requested",
+        "_on_lit_host_requested",
+        "_apply_head_override_rows",
+        "_register_head_override_edit",
+        "_restore_head_override_rows",
         "_track_by_index",
         "_clear_undo_history",
     ):
@@ -1594,3 +1603,55 @@ def test_edit_history_dispatches_old_and_new_command_values(
     assert calls == [new_args]
     assert undo_stack == [command]
     assert redo_stack == []
+
+
+def test_head_override_edits_support_undo_redo() -> None:
+    from krok_helper.subtitle_render.domain.models import TimingChar, TimingLine, TimingTrack
+
+    track = TimingTrack(
+        lines=[
+            TimingLine(chars=[TimingChar("あ", 1000)], end_ms=2000),
+            TimingLine(chars=[TimingChar("い", 3000)], end_ms=4000),
+        ]
+    )
+    host = _bind_undo_host(track)
+    line = track.lines[0]
+
+    # 轨道块右键单行：视图先把新值写在 TimingLine 上，再向宿主上报
+    # 旧值 → 新值（与反向走字同一条契约）。强制开柱 → 撤销回 None
+    # （默认段首）→ 重做恢复。
+    line.volume_head_override = True
+    host._on_volume_host_edited(0, 0, None, True)
+    assert line.volume_head_override is True
+    assert len(host._undo_stack) == 1
+
+    host._undo_edit()
+    assert line.volume_head_override is None
+    assert len(host._redo_stack) == 1
+
+    host._redo_edit()
+    assert line.volume_head_override is True
+
+    # 歌词列表右键批量：灯强制关（含等值快路径不产生可撤销编辑）。
+    host._on_lit_host_requested([0, 1], False)
+    assert [item.lit_head_override for item in track.lines] == [False, False]
+    assert len(host._undo_stack) == 2
+    host._on_lit_host_requested([1], False)
+    assert len(host._undo_stack) == 2  # 等值无编辑
+
+    host._undo_edit()
+    assert [item.lit_head_override for item in track.lines] == [None, None]
+
+
+def test_head_override_batch_restore_accepts_invalid_as_none() -> None:
+    from krok_helper.subtitle_render.domain.models import TimingChar, TimingLine, TimingTrack
+
+    track = TimingTrack(
+        lines=[TimingLine(chars=[TimingChar("あ", 1000)], end_ms=2000)]
+    )
+    host = _bind_undo_host(track)
+    # 旧栈/异常载荷里的非布尔项按 None（默认段首）回放，不抛异常。
+    assert host._restore_volume_host_rows(0, (0,), ("invalid",)) is True
+    assert track.lines[0].volume_head_override is None
+    assert host._restore_lit_host_rows(0, (0,), (False,)) is True
+    assert track.lines[0].lit_head_override is False

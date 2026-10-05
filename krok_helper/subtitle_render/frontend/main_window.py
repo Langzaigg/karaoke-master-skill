@@ -2737,6 +2737,12 @@ class SubtitleRenderWindow(QWidget):
         self._lyrics_panel.wipeReverseRequested.connect(
             self._on_wipe_reverse_requested
         )
+        self._lyrics_panel.volumeHostRequested.connect(
+            self._on_volume_host_requested
+        )
+        self._lyrics_panel.litHostRequested.connect(
+            self._on_lit_host_requested
+        )
         self._lyrics_panel.rowClicked.connect(self._on_lyrics_row_clicked)
         self._lyrics_panel.layoutChangeRequested.connect(
             self._on_layout_change_requested
@@ -2874,6 +2880,12 @@ class SubtitleRenderWindow(QWidget):
         )
         self._tracks_view.wipeReverseEdited.connect(
             self._on_wipe_reverse_edited
+        )
+        self._tracks_view.volumeHostEdited.connect(
+            self._on_volume_host_edited
+        )
+        self._tracks_view.litHostEdited.connect(
+            self._on_lit_host_edited
         )
         self._transport_bar.timeChanged.connect(self._tracks_view.set_time)
         return page
@@ -5296,6 +5308,111 @@ class SubtitleRenderWindow(QWidget):
         self._refresh_after_display_edit(track_index)
         for row in valid_rows:
             self._lyrics_panel.refresh_row_effect(row)
+
+    # ------------------------------------------------------------------
+    # 挂载行开关（音量柱/指示灯特效）：三态覆盖 None/True/False，
+    # None = 默认段首模式。轨道块右键单行、歌词列表右键批量。
+    # ------------------------------------------------------------------
+
+    def _on_volume_host_edited(
+        self, track_index: int, line_index: int, old_value: object, new_value: object
+    ) -> None:
+        """字幕轨道右键设置音量柱特效挂载行：入撤销栈 + 刷新预览 + 标脏。"""
+        self._register_head_override_edit(
+            "volume_host", track_index, (int(line_index),), (old_value,), (new_value,)
+        )
+
+    def _on_lit_host_edited(
+        self, track_index: int, line_index: int, old_value: object, new_value: object
+    ) -> None:
+        """字幕轨道右键设置指示灯特效挂载行：入撤销栈 + 刷新预览 + 标脏。"""
+        self._register_head_override_edit(
+            "lit_host", track_index, (int(line_index),), (old_value,), (new_value,)
+        )
+
+    def _on_volume_host_requested(self, rows: list, value: object) -> None:
+        """歌词列表右键批量设置音量柱特效挂载行。"""
+        self._apply_head_override_rows(
+            "volume_host", "volume_head_override", rows, value
+        )
+
+    def _on_lit_host_requested(self, rows: list, value: object) -> None:
+        """歌词列表右键批量设置指示灯特效挂载行。"""
+        self._apply_head_override_rows("lit_host", "lit_head_override", rows, value)
+
+    def _apply_head_override_rows(
+        self, kind: str, field_name: str, rows: list, value: object
+    ) -> None:
+        track_index = self._active_source_index
+        track = self._track_by_index(track_index)
+        if track is None:
+            return
+        valid_rows = sorted({int(row) for row in rows if 0 <= int(row) < len(track.lines)})
+        if not valid_rows:
+            return
+        old_values = tuple(
+            getattr(track.lines[row], field_name, None) for row in valid_rows
+        )
+        new_values = tuple(value for _row in valid_rows)
+        if old_values == new_values:
+            return
+        for row in valid_rows:
+            setattr(track.lines[row], field_name, value)
+        self._register_head_override_edit(
+            kind, track_index, tuple(valid_rows), old_values, new_values
+        )
+
+    def _register_head_override_edit(
+        self,
+        kind: str,
+        track_index: int,
+        rows: tuple,
+        old_values: tuple,
+        new_values: tuple,
+    ) -> None:
+        if self._track_by_index(track_index) is None:
+            return
+        self._undo_stack.append((kind, track_index, rows, old_values, new_values))
+        del self._undo_stack[:-_UNDO_STACK_LIMIT]
+        self._redo_stack.clear()
+        self._refresh_after_display_edit(track_index)
+        if track_index == self._active_source_index:
+            for row in rows:
+                self._lyrics_panel.refresh_row_effect(int(row))
+
+    def _restore_volume_host_rows(
+        self, track_index: int, rows: object, values: object
+    ) -> bool:
+        return self._restore_head_override_rows(
+            track_index, rows, values, "volume_head_override"
+        )
+
+    def _restore_lit_host_rows(
+        self, track_index: int, rows: object, values: object
+    ) -> bool:
+        return self._restore_head_override_rows(
+            track_index, rows, values, "lit_head_override"
+        )
+
+    def _restore_head_override_rows(
+        self, track_index: int, rows: object, values: object, field_name: str
+    ) -> bool:
+        track = self._track_by_index(track_index)
+        if track is None or not isinstance(rows, tuple) or not isinstance(values, tuple):
+            return False
+        if len(rows) != len(values) or any(not 0 <= row < len(track.lines) for row in rows):
+            return False
+        for row, value in zip(rows, values):
+            setattr(
+                track.lines[row],
+                field_name,
+                value if isinstance(value, bool) else None,
+            )
+        self._refresh_after_display_edit(track_index)
+        if track_index == self._active_source_index:
+            for row in rows:
+                self._lyrics_panel.refresh_row_effect(row)
+        return True
 
     def _refresh_after_display_edit(self, track_index: int) -> None:
         # 覆盖值已直接写在 TimingLine 上；track 是原地修改的，

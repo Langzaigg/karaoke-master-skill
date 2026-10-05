@@ -156,12 +156,13 @@ def auto_appearance_basis(style: Style, track: object) -> Style:
         return style
     # 函数内导入：display.signal → page.plan 一侧导入面更宽，顶层互引容易
     # 成环（同 horizontal.layout 的 in-function import 处理）。宿主行判定
-    # 复用渲染热路径同一入口——排版区间内命中 ``signal_heads`` 缓存。
+    # 复用渲染热路径同一入口——排版区间内命中 ``signal_heads`` 缓存；
+    # 宿主 = 任一模块（音量柱/指示灯）挂载行并集（含行级覆盖）。
     from krok_helper.subtitle_render.engine.layout.display.signal import (
-        signal_head_context,
+        signal_host_context,
     )
 
-    heads = signal_head_context(track, style)
+    heads = signal_host_context(track, style)
     if not heads:
         return style
     schemes = style.custom_style_schemes

@@ -623,6 +623,8 @@ krok::subtitle::native::RenderScene gpuSceneFromConfig(const RenderConfig &confi
         line.pageIndex = sourceLine.pageIndex;
         line.lane = sourceLine.lane;
         line.signalHead = sourceLine.signalHead;
+        line.volumeHead = sourceLine.volumeHead;
+        line.litHead = sourceLine.litHead;
         line.signalBandJoin = sourceLine.signalBandJoin;
         line.wipeReverse = sourceLine.wipeReverse;
         line.centerOverride = sourceLine.centerOverride;

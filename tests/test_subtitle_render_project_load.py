@@ -648,3 +648,27 @@ def test_post_emoji_project_replay_still_replaces_wholesale() -> None:
     assert set(line.inline_guide_symbols) == {0, 1}
     assert line.inline_guide_symbols[1].name == "风车"
     assert [ch.role_label for ch in line.chars] == ["主唱"] * 4
+
+
+def test_apply_track_project_data_applies_head_overrides() -> None:
+    track = TimingTrack(
+        lines=[
+            TimingLine(chars=[TimingChar("甲", 1000)], end_ms=2000),
+            TimingLine(chars=[TimingChar("乙", 3000)], end_ms=4000),
+        ]
+    )
+
+    apply_track_project_data(
+        track,
+        Style(),
+        {
+            "line_volume_host_overrides": [True, "invalid"],
+            "line_lit_host_overrides": [False, None],
+        },
+    )
+
+    # 挂载行开关（音量柱/指示灯特效）回放；非布尔项按 None 处理。
+    assert track.lines[0].volume_head_override is True
+    assert track.lines[1].volume_head_override is None
+    assert track.lines[0].lit_head_override is False
+    assert track.lines[1].lit_head_override is None

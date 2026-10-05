@@ -85,9 +85,6 @@ from krok_helper.subtitle_render.engine.render.elements.horizontal.wipe import (
     adjust_fill_release_edges,
     n3_char_wipe_ranges_by_index,
 )
-from krok_helper.subtitle_render.engine.layout.display.signal import (
-    signal_head_context,
-)
 from krok_helper.subtitle_render.engine.style.style_semantics import (
     appearance_role_source,
 )
@@ -115,7 +112,13 @@ def signal_band_left_local(
         return None
     if style.right_to_left != line.wipe_reverse:
         return None
-    heads = signal_head_context(track, style)
+    # 宿主口径 = 音量柱宿主行（段首基线 + volume_head_override 行级覆盖）：
+    # 柱被行级覆盖关掉的段首行不做正文拓宽。
+    from krok_helper.subtitle_render.engine.layout.display.signal import (
+        volume_signal_head_context,
+    )
+
+    heads = volume_signal_head_context(track, style)
     if heads is None:
         return None
     index = next(

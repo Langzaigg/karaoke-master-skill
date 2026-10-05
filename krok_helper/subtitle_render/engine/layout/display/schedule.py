@@ -12,8 +12,7 @@ from krok_helper.subtitle_render.engine.layout.line.style import (
     style_for_line_display_window,
 )
 from krok_helper.subtitle_render.engine.layout.display.signal import (
-    signal_head_context,
-    signal_lead_in_ms,
+    signal_host_lead_map,
 )
 from krok_helper.subtitle_render.engine.layout.page.placement import (
     LineVisualBand,
@@ -103,14 +102,14 @@ def single_line_display_windows(
     windows: DisplayWindows = {}
     lead = max(style.line_lead_in_ms, 0)
     tail = max(style.line_tail_ms, 0)
-    signal_heads = signal_head_context(track, style)
-    signal_lead = signal_lead_in_ms(style) if signal_heads is not None else 0
+    # 宿主行并集 + 逐行提前量（特效行开关下两模块宿主行可不同）。
+    signal_leads = signal_host_lead_map(track, style)
     for index, line in enumerate(track.lines):
         if line.is_blank or not line.chars:
             continue
         line_lead = (
-            max(lead, signal_lead)
-            if signal_heads is not None and index in signal_heads
+            max(lead, signal_leads.get(index, 0))
+            if signal_leads is not None
             else lead
         )
         display_start = max(line_start_ms(line) - line_lead, 0)
@@ -181,14 +180,14 @@ def single_visible_display_line(
     best_lead_or_tail: DisplayLine | None = None
     lead = max(style.line_lead_in_ms, 0)
     tail = max(style.line_tail_ms, 0)
-    signal_heads = signal_head_context(track, style)
-    signal_lead = signal_lead_in_ms(style) if signal_heads is not None else 0
+    # 宿主行并集 + 逐行提前量（特效行开关下两模块宿主行可不同）。
+    signal_leads = signal_host_lead_map(track, style)
     for index, line in enumerate(track.lines):
         if line.is_blank or not line.chars:
             continue
         line_lead = (
-            max(lead, signal_lead)
-            if signal_heads is not None and index in signal_heads
+            max(lead, signal_leads.get(index, 0))
+            if signal_leads is not None
             else lead
         )
         sing_start = line_start_ms(line)

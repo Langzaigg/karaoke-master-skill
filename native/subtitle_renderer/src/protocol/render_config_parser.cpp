@@ -1366,6 +1366,14 @@ static void applyLineStyleSection(
             line.signalHead = lineObject.value(
                 QStringLiteral("signal_head")
             ).toBool(true);
+            // Per-module host flags: legacy IRs carry only signal_head —
+            // both modules then follow it (pre-switch behavior).
+            line.volumeHead = lineObject.value(
+                QStringLiteral("volume_head")
+            ).toBool(line.signalHead);
+            line.litHead = lineObject.value(
+                QStringLiteral("lit_head")
+            ).toBool(line.signalHead);
             // 「真一组」渐变带正文侧拓宽闸门（缺省 false 兼容旧 IR）。
             line.signalBandJoin = lineObject.value(
                 QStringLiteral("signal_band_join")

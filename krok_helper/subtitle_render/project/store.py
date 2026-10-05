@@ -322,6 +322,8 @@ def project_payload(
     line_display_overrides: Optional[list] = None,
     line_animation_overrides: Optional[list] = None,
     line_wipe_reverse_overrides: Optional[list] = None,
+    line_volume_host_overrides: Optional[list] = None,
+    line_lit_host_overrides: Optional[list] = None,
     page_plan: Optional[dict] = None,
     loading_settings_mode: Optional[str] = None,
     loading_settings: Optional[dict] = None,
@@ -360,7 +362,9 @@ def project_payload(
 
     ``line_wipe_reverse_overrides`` 同样与 ``track.lines`` 对齐：每项为 None
     （按源文件逆序检测自动判定）或该行手动指定的反向走字布尔值（项目 UI
-    右键「反向走字」写入）。
+    右键「反向走字」写入）。``line_volume_host_overrides`` /
+    ``line_lit_host_overrides`` 同口径：每项为 None（默认段首模式——只挂
+    每段第一行）或 True/False（右键「音量柱特效/指示灯特效」强制挂/不挂）。
 
     ``extra_subtitle_sources``：副字幕源列表（N3 多歌词文件，如コーラス轨），
     每项为 ``{"name", "path", "line_layout_indices", "char_role_labels",
@@ -437,6 +441,15 @@ def project_payload(
             bool(row) if isinstance(row, bool) else None
             for row in line_wipe_reverse_overrides
         ]
+    for _key, _rows in (
+        ("line_volume_host_overrides", line_volume_host_overrides),
+        ("line_lit_host_overrides", line_lit_host_overrides),
+    ):
+        if _rows is not None:
+            payload[_key] = [
+                bool(row) if isinstance(row, bool) else None
+                for row in _rows
+            ]
     if page_plan is not None:
         payload["page_plan"] = dict(page_plan)
     if loading_settings_mode in {"global", "custom"}:

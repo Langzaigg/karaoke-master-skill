@@ -841,6 +841,8 @@ void Direct2DGpuBackend::configure(const RenderScene &scene) {
         cached.pageIndex = sourceLine.pageIndex;
         cached.compositeOrder = sourceLine.compositeOrder;
         cached.signalHead = sourceLine.signalHead;
+        cached.volumeHead = sourceLine.volumeHead;
+        cached.litHead = sourceLine.litHead;
         cached.signalBandJoin = sourceLine.signalBandJoin;
         cached.wipeReverse = sourceLine.wipeReverse;
         cached.centerOverride = sourceLine.centerOverride;

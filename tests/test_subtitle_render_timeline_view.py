@@ -1027,3 +1027,53 @@ def test_context_menu_on_block_toggles_wipe_reverse(qapp, monkeypatch) -> None:
     )
     widget.contextMenuEvent(empty)
     assert "menu" not in captured
+
+
+def test_set_head_override_writes_and_emits(qapp) -> None:
+    widget = TrackTimelineView()
+    widget.resize(800, 180)
+    widget.set_tracks([("主字幕", _make_track())])
+    widget.set_duration(10_000)
+    edits: list[tuple[int, int, object, object]] = []
+    widget.volumeHostEdited.connect(lambda *args: edits.append(args))
+
+    widget._set_head_override(
+        0, 0, "volume_head_override", widget.volumeHostEdited, True
+    )
+    line = widget._track_refs[0].lines[0]
+    assert line.volume_head_override is True
+    assert edits == [(0, 0, None, True)]
+
+    # 等值不重复上报。
+    widget._set_head_override(
+        0, 0, "volume_head_override", widget.volumeHostEdited, True
+    )
+    assert edits == [(0, 0, None, True)]
+
+    # 清回默认（None）。
+    widget._set_head_override(
+        0, 0, "volume_head_override", widget.volumeHostEdited, None
+    )
+    assert line.volume_head_override is None
+    assert edits[-1] == (0, 0, True, None)
+
+
+def test_build_lanes_carries_head_override_flags() -> None:
+    track = TimingTrack(
+        lines=[
+            TimingLine(
+                chars=[TimingChar("あ", 1000)],
+                end_ms=1500,
+                volume_head_override=False,
+                lit_head_override=True,
+            )
+        ]
+    )
+    lanes = build_lanes([("主", track)])
+    block = lanes[0].blocks[0]
+    assert block.volume_head is False
+    assert block.lit_head is True
+    # tooltip 反映覆盖状态。
+    tooltip = _line_block_tooltip(block)
+    assert "音量柱特效：强制关" in tooltip
+    assert "指示灯特效：强制开" in tooltip

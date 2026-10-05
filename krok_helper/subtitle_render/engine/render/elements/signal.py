@@ -26,7 +26,8 @@ from krok_helper.subtitle_render.engine.layout.line.style import (
     line_start_ms,
 )
 from krok_helper.subtitle_render.engine.layout.display.signal import (
-    signal_head_context,
+    lit_signal_head_context,
+    volume_signal_head_context,
 )
 from krok_helper.subtitle_render.engine.render.core.layers import (
     BakedLayer,
@@ -1780,7 +1781,14 @@ def resolve_signal_lit_groups(
     else:
         volume_geometry = None
         group_width = count * size + max(count - 1, 0) * (size * 0.5 + tracking)
-    signal_heads = signal_head_context(track, style)
+    # 分模块宿主门（特效行开关）：本 pass 的 active_style 属于哪个模块
+    # （柱组 = volume 投影或 legacy volume 口径；其余 = 形状灯），就按该
+    # 模块的宿主行（段首基线 + 行级挂载覆盖）逐行过滤。None（模块未
+    # 启用）维持 fail-open，由上层显示过滤（宿主并集）兜底。
+    if style.lit_style == "volume":
+        signal_heads = volume_signal_head_context(track, style)
+    else:
+        signal_heads = lit_signal_head_context(track, style)
     index_of = (
         {id(line): index for index, line in enumerate(track.lines)}
         if signal_heads is not None

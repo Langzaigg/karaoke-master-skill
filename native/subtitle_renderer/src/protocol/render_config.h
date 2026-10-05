@@ -82,6 +82,12 @@ struct TimingLine {
     // first page's first line; Python stamps the flag so both backends share
     // one decision. Absent field parses as true to keep legacy per-line IRs.
     bool signalHead = false;
+    // Per-module host flags (Python 特效行开关 / volume_head_override &
+    // lit_head_override): the bar group and the shape lamps can be forced
+    // on/off per line, so each side gates on its own flag. Absent field
+    // parses as the signalHead value to keep legacy per-line IRs identical.
+    bool volumeHead = false;
+    bool litHead = false;
     // 「真一组」渐变带正文侧拓宽闸门：音量柱 auto/role 且装饰源与正文
     // 第一角色同源（auto 或 role 悬空回退）+ 段首行 + 非 RTL。configure
     // 据此把第一角色（及 ruby 共享盒）的横向渐变跨度左缘拓宽到柱组左

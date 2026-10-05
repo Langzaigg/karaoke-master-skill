@@ -80,6 +80,12 @@ def apply_track_project_data(
     _apply_display_overrides(track, data.get("line_display_overrides"))
     _apply_animation_overrides(track, data.get("line_animation_overrides"))
     _apply_wipe_reverse_overrides(track, data.get("line_wipe_reverse_overrides"))
+    _apply_head_overrides(
+        track, data.get("line_volume_host_overrides"), "volume_head_override"
+    )
+    _apply_head_overrides(
+        track, data.get("line_lit_host_overrides"), "lit_head_override"
+    )
     _apply_display_timing(track, data.get("display_timing"))
     return AppliedTrackProjectState(
         char_role_labels_changed=roles_changed,
@@ -444,6 +450,20 @@ def _apply_wipe_reverse_overrides(track: TimingTrack, payload: object) -> None:
         if isinstance(value, bool):
             line.wipe_reverse_override = value
             line.wipe_reverse = value
+
+
+def _apply_head_overrides(
+    track: TimingTrack, payload: object, field_name: str
+) -> None:
+    """回放挂载行开关（音量柱/指示灯特效）的逐行覆盖。"""
+    if not isinstance(payload, list):
+        return
+    for line, value in zip(track.lines, payload):
+        setattr(
+            line,
+            field_name,
+            value if isinstance(value, bool) else None,
+        )
 
 
 def _schema_version(value: object) -> int:

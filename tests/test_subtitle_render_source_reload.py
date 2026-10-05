@@ -608,3 +608,29 @@ def test_legacy_prefix_guide_without_anchor_keeps_positional_carry() -> None:
 
     assert result.conflicts == ()
     assert result.track.lines[0].guide_symbol is not None
+
+
+def test_reload_preserves_head_overrides() -> None:
+    baseline = _track()
+    candidate = deepcopy(baseline)
+    current = deepcopy(baseline)
+    current.lines[0].volume_head_override = True
+    current.lines[0].lit_head_override = False
+
+    merged = merge_reloaded_track(current, baseline, candidate).track.lines[0]
+
+    assert merged.volume_head_override is True
+    assert merged.lit_head_override is False
+
+
+def test_head_overrides_count_as_local_state() -> None:
+    from krok_helper.subtitle_render.sources.reload import _line_has_local_state
+
+    baseline = _track()
+    current = deepcopy(baseline)
+    assert _line_has_local_state(current.lines[0], baseline.lines[0]) is False
+    current.lines[0].volume_head_override = False
+    assert _line_has_local_state(current.lines[0], baseline.lines[0]) is True
+    current.lines[0].volume_head_override = None
+    current.lines[0].lit_head_override = True
+    assert _line_has_local_state(current.lines[0], baseline.lines[0]) is True

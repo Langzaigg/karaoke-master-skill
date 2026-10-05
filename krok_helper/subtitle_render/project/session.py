@@ -56,6 +56,8 @@ _PROJECT_OWNED_KEYS = frozenset(
         "line_display_overrides",
         "line_animation_overrides",
         "line_wipe_reverse_overrides",
+        "line_volume_host_overrides",
+        "line_lit_host_overrides",
         "page_plan",
         "loading_settings_mode",
         "loading_settings",
@@ -343,6 +345,8 @@ def _track_project_data(track: Optional[TimingTrack]) -> dict:
             "line_display_overrides": None,
             "line_animation_overrides": None,
             "line_wipe_reverse_overrides": None,
+            "line_volume_host_overrides": None,
+            "line_lit_host_overrides": None,
             "page_plan": None,
             "loading_settings_mode": None,
             "loading_settings": None,
@@ -362,6 +366,8 @@ def _track_project_data(track: Optional[TimingTrack]) -> dict:
         "line_display_overrides": _display_override_rows(track),
         "line_animation_overrides": _animation_override_rows(track),
         "line_wipe_reverse_overrides": _wipe_reverse_override_rows(track),
+        "line_volume_host_overrides": _head_override_rows(track, "volume_head_override"),
+        "line_lit_host_overrides": _head_override_rows(track, "lit_head_override"),
         "page_plan": track_page_plan_to_dict(track.page_plan),
         "loading_settings_mode": track.loading_settings_mode,
         "loading_settings": (
@@ -468,6 +474,12 @@ def _animation_override_rows(track: TimingTrack) -> Optional[list]:
 
 def _wipe_reverse_override_rows(track: TimingTrack) -> Optional[list]:
     rows = [line.wipe_reverse_override for line in track.lines]
+    return rows if any(row is not None for row in rows) else None
+
+
+def _head_override_rows(track: TimingTrack, field_name: str) -> Optional[list]:
+    """挂载行开关（音量柱/指示灯特效）的逐行覆盖；全部 None 时不落键。"""
+    rows = [getattr(line, field_name, None) for line in track.lines]
     return rows if any(row is not None for row in rows) else None
 
 

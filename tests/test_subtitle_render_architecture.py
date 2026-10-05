@@ -792,9 +792,9 @@ def test_signal_semantics_have_one_engine_owner() -> None:
     delegated_names = {
         "_display_style_for_signal_window",
         "_lit_signal_active",
+        "_lit_signal_head_context",
         "_resolve_signal_display_lines",
-        "_signal_head_context",
-        "_signal_lead_in_ms",
+        "_volume_signal_head_context",
     }
     inline = {
         node.name
@@ -1055,8 +1055,8 @@ def test_layout_diagnostics_adapter_binds_timing_diagnostic_policy() -> None:
         "_line_center_override",
         "_line_total_width",
         "_resolve_line_x_smart",
-        "_signal_head_context",
-        "_signal_lead_in_ms",
+        "_lit_signal_head_context",
+        "_volume_signal_head_context",
         "_style_for_line",
     }.isdisjoint(private_painter_calls)
     assert all(not name.startswith("_") for name in private_painter_calls)

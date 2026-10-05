@@ -57,6 +57,14 @@ class EditRestorePort(Protocol):
         self, track_index: int, rows: object, values: object
     ) -> bool: ...
 
+    def _restore_volume_host_rows(
+        self, track_index: int, rows: object, values: object
+    ) -> bool: ...
+
+    def _restore_lit_host_rows(
+        self, track_index: int, rows: object, values: object
+    ) -> bool: ...
+
     def _restore_display_override(
         self, track_index: int, line_index: int, values: object
     ) -> bool: ...
@@ -165,6 +173,16 @@ def _restore_command(
     if len(command) == 5 and kind == "wipe_reverse":
         _kind, track_index, rows, old_values, new_values = command
         return restorer._restore_wipe_reverse_rows(
+            track_index, rows, new_values if use_new_value else old_values
+        )
+    if len(command) == 5 and kind == "volume_host":
+        _kind, track_index, rows, old_values, new_values = command
+        return restorer._restore_volume_host_rows(
+            track_index, rows, new_values if use_new_value else old_values
+        )
+    if len(command) == 5 and kind == "lit_host":
+        _kind, track_index, rows, old_values, new_values = command
+        return restorer._restore_lit_host_rows(
             track_index, rows, new_values if use_new_value else old_values
         )
     track_index, line_index, old_values, new_values = command

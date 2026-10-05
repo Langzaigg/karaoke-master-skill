@@ -17,7 +17,10 @@ from typing import Any
 from krok_helper.subtitle_render.engine.layout.line.style import line_end_ms, line_start_ms
 from krok_helper.subtitle_render.engine.render.effects.particles import plan_line_bursts
 from krok_helper.subtitle_render.engine.layout.plan.model import TrackLayoutPlan
-from krok_helper.subtitle_render.engine.layout.page.plan import section_head_line_indices
+from krok_helper.subtitle_render.engine.layout.display.signal import (
+    lit_signal_head_context,
+    volume_signal_head_context,
+)
 from krok_helper.subtitle_render.domain.timing import (
     GuideSymbol,
     RubyAnnotation,
@@ -505,6 +508,8 @@ def timing_line_to_ir(
     page_line_count: int = 0,
     section_index: int = -1,
     signal_head: bool = False,
+    volume_head: bool = False,
+    lit_head: bool = False,
     signal_band_join: bool = False,
     lane: int = 0,
     layout_lane: int | None = None,
@@ -559,11 +564,16 @@ def timing_line_to_ir(
         # ``CalcHorizontalAlignment``），native 侧靠这个值复现同一档对齐。
         "page_line_count": max(int(page_line_count), 0),
         "section_index": int(section_index),
-        # 指示灯（SignalsLits 的全部 lit 样式）只画每 S 第一 P 第一行；
-        # 旧宿主发的 IR 没有该字段，native 侧缺省按 true 解析保持旧行为。
+        # 本行是否挂着任一信号模块（音量柱/指示灯宿主行并集；含特效行
+        # 开关的行级覆盖）；旧宿主发的 IR 没有该字段，native 侧缺省按 true
+        # 解析保持旧行为。
         "signal_head": bool(signal_head),
+        # 分模块宿主旗标（特效行开关）：native 分别门控柱组与形状灯；
+        # 旧 IR 缺 key 时 native 回退 signal_head（等价旧行为）。
+        "volume_head": bool(volume_head),
+        "lit_head": bool(lit_head),
         # 「真一组」渐变带正文侧拓宽闸门（音量柱 auto/role 且装饰源与正文
-        # 第一角色同源 + 段首行 + 非 RTL）：native configure 据此把第一
+        # 第一角色同源 + 柱宿主行 + 非 RTL）：native configure 据此把第一
         # 角色（及 ruby 共享盒）的横向渐变跨度左缘拓宽到柱组左缘——柱体
         # 与正文共用同一条渐变带，与 Painter 的 signal_band_left 同口径。
         # 旧 IR 缺省 false 兼容。
@@ -712,11 +722,15 @@ def track_to_ir(
         page_indices = {}
         section_indices = {}
         page_offset_windows = {}
-    signal_heads: frozenset[int] = frozenset()
+    # 分模块宿主行（段首基线 + volume_head_override/lit_head_override 行级
+    # 覆盖）：signal_head = 并集（任一模块挂载），volume_head/lit_head 供
+    # native 分别门控柱组与形状灯（特效行开关）。
+    volume_heads: frozenset[int] = frozenset()
+    lit_heads: frozenset[int] = frozenset()
     if style is not None and (style.lit_enabled or style.volume_enabled) and not style.vertical:
-        signal_heads = section_head_line_indices(
-            track, style, section_gap_ms=max(style.section_gap_ms, 0)
-        )
+        volume_heads = volume_signal_head_context(track, style) or frozenset()
+        lit_heads = lit_signal_head_context(track, style) or frozenset()
+    signal_heads = volume_heads | lit_heads
     # 「真一组」正文侧拓宽闸门（样式级部分）：音量柱启用 + auto/role 档，
     # 且装饰源与正文第一角色同源（auto，或 role 档方案悬空回退）——
     # role 档解析到固定方案时正文渐变不参与（柱体画刷仍取并集跨度）。
@@ -751,9 +765,11 @@ def track_to_ir(
                 page_line_count=page_line_counts.get(index, 0),
                 section_index=section_indices.get(index, -1),
                 signal_head=index in signal_heads,
+                volume_head=index in volume_heads,
+                lit_head=index in lit_heads,
                 signal_band_join=(
                     signal_band_style_joins
-                    and index in signal_heads
+                    and index in volume_heads
                     and line is not None
                     and style is not None
                     and style.right_to_left == line.wipe_reverse
@@ -874,11 +890,13 @@ def lines_style_to_ir(
     animation_styles = [item.animation_style for item in layout_plan.lines]
     render_lines = [item.render_line for item in layout_plan.lines]
     resolved_intervals = [list(item.resolved_intervals) for item in layout_plan.lines]
-    signal_heads: frozenset[int] = frozenset()
+    # 分模块宿主行同 track_to_ir：signal_head = 并集，band 门按柱宿主行。
+    volume_heads: frozenset[int] = frozenset()
+    lit_heads: frozenset[int] = frozenset()
     if (style.lit_enabled or style.volume_enabled) and not style.vertical:
-        signal_heads = section_head_line_indices(
-            track, style, section_gap_ms=max(style.section_gap_ms, 0)
-        )
+        volume_heads = volume_signal_head_context(track, style) or frozenset()
+        lit_heads = lit_signal_head_context(track, style) or frozenset()
+    signal_heads = volume_heads | lit_heads
     signal_band_style_joins = (
         style.volume_enabled
         and style.volume_appearance_mode in {"auto", "role"}
@@ -942,9 +960,11 @@ def lines_style_to_ir(
                 "source_line_index": index,
                 **(placement_by_index.get(index) or {}),
                 "signal_head": index in signal_heads,
+                "volume_head": index in volume_heads,
+                "lit_head": index in lit_heads,
                 "signal_band_join": (
                     signal_band_style_joins
-                    and index in signal_heads
+                    and index in volume_heads
                     and line is not None
                     and style.right_to_left == line.wipe_reverse
                 ),

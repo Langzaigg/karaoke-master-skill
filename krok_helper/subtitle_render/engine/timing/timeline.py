@@ -16,7 +16,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Callable, Optional, Sequence
+from typing import Callable, Mapping, Optional, Sequence
 
 from krok_helper.subtitle_render.engine.timing.show_time import (
     ShowTimePage,
@@ -215,7 +215,7 @@ def compute_display_lines(
     lane_gap_ms: int,
     section_gap_ms: int = 0,
     signal_head_indexes: Optional[set[int]] = None,
-    signal_lead_ms: int = 0,
+    signal_lead_ms: int | Mapping[int, int] = 0,
     sync_entry: bool = False,
     sync_ending: bool = False,
     sync_each_page: bool = False,
@@ -252,7 +252,9 @@ def compute_display_lines(
     提前部分行的信号窗口（音量柱只挂每段第一行）：命中的行 lead 取
     ``max(lead_in_ms, signal_lead_ms)``，其余行保持 ``lead_in_ms``。省略时全部
     行使用同一 lead。``protect_ms`` 仍按未扩展的 ``lead_in_ms`` 推导，信号扩展
-    不撑大碰撞保护。
+    不撑大碰撞保护。``signal_lead_ms`` 也接受 ``{行索引: 提前量}`` 映射
+    （特效行开关让两模块宿主行不同时，各行取自己实际挂载模块的最大
+    提前量）；命中的行缺映射键按 0 处理。
 
     ``sync_entry`` / ``sync_ending`` 是同步页内各个自动 T 的最长单向延长候选；
     默认只作用于段首页入场和段尾页退场，``sync_each_page`` 开启后作用于每页；
@@ -269,12 +271,21 @@ def compute_display_lines(
     section_gap = max(section_gap_ms, 0)
     base_pre = max(lead_in_ms, 0)
     if signal_head_indexes:
-        extended_pre = max(base_pre, max(int(signal_lead_ms), 0))
-        pre_per_line = [
-            extended_pre if track_index in signal_head_indexes else base_pre
-            for track_index, _line in enumerate(track.lines)
-            if not _line.is_blank and _line.chars
-        ]
+        if isinstance(signal_lead_ms, Mapping):
+            pre_per_line = [
+                max(base_pre, max(int(signal_lead_ms.get(track_index, 0)), 0))
+                if track_index in signal_head_indexes
+                else base_pre
+                for track_index, _line in enumerate(track.lines)
+                if not _line.is_blank and _line.chars
+            ]
+        else:
+            extended_pre = max(base_pre, max(int(signal_lead_ms), 0))
+            pre_per_line = [
+                extended_pre if track_index in signal_head_indexes else base_pre
+                for track_index, _line in enumerate(track.lines)
+                if not _line.is_blank and _line.chars
+            ]
         pre_argument: int | list[int] = pre_per_line
     else:
         pre_argument = base_pre

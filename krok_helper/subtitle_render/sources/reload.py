@@ -317,6 +317,9 @@ def _merge_line_overlays(
     target.wipe_reverse_override = current.wipe_reverse_override
     if current.wipe_reverse_override is not None:
         target.wipe_reverse = bool(current.wipe_reverse_override)
+    # 挂载行开关（音量柱/指示灯特效）是用户意图，跨源重载整体保留。
+    target.volume_head_override = current.volume_head_override
+    target.lit_head_override = current.lit_head_override
 
     if current.guide_symbol is not None:
         symbol = deepcopy(current.guide_symbol)
@@ -408,6 +411,8 @@ def _line_has_local_state(
         or current.display_end_override_ms is not None
         or current.animation_override is not None
         or current.wipe_reverse_override is not None
+        or current.volume_head_override is not None
+        or current.lit_head_override is not None
         or current.guide_symbol is not None
         or _has_local_inline_guides(current, baseline)
     ):

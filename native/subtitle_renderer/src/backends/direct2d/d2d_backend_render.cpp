@@ -710,7 +710,7 @@ ProbeResult Direct2DGpuBackend::renderFrameInternal(
                     tMs,
                     litGuardStartMs,
                     litGuardEndMs,
-                    line->signalHead
+                    line->litHead
                 );
                 litAutoLampVisible =
                     litGuardState.visible && litGuardState.activeIndex >= 0;
@@ -1682,14 +1682,16 @@ ProbeResult Direct2DGpuBackend::renderFrameInternal(
                 break;
             }
         }
+        // Per-module host gates (Python 特效行开关): bars and shape lamps
+        // each follow their own volume_head / lit_head line flag.
         const VolumeSignalState signalState = volumeSignalState(
             line->startMs, style, tMs, displayStartMs, displayEndMs,
-            line->signalHead
+            line->volumeHead
         );
         const VolumeSignalGeometry signalGeometry = volumeSignalGeometry(style);
         const ShapeSignalState shapeState = shapeSignalState(
             line->startMs, style, tMs, displayStartMs, displayEndMs,
-            line->signalHead
+            line->litHead
         );
         const ShapeSignalGeometry shapeGeometry = shapeSignalGeometry(style);
         const bool independentVolume = style.volumeEnabled;
@@ -1992,12 +1994,13 @@ ProbeResult Direct2DGpuBackend::renderFrameInternal(
         const int signalEndMs = line->startMs + (
             independentVolume ? style.volumeTimeOffsetMs : style.litTimeOffsetMs
         );
-        // Every lit style (volume bars and shape lamps) attaches only to each
-        // section's first page's first line (signalHead).
+        // Only the volume bars participate in the line-width union (shape
+        // lamps float above the text), so the layout gate follows the bar's
+        // own per-line host flag (volume_head, Python 特效行开关).
         const bool signalLayoutActive = (independentVolume || legacyVolume)
             && !style.vertical
             && signalActiveDuration > 0
-            && line->signalHead
+            && line->volumeHead
             && tMs >= displayStartMs
             && tMs < displayEndMs;
         float lyricLeft = line->bounds.left;

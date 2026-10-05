@@ -4053,3 +4053,79 @@ def test_lyrics_table_clamps_columns_to_viewport_and_exposes_minimum_width(qapp)
     panel.close()
     panel.deleteLater()
     qapp.processEvents()
+
+
+def test_project_payload_writes_head_override_rows() -> None:
+    from krok_helper.subtitle_render.project.store import project_payload
+
+    common = dict(
+        subtitle_path=None,
+        video_path=None,
+        audio_path=None,
+        style=Style(),
+        screen={"width": 1920, "height": 1080, "fps": 60},
+        selected_scheme_key=None,
+        output={},
+    )
+    payload = project_payload(
+        **common,
+        line_volume_host_overrides=[True, None],
+        line_lit_host_overrides=[None, False],
+    )
+    assert payload["line_volume_host_overrides"] == [True, None]
+    assert payload["line_lit_host_overrides"] == [None, False]
+    # 全默认（None）时不落键，工程文件不膨胀。
+    empty = project_payload(**common)
+    assert "line_volume_host_overrides" not in empty
+    assert "line_lit_host_overrides" not in empty
+
+
+def test_selected_rows_context_menu_sets_head_overrides(qapp, monkeypatch):
+    panel = lyrics_list.LyricsPanel()
+    track = TimingTrack(
+        lines=[
+            TimingLine(chars=[TimingChar("甲", 1000)], end_ms=1500),
+            TimingLine(chars=[TimingChar("乙", 2000)], end_ms=2500),
+        ]
+    )
+    panel.set_track(track)
+    for row in (0, 1):
+        for column in range(panel.table_widget.columnCount()):
+            panel.table_widget.item(row, column).setSelected(True)
+    captured: dict[str, object] = {}
+    monkeypatch.setattr(
+        lyrics_list._StableRoundMenu,
+        "exec",
+        lambda menu, *_args: captured.setdefault("menu", menu),
+    )
+    emitted: list[tuple[list[int], object]] = []
+    panel.volumeHostRequested.connect(
+        lambda rows, value: emitted.append((list(rows), value))
+    )
+
+    panel._show_context_menu(QPoint(4, 4))
+
+    # 三态子菜单：跟随默认（段首）/强制开启/强制关闭；默认无勾选。
+    menu = captured["menu"]
+    volume_menu = next(
+        submenu for submenu in menu._subMenus if submenu.title() == "音量柱特效"
+    )
+    labels = {
+        action.text(): action for action in volume_menu.actions()
+    }
+    assert set(labels) == {"跟随默认（段首）", "强制开启", "强制关闭"}
+    assert labels["跟随默认（段首）"].isChecked()
+    assert not labels["强制开启"].isChecked()
+
+    labels["强制关闭"].trigger()
+    assert emitted == [([0, 1], False)]
+
+    # 摘要列标注覆盖状态。
+    track.lines[0].volume_head_override = False
+    panel.set_track(track)
+    assert "音量柱特效强制关" in panel.table_widget.item(
+        0, lyrics_list.COL_EFFECT
+    ).text()
+    assert "音量柱特效" not in panel.table_widget.item(
+        1, lyrics_list.COL_EFFECT
+    ).text()

@@ -45,8 +45,8 @@ from krok_helper.subtitle_render.engine.layout.display.section_edges import (
     section_edge_context,
 )
 from krok_helper.subtitle_render.engine.layout.display.signal import (
-    signal_head_context,
-    signal_lead_in_ms,
+    signal_host_context,
+    signal_host_lead_map,
 )
 from krok_helper.subtitle_render.engine.layout.layout_context import layout_pass
 from krok_helper.subtitle_render.engine.timing.timeline import DisplayLine
@@ -1203,10 +1203,11 @@ def resolve_display_lines_for_style(
             "sync_ending": False,
             "auto_fill_section_time": False,
         }
-        signal_heads = signal_head_context(track, style)
+        signal_heads = signal_host_context(track, style)
         if signal_heads is not None:
             base_kwargs["signal_head_indexes"] = signal_heads
-            base_kwargs["signal_lead_ms"] = signal_lead_in_ms(style)
+            # 特效行开关下两模块宿主行可不同：逐行取实际挂载模块的提前量。
+            base_kwargs["signal_lead_ms"] = signal_host_lead_map(track, style)
         # 段首/段尾页标记供逐行动画解析（style_for_line）读取；此处注册后，
         # 本函数产出的显示窗口与后续布局计划看到的替换结果保持一致。
         section_edge_context(track, style)

@@ -166,6 +166,10 @@ class LineBlock:
     cells: tuple[CharCell, ...]
     wipe_reverse: bool = False
     """该行是否反向走字（源逆序检测或手动覆盖）；块上画向左箭头标记。"""
+    volume_head: object = None
+    """音量柱特效挂载行覆盖（None/True/False）；块右下画方点标记。"""
+    lit_head: object = None
+    """指示灯特效挂载行覆盖（None/True/False）；块右下画圆点标记。"""
 
 
 @dataclass(frozen=True)
@@ -233,6 +237,8 @@ def _line_block(
         text="".join(ch.text for ch in line.chars),
         cells=tuple(cells),
         wipe_reverse=bool(line.wipe_reverse),
+        volume_head=line.volume_head_override,
+        lit_head=line.lit_head_override,
     )
 
 
@@ -288,6 +294,13 @@ class TrackTimelineView(QWidget):
     ``(轨道序号, 行索引, 旧 (手动覆盖, 生效值), 新 (手动覆盖, 生效值))``。
     新值已直接写在 ``TimingLine`` 上（含 ``wipe_reverse_override`` 手动覆盖
     字段）；宿主收到后刷新预览、标脏，并用旧值入撤销栈（Ctrl+Z）。"""
+
+    volumeHostEdited = Signal(int, int, object, object)
+    """用户右键设置音量柱特效挂载行覆盖：
+    ``(轨道序号, 行索引, 旧覆盖 None/True/False, 新覆盖)``。新值已写在
+    ``volume_head_override`` 上；宿主入撤销栈并按行级标记刷新。"""
+    litHostEdited = Signal(int, int, object, object)
+    """用户右键设置指示灯特效挂载行覆盖：语义同 ``volumeHostEdited``。"""
 
     def __init__(self, parent: Optional[QWidget] = None) -> None:
         super().__init__(parent)
@@ -1016,6 +1029,8 @@ class TrackTimelineView(QWidget):
 
         if block.wipe_reverse:
             _paint_wipe_reverse_marker(painter, block_rect, border)
+        if block.volume_head is not None or block.lit_head is not None:
+            _paint_host_override_markers(painter, block_rect, border, block)
 
         painter.setFont(char_font)
         for cell in block.cells:
@@ -1266,7 +1281,53 @@ class TrackTimelineView(QWidget):
             )
         )
         menu.addAction(action)
+        menu.addSeparator()
+        # 挂载行开关（三态子菜单）：与歌词列表右键同一套选项。
+        for fx_title, fx_field, fx_signal in (
+            ("音量柱特效", "volume_head_override", self.volumeHostEdited),
+            ("指示灯特效", "lit_head_override", self.litHostEdited),
+        ):
+            fx_menu = RoundMenu(fx_title, menu)
+            current = getattr(line, fx_field, None)
+            for fx_label, fx_value, fx_tip in (
+                ("跟随默认（段首）", None, "默认模式：只挂每段第一行"),
+                ("强制开启", True, "本行强制挂载（非段首行也生效）"),
+                ("强制关闭", False, "本行强制不挂（段首行也不挂）"),
+            ):
+                fx_action = Action(fx_label, fx_menu)
+                fx_action.setCheckable(True)
+                fx_action.setChecked(current is fx_value)
+                fx_action.setToolTip(fx_tip)
+                fx_action.triggered.connect(
+                    lambda _checked=False, li=lane_index, ri=block.line_index,
+                    fname=fx_field, sig=fx_signal, v=fx_value: (
+                        self._set_head_override(li, ri, fname, sig, v)
+                    )
+                )
+                fx_menu.addAction(fx_action)
+            menu.addMenu(fx_menu)
         menu.exec(global_pos)
+
+    def _set_head_override(
+        self,
+        lane_index: int,
+        line_index: int,
+        field_name: str,
+        signal,
+        value: object,
+    ) -> None:
+        """写入挂载行覆盖：重建块快照并上报宿主（undo/刷新由宿主统一处理）。"""
+        track = self._track_refs[lane_index]
+        if not 0 <= line_index < len(track.lines):
+            return
+        line = track.lines[line_index]
+        old_value = getattr(line, field_name, None)
+        if old_value is value:
+            return
+        setattr(line, field_name, value)
+        self._rebuild_lanes()
+        self.update()
+        signal.emit(lane_index, line_index, old_value, value)
 
     def _toggle_wipe_reverse(self, lane_index: int, line_index: int) -> None:
         """翻转某句反向走字：写有效标记 + 手动覆盖，重建块快照并上报宿主。"""
@@ -1481,6 +1542,29 @@ def _format_ms(ms: int) -> str:
     return f"{total_seconds // 60:02d}:{total_seconds % 60:02d}"
 
 
+def _paint_host_override_markers(
+    painter: QPainter, block_rect: QRectF, color: QColor, block: "LineBlock"
+) -> None:
+    """挂载行开关标记：块右下角方点=音量柱、圆点=指示灯。
+
+    实心点 = 强制开（非段首行也挂），空心点 = 强制关（段首行也不挂）；
+    与左下角的反向走字箭头分居两端，互不遮挡。块太矮时只画方点。"""
+    size = max(3.0, min(4.5, block_rect.height() * 0.22))
+    cy = block_rect.bottom() - 2.2
+    pen = QPen(color, 1.2)
+    painter.setPen(pen)
+    if block.volume_head is not None:
+        cx = block_rect.right() - 2.6 - size / 2
+        rect = QRectF(cx - size / 2, cy - size / 2, size, size)
+        painter.setBrush(color if block.volume_head is True else Qt.BrushStyle.NoBrush)
+        painter.drawRect(rect)
+    if block.lit_head is not None:
+        offset = size + 3.2 if block.volume_head is not None else 0.0
+        cx = block_rect.right() - 2.6 - offset - size / 2
+        painter.setBrush(color if block.lit_head is True else Qt.BrushStyle.NoBrush)
+        painter.drawEllipse(QPointF(cx, cy), size / 2, size / 2)
+    painter.setBrush(Qt.BrushStyle.NoBrush)
+
 def _paint_wipe_reverse_marker(
     painter: QPainter, block_rect: QRectF, color: QColor
 ) -> None:
@@ -1563,8 +1647,18 @@ def _parse_margin_text_ms(text: str) -> int:
 def _line_block_tooltip(block: LineBlock) -> str:
     singer = f"{block.singer_label}：" if block.singer_label else ""
     reverse = "\n反向走字（右键可取消）" if block.wipe_reverse else ""
+    volume = (
+        "\n音量柱特效：强制开" if block.volume_head is True
+        else "\n音量柱特效：强制关" if block.volume_head is False
+        else ""
+    )
+    lit = (
+        "\n指示灯特效：强制开" if block.lit_head is True
+        else "\n指示灯特效：强制关" if block.lit_head is False
+        else ""
+    )
     return (
         f"开始：{_format_precise_ms(block.start_ms)}\n"
         f"结束：{_format_precise_ms(block.end_ms)}\n"
-        f"{singer}{block.text}{reverse}"
+        f"{singer}{block.text}{reverse}{volume}{lit}"
     )

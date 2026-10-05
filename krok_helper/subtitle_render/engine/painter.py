@@ -184,9 +184,9 @@ from krok_helper.subtitle_render.engine.layout.line.geometry import (
 from krok_helper.subtitle_render.engine.layout.display.signal import (
     display_style_for_signal_window as _display_style_for_signal_window,
     lit_signal_active as _lit_signal_active,
+    lit_signal_head_context as _lit_signal_head_context,
     resolve_signal_display_lines as _resolve_signal_display_lines,
-    signal_head_context as _signal_head_context,
-    signal_lead_in_ms as _signal_lead_in_ms,
+    volume_signal_head_context as _volume_signal_head_context,
 )
 from krok_helper.subtitle_render.engine.ruby import (
     active_rubies_for_line as _active_rubies_for_line,
@@ -2180,7 +2180,19 @@ def _resolve_sayatoo_line_layouts(
         if style.volume_enabled or style.lit_enabled
         else None
     )
-    signal_head_ids = _signal_head_context(track, style) if signal_metrics else None
+    # union 布局（signal_x/union 让位）的宿主口径：音量柱模块启用时柱组
+    # 才参与行宽 union（含 legacy lit_style="volume"），按 volume 宿主行
+    # （含行级覆盖）门控；仅形状灯时灯不改变文字布局，按 lit 宿主行取
+    # signal_x 锚点。形状灯悬浮行（柱被行级覆盖关掉）不进 union，灯按
+    # text_anchor 锚在文字实际起点。
+    if signal_metrics:
+        _volume_head_ids = _volume_signal_head_context(track, style)
+        if _volume_head_ids is not None:
+            signal_head_ids = _volume_head_ids
+        else:
+            signal_head_ids = _lit_signal_head_context(track, style)
+    else:
+        signal_head_ids = None
     index_of_signal_lines = (
         {id(line): index for index, line in enumerate(track.lines)}
         if signal_head_ids is not None

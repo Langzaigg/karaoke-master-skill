@@ -262,6 +262,14 @@ class TimingLine:
     """手动反向走字覆盖：``None`` = 按源文件逆序检测自动判定，``True``/``False``
     = 手动指定。由项目 UI（字幕轨道 / 歌词列表右键）写入，随 ``.yurika``
     持久化并跨源重载保留；渲染消费的仍是 :attr:`wipe_reverse` 有效值。"""
+    volume_head_override: Optional[bool] = None
+    """音量柱挂载行覆盖（特效行开关）：``None`` = 默认段首模式（只挂每段
+    首行），``True`` = 本行强制挂柱组（非段首也可），``False`` = 本行强制
+    不挂（段首也不挂）。与 :attr:`wipe_reverse_override` 同款三态单字段
+    ——挂载判定没有源数据自动检测层，不需要拆有效值/意图两个字段。"""
+    lit_head_override: Optional[bool] = None
+    """指示灯挂载行覆盖（特效行开关）：语义同 :attr:`volume_head_override`，
+    独立控制形状灯组（两模块可在同一行分别覆盖）。"""
 
 
 @dataclass(frozen=True)

@@ -10123,7 +10123,11 @@ def test_gpu_g4_legacy_ir_without_signal_head_keeps_per_line_lamps(
         ir = original_build(track_obj, style_obj, **kwargs)
         for source in [ir.get("track"), *(ir.get("extra_tracks") or [])]:
             for line in source["lines"]:
+                # 模拟旧宿主：分模块旗标（volume_head/lit_head）随 signal_head
+                # 一起缺席，native 回退旧行为（全部行挂灯）。
                 line.pop("signal_head", None)
+                line.pop("volume_head", None)
+                line.pop("lit_head", None)
         return ir
 
     monkeypatch.setattr(native_backend, "build_render_ir", legacy_build)

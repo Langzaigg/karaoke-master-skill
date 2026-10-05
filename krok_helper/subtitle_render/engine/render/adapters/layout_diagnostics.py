@@ -26,8 +26,8 @@ from krok_helper.subtitle_render.engine.layout.line.style import (
 )
 from krok_helper.subtitle_render.engine.layout.display.signal import (
     display_style_for_signal_window,
-    signal_head_context,
-    signal_lead_in_ms,
+    signal_host_context,
+    signal_host_lead_map,
 )
 from krok_helper.subtitle_render.engine.timing.timeline import DisplayLine
 from krok_helper.subtitle_render.domain.models import Style, style_for_track
@@ -106,10 +106,11 @@ def layout_timing_diagnostics_for_style(
         "sync_ending": False,
         "auto_fill_section_time": False,
     }
-    signal_heads = signal_head_context(track, style)
+    signal_heads = signal_host_context(track, style)
     if signal_heads is not None:
         base_kwargs["signal_head_indexes"] = signal_heads
-        base_kwargs["signal_lead_ms"] = signal_lead_in_ms(style)
+        # 与渲染同一口径：逐行取实际挂载模块的信号提前量。
+        base_kwargs["signal_lead_ms"] = signal_host_lead_map(track, style)
     ideal = painter_impl.compute_display_lines(
         track,
         **base_kwargs,

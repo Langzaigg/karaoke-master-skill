@@ -4914,3 +4914,72 @@ def test_native_gpu_unset_ruby_stroke2_follows_main_flag_not_saved_width():
     # The flag gates the width, never the other way round: explicitly enabling
     # the ruby draws its own width even while the main text stays off.
     assert stroke2_pixels(frames["main_off_explicit_on"]) > 0
+
+
+def test_build_render_ir_per_module_head_flags():
+    # 挂载行开关（特效行开关）：IR 逐行下发分模块宿主旗标 volume_head /
+    # lit_head（native 各自门控柱组/形状灯），signal_head = 并集；无覆盖时
+    # 三旗标与段首基线一致（旧行为）。差分载荷（lines_style）同样携带。
+    from krok_helper.subtitle_render.engine.render.render_ir import (
+        build_style_patch_ir,
+    )
+
+    track = TimingTrack(
+        lines=[
+            TimingLine(chars=[TimingChar("あ", 0)], end_ms=1000,
+                       volume_head_override=False),
+            TimingLine(chars=[TimingChar("い", 5000)], end_ms=6000),
+            TimingLine(chars=[TimingChar("う", 6100)], end_ms=7000,
+                       lit_head_override=True),
+            TimingLine(chars=[TimingChar("え", 9000)], end_ms=10_000),
+        ]
+    )
+    style = Style(
+        volume_enabled=True,
+        volume_appearance_mode="auto",
+        lit_enabled=True,
+        lit_style="circle",
+        lit_appearance_mode="auto",
+        section_gap_ms=1000,
+    )
+
+    ir = build_render_ir(track, style, width=640, height=360, fps=30)
+
+    # 段首 = 行 0/1/3（行 2 与行 1 间隔 1100 > 1000 也算新段？——0→1 间隔
+    # 4000 切段，1→2 间隔 1100 切段，2→3 间隔 1900 切段；段首 = 0,1,2,3。
+    # 行 0 柱强制关；行 2 非段首但灯强制开。
+    assert [line["volume_head"] for line in ir["track"]["lines"]] == [
+        False, True, False, True,
+    ]
+    assert [line["lit_head"] for line in ir["track"]["lines"]] == [
+        True, True, True, True,
+    ]
+    assert [line["signal_head"] for line in ir["track"]["lines"]] == [
+        True, True, True, True,
+    ]
+
+    # 无覆盖工程：三旗标退化为段首基线（旧行为）。
+    plain = TimingTrack(
+        lines=[
+            TimingLine(chars=[TimingChar("あ", 0)], end_ms=1000),
+            TimingLine(chars=[TimingChar("い", 5000)], end_ms=6000),
+        ]
+    )
+    plain_ir = build_render_ir(plain, style, width=640, height=360, fps=30)
+    assert [line["volume_head"] for line in plain_ir["track"]["lines"]] == [
+        True, True,
+    ]
+    assert [line["lit_head"] for line in plain_ir["track"]["lines"]] == [
+        True, True,
+    ]
+
+    # 差分载荷同样携带分模块旗标（style patch 重放不丢挂载状态）。
+    patch = build_style_patch_ir(
+        track, style, width=640, height=360, fps=30, include_lines_style=True
+    )
+    assert [entry["volume_head"] for entry in patch["lines_style"]] == [
+        False, True, False, True,
+    ]
+    assert [entry["lit_head"] for entry in patch["lines_style"]] == [
+        True, True, True, True,
+    ]

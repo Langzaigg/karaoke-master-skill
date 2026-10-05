@@ -254,6 +254,8 @@ def _animation_summary(
     override: Optional[LineAnimationOverride],
     edge_flags: tuple[bool, bool] = (False, False),
     wipe_reverse: bool = False,
+    volume_host: object = None,
+    lit_host: object = None,
 ) -> str:
     prefix = "全局：" if override is None else ""
     entry = style.entry_anim if override is None else override.entry_anim
@@ -271,6 +273,15 @@ def _animation_summary(
         summary += f" · 装饰粒子{_SING_FX_LABELS.get(override.sing_fx, override.sing_fx)}"
     if wipe_reverse:
         summary += " · 反向走字"
+    # 挂载行开关只在覆盖时标出（None = 默认段首模式，不占版面）。
+    if volume_host is True:
+        summary += " · 音量柱特效强制开"
+    elif volume_host is False:
+        summary += " · 音量柱特效强制关"
+    if lit_host is True:
+        summary += " · 指示灯特效强制开"
+    elif lit_host is False:
+        summary += " · 指示灯特效强制关"
     return summary
 
 
@@ -1252,6 +1263,13 @@ class LyricsPanel(DropPanel):
     """逐行动画编辑请求：track.lines 行号列表 + ``LineAnimationOverride | None``。"""
     wipeReverseRequested = Signal(list, bool)
     """右键菜单批量设置/取消反向走字：(track.lines 行号列表, 目标值)。"""
+    volumeHostRequested = Signal(list, object)
+    """右键菜单批量设置音量柱特效挂载行：(行号列表, None/True/False)。
+
+    None = 跟随默认段首模式；True = 本行强制挂柱组（非段首也挂）；
+    False = 本行强制不挂（段首也不挂）。"""
+    litHostRequested = Signal(list, object)
+    """右键菜单批量设置指示灯特效挂载行：语义同 ``volumeHostRequested``。"""
     rowClicked = Signal(int)  # 用户点击歌词行时发出行号
     layoutChangeRequested = Signal(list, int)
     """右键菜单选择布局：(选中的 track.lines 行号列表, 布局 index)。宿主按页联动应用。"""
@@ -1712,6 +1730,8 @@ class LyricsPanel(DropPanel):
                         line.animation_override,
                         edge_flags.get(track_index, (False, False)),
                         wipe_reverse=bool(line.wipe_reverse),
+                        volume_host=line.volume_head_override,
+                        lit_host=line.lit_head_override,
                     )
                 )
                 if line.animation_override is None:
@@ -1895,6 +1915,8 @@ class LyricsPanel(DropPanel):
                         line.animation_override,
                         edge_flags.get(presentation.track_line_index, (False, False)),
                         wipe_reverse=bool(line.wipe_reverse),
+                        volume_host=line.volume_head_override,
+                        lit_host=line.lit_head_override,
                     )
                     if line is not None
                     else ""
@@ -2790,6 +2812,8 @@ class LyricsPanel(DropPanel):
                             line.animation_override,
                             edge_flags.get(track_index, (False, False)),
                             wipe_reverse=bool(line.wipe_reverse),
+                            volume_host=line.volume_head_override,
+                            lit_host=line.lit_head_override,
                         )
                     )
                     if line.animation_override is None:
@@ -2976,6 +3000,46 @@ class LyricsPanel(DropPanel):
                 )
             )
             menu.addAction(wipe_action)
+            # 挂载行开关（三态子菜单）：音量柱/指示灯各自独立，批量作用于
+            # 所选行；勾选态 = 所选行全部一致（混合态显示为全不勾）。
+            for fx_title, fx_field, fx_signal in (
+                ("音量柱特效", "volume_head_override", self.volumeHostRequested),
+                ("指示灯特效", "lit_head_override", self.litHostRequested),
+            ):
+                fx_menu = _StableRoundMenu(fx_title, menu)
+                fx_values = {
+                    getattr(self._track.lines[row], fx_field, None)
+                    for row in rows
+                    if row < len(self._track.lines)
+                }
+                for fx_label, fx_value, fx_tip in (
+                    (
+                        "跟随默认（段首）",
+                        None,
+                        "默认模式：只挂每段第一行",
+                    ),
+                    (
+                        "强制开启",
+                        True,
+                        "本行强制挂载（非段首行也生效）",
+                    ),
+                    (
+                        "强制关闭",
+                        False,
+                        "本行强制不挂（段首行也不挂）",
+                    ),
+                ):
+                    fx_action = Action(fx_label, fx_menu)
+                    fx_action.setCheckable(True)
+                    fx_action.setChecked(fx_values == {fx_value})
+                    fx_action.setToolTip(fx_tip)
+                    fx_action.triggered.connect(
+                        lambda _checked=False, rs=list(rows), sig=fx_signal, v=fx_value: (
+                            sig.emit(rs, v)
+                        )
+                    )
+                    fx_menu.addAction(fx_action)
+                menu.addMenu(fx_menu)
             menu.addSeparator()
         layout_menu = _StableRoundMenu("应用布局", menu)
         current_indices = {
