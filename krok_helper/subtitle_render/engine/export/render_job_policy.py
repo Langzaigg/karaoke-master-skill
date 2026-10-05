@@ -204,7 +204,7 @@ def validate_render_job(job: RenderJob) -> None:
     if job.output_format == OUTPUT_FORMAT_MP4:
         # 编码器相关字段只在 MP4 输出时参与导出；其余格式由 ffmpeg 内置的
         # png / qtrle 编码器固定，字段值只是 UI 残留状态。
-        # 旧工程/旧偏好可能仍保存 legacy "amf"，导出时按 QVBR 归一处理。
+        # 旧工程/旧偏好可能仍保存 legacy "amf"，导出时按 CQP 归一处理。
         if job.encoder_mode not in ENCODER_MODES and job.encoder_mode != ENCODER_AMF:
             raise ProcessingError(f"不支持的编码器: {job.encoder_mode}")
         if job.codec not in VIDEO_CODECS:

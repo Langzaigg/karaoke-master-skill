@@ -94,20 +94,20 @@ def test_amf_cqp_zero_passes_through_without_clamping():
     assert options[options.index("-qp_p") + 1] == "0"
 
 
-def test_legacy_amf_mode_normalizes_to_qvbr():
-    assert enc.normalize_encoder_mode("amf") == "amf_qvbr"
+def test_legacy_amf_mode_normalizes_to_cqp():
+    assert enc.normalize_encoder_mode("amf") == "amf_cqp"
     assert enc.normalize_encoder_mode("amf_cqp") == "amf_cqp"
     assert enc.normalize_encoder_mode("amf_qvbr") == "amf_qvbr"
     assert enc.normalize_encoder_mode("bad") == "cpu"
 
     legacy = enc.video_encoder_options("ffmpeg", "amf", crf=18, preset="medium")
     canonical = enc.video_encoder_options(
-        "ffmpeg", "amf_qvbr", crf=18, preset="medium"
+        "ffmpeg", "amf_cqp", crf=18, preset="medium"
     )
     assert legacy == canonical
 
 
-def test_auto_hardware_resolution_prefers_amf_qvbr(monkeypatch):
+def test_auto_hardware_resolution_prefers_amf_cqp(monkeypatch):
     monkeypatch.setattr(
         enc, "_available_encoders", lambda _ffmpeg_path: frozenset({"h264_amf"})
     )
@@ -115,7 +115,7 @@ def test_auto_hardware_resolution_prefers_amf_qvbr(monkeypatch):
     options = enc.video_encoder_options("ffmpeg", "auto", crf=21, preset="medium")
 
     assert options[:2] == ["-c:v", "h264_amf"]
-    assert options[options.index("-rc") + 1] == "qvbr"
+    assert options[options.index("-rc") + 1] == "cqp"
 
 
 def test_amf_quality_reverses_the_ui_crf_scale_for_qvbr():

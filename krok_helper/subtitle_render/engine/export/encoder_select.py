@@ -15,7 +15,8 @@ ENCODER_NVENC = "nvenc"
 ENCODER_QSV = "qsv"
 ENCODER_AMF_QVBR = "amf_qvbr"
 ENCODER_AMF_CQP = "amf_cqp"
-# 4.3.x 及更早版本保存的旧值，自 4.2.8.7 起语义即 QVBR，加载时归一到 QVBR。
+# 4.3.x 及更早版本保存的旧值。QVBR 仅在用户显式选择时生效（含 legacy
+# 归一与 auto 解析），因此该旧值归一到 CQP。
 ENCODER_AMF = "amf"
 ENCODER_MODES: set[str] = {
     ENCODER_CPU,
@@ -64,7 +65,7 @@ CPU_PRESETS: tuple[str, ...] = (
 def normalize_encoder_mode(mode: str) -> str:
     """Return a supported encoder mode, migrating legacy values, falling back to CPU."""
     if mode == ENCODER_AMF:
-        return ENCODER_AMF_QVBR
+        return ENCODER_AMF_CQP
     return mode if mode in ENCODER_MODES else ENCODER_CPU
 
 
@@ -177,8 +178,8 @@ def resolved_encoder_label(ffmpeg_path: str, mode: str, codec: str = CODEC_H264)
 def _best_available_hardware_encoder(ffmpeg_path: str, codec: str = CODEC_H264) -> str | None:
     encoders = _available_encoders(ffmpeg_path)
     names = _CODEC_ENCODER_NAMES[normalize_video_codec(codec)]
-    # auto 模式解析到 A 卡时走 QVBR；CQP 需要用户显式选择。
-    for mode in (ENCODER_NVENC, ENCODER_QSV, ENCODER_AMF_QVBR):
+    # auto 模式解析到 A 卡时走 CQP；QVBR 必须用户显式选择。
+    for mode in (ENCODER_NVENC, ENCODER_QSV, ENCODER_AMF_CQP):
         if names[mode] in encoders:
             return mode
     return None

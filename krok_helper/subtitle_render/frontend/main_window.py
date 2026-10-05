@@ -8426,7 +8426,7 @@ class SubtitleRenderWindow(QWidget):
         )
         self._subtitle_loading_defaults = loaded.subtitle_loading_defaults
         self._local_output_preferences = loaded.output
-        # 旧偏好里的 legacy "amf" 在此归一为 QVBR，后续读写都只用新值。
+        # 旧偏好里的 legacy "amf" 在此归一为 CQP，后续读写都只用新值。
         encoder_pref = self._local_output_preferences.get("encoder_mode")
         if encoder_pref is not None:
             self._local_output_preferences["encoder_mode"] = normalize_encoder_mode(
