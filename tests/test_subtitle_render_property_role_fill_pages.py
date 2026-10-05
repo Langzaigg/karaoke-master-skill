@@ -43,6 +43,20 @@ class _Host:
     def _wire_color_edit_session(self, _button):
         pass
 
+    # 4.2.8.10 起渐变/拼色复制粘贴在宿主上弹成功/失败提示，构建器会取
+    # 这四个方法；真实宿主实现在 PropertyPanel，夹具按 no-op 桩齐签名。
+    def _show_gradient_copy_success(self):
+        pass
+
+    def _show_split_copy_success(self):
+        pass
+
+    def _show_color_info_paste_success(self, _kind):
+        pass
+
+    def _show_color_info_paste_invalid(self, _kind, _reason):
+        pass
+
     def _choose_gradient_stop_color(self, *args, **kwargs):
         pass
 
@@ -109,6 +123,7 @@ def test_gradient_fill_page_preserves_editor_and_control_contracts(qapp) -> None
     assert host.arrangements[0][1] == {
         "vertical": False,
         "footer": host._ruby_horizontal_gradient_with_main_check,
+        "actions": host._gradient_actions_row,
     }
 
 
@@ -132,7 +147,10 @@ def test_split_fill_page_preserves_hard_stop_and_vertical_contracts(qapp) -> Non
     assert host._split_editor._hard_edges is True
     assert host._split_stop_position_spin.decimals() == 3
     assert host._split_stop_delete_btn.toolTip() == "删除分段点"
-    assert host.arrangements[0][1] == {"vertical": True}
+    assert host.arrangements[0][1] == {
+        "vertical": True,
+        "actions": host._split_actions_row,
+    }
     assert page.layout() is host.arrangements[0][0][0]
 
 
