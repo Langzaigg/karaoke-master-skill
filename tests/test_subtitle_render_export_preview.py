@@ -517,3 +517,79 @@ def test_export_location_dialog_browses_from_nearest_existing_ancestor(
     )
     dialog._browse()
     assert captured["start"] == str(tmp_path)
+
+
+@pytest.mark.parametrize("encoders,h264_label", [
+    ({"h264_videotoolbox"}, "平均码率（Mbps）"),
+    (None, "质量值"),
+    ({"h264_videotoolbox", "h264_qsv", "hevc_videotoolbox"}, "质量值"),
+])
+def test_auto_quality_controls_follow_available_encoders_and_codec(
+    qapp, monkeypatch, encoders, h264_label,
+):
+    """自动硬编按当前格式的可用编码器显示码率或质量值，FFmpeg 缺失时显示质量值。"""
+    from krok_helper.subtitle_render.engine.export import encoder_select
+    from krok_helper.subtitle_render.frontend import main_window
+
+    def find_ffmpeg(*_args):
+        if encoders is None:
+            from krok_helper.errors import ProcessingError
+            raise ProcessingError("找不到 ffmpeg。")
+        return "ffmpeg"
+
+    monkeypatch.setattr(main_window, "find_tool", find_ffmpeg)
+    monkeypatch.setattr(encoder_select, "_available_encoders", lambda _: frozenset(encoders or ()))
+    window = SubtitleRenderWindow(embedded=True, settings_provider=_SettingsProvider())
+    try:
+        controls = window._export_controls
+        controls.encoder_combo.setCurrentIndex(controls.encoder_combo.findData("auto"))
+        assert controls.quality_label.text() == h264_label
+        assert controls.bitrate_spin.isHidden() == (h264_label == "质量值")
+        # 切换到 HEVC 后，输入框随该格式的可用编码器更新。
+        controls.codec_combo.setCurrentIndex(controls.codec_combo.findData("hevc"))
+        expected_label = "平均码率（Mbps）" if "hevc_videotoolbox" in (encoders or ()) else "质量值"
+        assert controls.quality_label.text() == expected_label
+        assert controls.crf_spin.isHidden() == (expected_label == "平均码率（Mbps）")
+    finally:
+        window.close()
+        window.deleteLater()
+        qapp.processEvents()
+
+
+def test_video_bitrate_round_trips_through_preferences_and_project(qapp):
+    """检查质量值与码率分别保留，并能经过偏好、工程和新建工程流程恢复。"""
+    settings = _SettingsProvider()
+    settings.data = {"output": {"encoder_mode": "videotoolbox", "crf": 22, "bitrate_mbps": 35}}
+    window = SubtitleRenderWindow(embedded=True, settings_provider=settings)
+    try:
+        assert window._export_bitrate_spin.value() == 35
+        assert window._export_controls.quality_label.text() == "平均码率（Mbps）"
+        window._export_bitrate_spin.setValue(28)
+        controls = window._export_controls
+        # CPU 显示质量值，VideoToolbox 显示码率，切换后各自保留原值。
+        controls.encoder_combo.setCurrentIndex(controls.encoder_combo.findData("cpu"))
+        assert controls.quality_label.text() == "质量值"
+        assert controls.crf_spin.value() == 22
+        assert controls.bitrate_spin.isHidden()
+        controls.encoder_combo.setCurrentIndex(controls.encoder_combo.findData("videotoolbox"))
+        assert controls.quality_label.text() == "平均码率（Mbps）"
+        assert controls.bitrate_spin.value() == 28
+        assert controls.crf_spin.isHidden()
+        window._save_persisted_state()
+        output = window._current_project_data()["output"]
+        assert output["bitrate_mbps"] == 28
+        assert output["crf"] == 22
+        assert settings.data["output"]["bitrate_mbps"] == 28
+        # 缺少码率字段时使用默认值，加载带有该字段的工程时恢复保存值。
+        window._apply_output_settings({"encoder_mode": "cpu", "crf": 18})
+        assert window._export_bitrate_spin.value() == 10
+        window._apply_output_settings(output)
+        assert window._export_bitrate_spin.value() == 28
+        assert window._export_crf_spin.value() == 22
+        window._reset_export_settings_for_new_project()
+        assert window._export_bitrate_spin.value() == 28
+        assert window._export_controls.quality_label.text() == "平均码率（Mbps）"
+    finally:
+        window.close()
+        window.deleteLater()
+        qapp.processEvents()

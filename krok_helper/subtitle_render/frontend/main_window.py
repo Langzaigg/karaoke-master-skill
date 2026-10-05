@@ -96,11 +96,14 @@ from krok_helper.subtitle_render.engine.export.encoder_select import (
     CODEC_H264,
     CODEC_HEVC,
     CPU_PRESETS,
+    DEFAULT_VIDEO_BITRATE_MBPS,
     ENCODER_AUTO,
     ENCODER_CPU,
     ENCODER_NVENC,
     ENCODER_QSV,
     normalize_encoder_mode,
+    normalize_video_bitrate_mbps,
+    resolve_encoder_mode,
 )
 from krok_helper.subtitle_render.engine.layout.page.assignment import (
     apply_layout_to_page,
@@ -219,6 +222,7 @@ from krok_helper.subtitle_render.frontend.workflow.export_view import (
     physical_preview_size as _physical_preview_size,
     scaled_preview_pixmap as _scaled_preview_pixmap,
     sync_export_preset_enabled,
+    sync_export_quality_controls,
 )
 from krok_helper.subtitle_render.frontend.editor.edit_history import (
     redo_edit,
@@ -1308,6 +1312,7 @@ class SubtitleRenderWindow(QWidget):
             self._on_output_settings_changed
         )
         self._export_crf_spin.valueChanged.connect(self._on_output_settings_changed)
+        self._export_bitrate_spin.valueChanged.connect(self._on_output_settings_changed)
         self._export_name_edit.textEdited.connect(self._on_output_settings_changed)
         self._export_render_workers_combo.currentIndexChanged.connect(
             self._on_render_workers_changed
@@ -1821,6 +1826,7 @@ class SubtitleRenderWindow(QWidget):
             output=project_output_payload(
                 encoder_mode=str(self._export_encoder_combo.currentData() or ENCODER_CPU),
                 crf=self._export_crf_spin.value(),
+                bitrate_mbps=self._export_bitrate_spin.value(),
                 preset=str(self._export_preset_combo.currentData() or "medium"),
                 codec=self._export_codec_value(),
                 output_path=self._export_output_text(),
@@ -2069,6 +2075,9 @@ class SubtitleRenderWindow(QWidget):
         crf = output.get("crf")
         if isinstance(crf, int):
             self._export_crf_spin.setValue(crf)
+        self._export_bitrate_spin.setValue(
+            normalize_video_bitrate_mbps(output.get("bitrate_mbps"))
+        )
         codec = output.get("codec")
         if isinstance(codec, str):
             c_idx = self._export_codec_combo.findData(codec)
@@ -2154,6 +2163,7 @@ class SubtitleRenderWindow(QWidget):
             self._export_codec_combo,
             self._export_preset_combo,
             self._export_crf_spin,
+            self._export_bitrate_spin,
             self._export_render_workers_combo,
             self._export_name_edit,
             self._export_native_check,
@@ -2181,6 +2191,9 @@ class SubtitleRenderWindow(QWidget):
             self._export_crf_spin.setValue(
                 crf if isinstance(crf, int) and 0 <= crf <= 51 else 18
             )
+            self._export_bitrate_spin.setValue(
+                normalize_video_bitrate_mbps(local_output.get("bitrate_mbps"))
+            )
             render_workers = local_output.get("render_workers", 0)
             self._export_render_workers_combo.setCurrentIndex(
                 max(self._export_render_workers_combo.findData(render_workers), 0)
@@ -2194,7 +2207,7 @@ class SubtitleRenderWindow(QWidget):
                 control.blockSignals(was_blocked)
         # Directory mode/custom path is an app preference, not project state.
         self._sync_export_directory()
-        self._update_export_preset_enabled()
+        self._update_export_encoder_controls()
         self._refresh_export_format_label()
 
     def _confirm_discard_changes(self) -> bool:
@@ -2918,7 +2931,8 @@ class SubtitleRenderWindow(QWidget):
             self._on_export_directory_edited
         )
         page.browseRequested.connect(self._browse_export_output)
-        page.encoderChanged.connect(self._update_export_preset_enabled)
+        page.encoderChanged.connect(self._update_export_encoder_controls)
+        page.codecChanged.connect(self._update_export_encoder_controls)
         page.codecChanged.connect(self._refresh_export_format_label)
         page.formatChanged.connect(self._on_export_format_changed)
         page.startRequested.connect(self._start_render_export)
@@ -2927,6 +2941,7 @@ class SubtitleRenderWindow(QWidget):
         controls = page.controls
         # Compatibility aliases keep the surrounding coordinator stable while
         # the view becomes the unique owner of widget construction.
+        self._export_controls = controls
         self._export_theme_labels = controls.theme_labels
         self._export_settings_col = controls.settings_col
         self._export_location_settings_button = controls.location_settings_button
@@ -2942,6 +2957,7 @@ class SubtitleRenderWindow(QWidget):
         self._export_codec_combo = controls.codec_combo
         self._export_preset_combo = controls.preset_combo
         self._export_crf_spin = controls.crf_spin
+        self._export_bitrate_spin = controls.bitrate_spin
         self._export_render_workers_combo = controls.render_workers_combo
         self._export_native_check = controls.native_check
         self._gpu_preview_check = controls.gpu_preview_check
@@ -2979,9 +2995,21 @@ class SubtitleRenderWindow(QWidget):
         self._export_preview_mtime_ns = 0
         self._export_started_monotonic = 0.0
 
-        self._update_export_preset_enabled()
+        self._update_export_encoder_controls()
         return page
-    def _update_export_preset_enabled(self) -> None:
+
+    def _update_export_encoder_controls(self) -> None:
+        mode = str(self._export_encoder_combo.currentData() or ENCODER_CPU)
+        if mode == ENCODER_AUTO:
+            try:
+                mode = resolve_encoder_mode(
+                    find_tool("ffmpeg.exe", self._resolve_ffmpeg_dir()),
+                    mode,
+                    self._export_codec_value(),
+                )
+            except ProcessingError:
+                mode = ENCODER_CPU
+        sync_export_quality_controls(self._export_controls, mode)
         sync_export_preset_enabled(
             self._export_encoder_combo,
             self._export_preset_combo,
@@ -3002,6 +3030,7 @@ class SubtitleRenderWindow(QWidget):
         self._export_codec_combo.setEnabled(uses_encoder_options)
         self._export_preset_combo.setEnabled(uses_encoder_options)
         self._export_crf_spin.setEnabled(uses_encoder_options)
+        self._export_bitrate_spin.setEnabled(uses_encoder_options)
         self._refresh_export_format_label()
 
     # ------------------------------------------------------------------ browse fallback
@@ -6719,6 +6748,7 @@ class SubtitleRenderWindow(QWidget):
                     self._export_preset_combo.currentData() or "medium"
                 ),
                 "crf": int(self._export_crf_spin.value()),
+                "bitrate_mbps": int(self._export_bitrate_spin.value()),
                 "render_workers": int(
                     self._export_render_workers_combo.currentData() or 0
                 ),
@@ -8456,6 +8486,7 @@ class SubtitleRenderWindow(QWidget):
             self._export_codec_combo,
             self._export_preset_combo,
             self._export_crf_spin,
+            self._export_bitrate_spin,
             self._export_render_workers_combo,
             self._export_format_combo,
         )
@@ -8470,6 +8501,7 @@ class SubtitleRenderWindow(QWidget):
             preset_index = self._export_preset_combo.findData("medium")
             self._export_preset_combo.setCurrentIndex(max(preset_index, 0))
             self._export_crf_spin.setValue(18)
+            self._export_bitrate_spin.setValue(DEFAULT_VIDEO_BITRATE_MBPS)
             self._export_render_workers_combo.setCurrentIndex(
                 max(self._export_render_workers_combo.findData(0), 0)
             )
@@ -8479,7 +8511,7 @@ class SubtitleRenderWindow(QWidget):
         finally:
             for control, was_blocked in zip(controls, blocked):
                 control.blockSignals(was_blocked)
-        self._update_export_preset_enabled()
+        self._update_export_encoder_controls()
         self._refresh_export_format_label()
         self._sync_export_directory()
         quality = normalize_preview_quality(DEFAULT_PREVIEW_QUALITY)
@@ -8594,6 +8626,7 @@ class SubtitleRenderWindow(QWidget):
                 codec=str(local_output.get("codec") or CODEC_H264),
                 preset=str(local_output.get("preset") or "medium"),
                 crf=local_output.get("crf", 18),
+                bitrate_mbps=local_output.get("bitrate_mbps", DEFAULT_VIDEO_BITRATE_MBPS),
                 render_workers=local_output.get("render_workers", 0),
                 allowed_render_workers=RENDER_WORKER_OPTIONS,
                 output_format=self._export_format_value(),
@@ -8941,6 +8974,7 @@ class SubtitleRenderWindow(QWidget):
                     self._export_encoder_combo.currentData() or ENCODER_CPU
                 ),
                 crf=self._export_crf_spin.value(),
+                bitrate_mbps=self._export_bitrate_spin.value(),
                 preset=str(self._export_preset_combo.currentData() or "medium"),
                 codec=self._export_codec_value(),
                 gpu_export_enabled=self._gpu_export_check.isChecked(),

@@ -757,7 +757,9 @@ def test_app_runtime_preferences_update_preserves_future_fields():
     }
 
 
-def test_app_output_preferences_are_separate_from_project_output_fields():
+@pytest.mark.parametrize("bitrate,expected_bitrate", [(25, 25), (None, 10), (0, 10)])
+def test_app_output_preferences_are_separate_from_project_output_fields(bitrate, expected_bitrate):
+    """保留有效码率；旧配置缺失值或保存了无效值时恢复默认，同时保留未知字段。"""
     output = update_app_output_preferences(
         {"future_key": "preserved"},
         gpu_preview_enabled=True,
@@ -772,6 +774,7 @@ def test_app_output_preferences_are_separate_from_project_output_fields():
         codec="hevc",
         preset="slow",
         crf=99,
+        bitrate_mbps=bitrate,
         render_workers=7,
         allowed_render_workers=(0, 4, 8),
     )
@@ -781,6 +784,7 @@ def test_app_output_preferences_are_separate_from_project_output_fields():
     assert output["gpu_export_enabled"] is False
     assert output["directory_mode"] == "custom"
     assert output["crf"] == 18
+    assert output["bitrate_mbps"] == expected_bitrate
     assert output["render_workers"] == 0
     project_output = {
         "encoder_mode": "nvenc",
@@ -839,6 +843,7 @@ def test_prepare_app_preferences_owns_the_complete_save_projection():
                 codec="hevc",
                 preset="slow",
                 crf=18,
+                bitrate_mbps=35,
                 render_workers=8,
                 allowed_render_workers=(0, 4, 8),
             ),
@@ -857,6 +862,8 @@ def test_prepare_app_preferences_owns_the_complete_save_projection():
     assert prepared.data["output"]["future_output"] == 3
     assert prepared.data["output"]["encoder_mode"] == "nvenc"
     assert prepared.data["output"]["render_workers"] == 8
+    # 完整偏好保存结果包含输入的 35 Mbps。
+    assert prepared.data["output"]["bitrate_mbps"] == 35
     assert prepared.data["guide_replacement"]["marker"] == "「"
     assert prepared.data["guide_replacement"]["future_key"] == 6
     assert existing == {

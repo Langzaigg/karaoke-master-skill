@@ -40,12 +40,14 @@ from krok_helper.subtitle_render.engine.export.encoder_select import (
     CODEC_H264,
     CODEC_HEVC,
     CPU_PRESETS,
+    DEFAULT_VIDEO_BITRATE_MBPS,
     ENCODER_AMF_CQP,
     ENCODER_AMF_QVBR,
     ENCODER_AUTO,
     ENCODER_CPU,
     ENCODER_NVENC,
     ENCODER_QSV,
+    ENCODER_VIDEOTOOLBOX,
 )
 from krok_helper.subtitle_render.engine.export.render_job import (
     OUTPUT_FORMAT_MOV_QTRLE,
@@ -544,6 +546,8 @@ class ExportWorkspaceControls:
     codec_combo: FluentComboBox
     preset_combo: FluentComboBox
     crf_spin: FluentSpinBox
+    bitrate_spin: FluentSpinBox
+    quality_label: CaptionLabel
     render_workers_combo: FluentComboBox
     native_check: CheckBox
     gpu_preview_check: CheckBox
@@ -560,6 +564,14 @@ class ExportWorkspaceControls:
     status_label: CaptionLabel
     start_button: FluentPrimaryPushButton
     stop_button: FluentPushButton
+
+
+def sync_export_quality_controls(controls: ExportWorkspaceControls, encoder_mode: str) -> None:
+    """Show the encoder's input while retaining both independent values."""
+    uses_bitrate = encoder_mode == ENCODER_VIDEOTOOLBOX
+    controls.quality_label.setText("平均码率（Mbps）" if uses_bitrate else "质量值")
+    controls.crf_spin.setVisible(not uses_bitrate)
+    controls.bitrate_spin.setVisible(uses_bitrate)
 
 
 class ExportWorkspaceView(QWidget):
@@ -780,6 +792,7 @@ class ExportWorkspaceView(QWidget):
         encoder_combo.setMinimumHeight(32)
         encoder_combo.addItem("CPU 软编", userData=ENCODER_CPU)
         encoder_combo.addItem("自动硬编", userData=ENCODER_AUTO)
+        encoder_combo.addItem("Apple VideoToolbox", userData=ENCODER_VIDEOTOOLBOX)
         encoder_combo.addItem("NVIDIA NVENC", userData=ENCODER_NVENC)
         encoder_combo.addItem("Intel QSV", userData=ENCODER_QSV)
         encoder_combo.addItem("AMD AMF (QVBR)", userData=ENCODER_AMF_QVBR)
@@ -820,17 +833,20 @@ class ExportWorkspaceView(QWidget):
         preset_combo.setCurrentText("medium")
         crf_spin = make_export_spin(0, 51, 18, "")
         crf_spin.setToolTip(
-            "统一质量值：数值越小画质越高、文件越大；18 通常接近视觉无损，"
+            "统一质量值：数值越小画质越高、文件越大；CPU 编码时，18 通常接近视觉无损。"
             "AMD AMF (QVBR) 会在后台换算为对应质量等级，AMD AMF (CQP) 则直接"
             "作为固定量化参数直通；"
             "实际画质和文件大小会因显卡型号、编码器与画面内容而异。"
         )
+        bitrate_spin = make_export_spin(1, 2000, DEFAULT_VIDEO_BITRATE_MBPS, "")
+        bitrate_spin.hide()
         quality_row.addWidget(
             make_labeled_export_control("CPU preset", preset_combo, theme_labels)
         )
-        quality_row.addWidget(
-            make_labeled_export_control("质量 (CRF)", crf_spin, theme_labels)
-        )
+        quality_box = make_labeled_export_control("质量值", crf_spin, theme_labels)
+        quality_label = quality_box.findChild(CaptionLabel)
+        quality_box.layout().addWidget(bitrate_spin)
+        quality_row.addWidget(quality_box)
         params_layout.addLayout(quality_row)
 
         render_workers_combo = FluentComboBox()
@@ -972,6 +988,8 @@ class ExportWorkspaceView(QWidget):
             codec_combo=codec_combo,
             preset_combo=preset_combo,
             crf_spin=crf_spin,
+            bitrate_spin=bitrate_spin,
+            quality_label=quality_label,
             render_workers_combo=render_workers_combo,
             native_check=native_check,
             gpu_preview_check=gpu_preview_check,
@@ -1041,4 +1059,5 @@ __all__ = [
     "physical_preview_size",
     "scaled_preview_pixmap",
     "sync_export_preset_enabled",
+    "sync_export_quality_controls",
 ]

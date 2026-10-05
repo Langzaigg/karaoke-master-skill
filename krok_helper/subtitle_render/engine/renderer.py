@@ -28,6 +28,8 @@ from PyQt6.QtGui import QColor, QImage, QPainter
 from krok_helper.errors import ExportCancelled, ProcessingError
 from krok_helper.ffmpeg import _build_subprocess_kwargs, find_tool, terminate_process
 from krok_helper.subtitle_render.engine.export.encoder_select import (
+    ENCODER_VIDEOTOOLBOX,
+    resolve_encoder_mode,
     resolved_encoder_label,
 )
 from krok_helper.subtitle_render.engine.export.export_command import (
@@ -362,11 +364,15 @@ def render_subtitle_video(
         "导出字幕 PNG 序列" if is_png_sequence(job.output_format) else "导出字幕视频"
     )
     logger(f"{action_label}: {job.output_path.name}")
-    params_tail = (
-        f"{resolved_encoder_label(ffmpeg_path, job.encoder_mode, job.codec)} / CRF {job.crf}"
-        if job.output_format == OUTPUT_FORMAT_MP4
-        else _output_format_label(job.output_format)
-    )
+    if job.output_format == OUTPUT_FORMAT_MP4:
+        mode = resolve_encoder_mode(ffmpeg_path, job.encoder_mode, job.codec)
+        quality_label = (
+            f"平均码率 {job.bitrate_mbps} Mbps"
+            if mode == ENCODER_VIDEOTOOLBOX else f"质量值 {job.crf}"
+        )
+        params_tail = f"{resolved_encoder_label(ffmpeg_path, mode, job.codec)} / {quality_label}"
+    else:
+        params_tail = _output_format_label(job.output_format)
     logger(
         f"输出参数: {job.width}x{job.height} / {job.fps}fps / "
         f"{duration_ms / 1000:.3f}s / {params_tail}"
@@ -528,7 +534,7 @@ def render_subtitle_video(
     if retry_hw_encoder_with_cpu:
         _remove_incomplete_output(job, logger)
         logger(
-            "硬编码码器（NVENC/QSV/AMF）初始化或显存失败，已自动切换 CPU 编码"
+            "硬件编码器初始化失败或资源不足，已自动切换 CPU 编码"
             "，从头重试（进度会重新从 0 开始计数）"
         )
         return render_subtitle_video(
@@ -1672,7 +1678,7 @@ def _drain_process_output(
 
 # 硬件编码器初始化失败自动回退 CPU 的适配范围：auto 模式按 ffmpeg -encoders
 # 名单选硬编，不验证能否真正初始化（无 N 卡 / 驱动过旧 / 会话占满都会在写
-# 第一批帧时断管退出），NVENC / QSV / AMF 一视同仁地允许换 CPU 重试一次。
+# 第一批帧时断管退出），各硬编后端允许换 CPU 重试一次。
 _HW_ENCODER_NAMES = frozenset(
     {
         "h264_nvenc",
@@ -1681,6 +1687,8 @@ _HW_ENCODER_NAMES = frozenset(
         "hevc_qsv",
         "h264_amf",
         "hevc_amf",
+        "h264_videotoolbox",
+        "hevc_videotoolbox",
     }
 )
 
@@ -1710,6 +1718,11 @@ def _should_retry_encoder_with_cpu(
         "no nvidia devices",
         # QSV：运行时建不起 MFX 会话（-encoders 名单存在 ≠ 核显可用）
         "mfx session",
+        # VideoToolbox: busy/unsupported hardware, or an x86 FFmpeg on ARM.
+        "cannot create compression session",
+        "hardware encoder may be busy",
+        "error setting bitrate property",
+        "unknown encoder",
         "out of memory",
         "cannot allocate memory",
         "failed to initialise",

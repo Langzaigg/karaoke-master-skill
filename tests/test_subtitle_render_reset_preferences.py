@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 import os
+import sys
 from dataclasses import replace
 
 import pytest
@@ -137,6 +138,7 @@ def _polluted_payload(recent_project: str) -> dict:
             "codec": "hevc",
             "preset": "slow",
             "crf": 23,
+            "bitrate_mbps": 45,
             "render_workers": 4,
             "output_format": "prores",
             "preview_quality": "low",
@@ -202,10 +204,13 @@ def test_reset_restores_every_memory_category(
     assert output["codec"] == "h264"
     assert output["preset"] == "medium"
     assert output["crf"] == 18
+    # 恢复默认后，保存的码率和当前控件均为 10 Mbps。
+    assert output["bitrate_mbps"] == 10
+    assert window._export_bitrate_spin.value() == 10
     assert output["render_workers"] == 0
     assert output["output_format"] == "mp4"
     assert output["preview_quality"] == "high"
-    assert output["gpu_export_enabled"] is True
+    assert output["gpu_export_enabled"] is (sys.platform == "win32")
     assert last_bitmap_settings() == {}
     assert window._app_default_style.title_overlays[0].fade_in_ms == (
         TitleOverlay().fade_in_ms
