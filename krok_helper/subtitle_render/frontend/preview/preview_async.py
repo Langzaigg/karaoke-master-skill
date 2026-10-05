@@ -1811,6 +1811,25 @@ class GpuAsyncSubtitleRenderer(QObject):
                                 self._pending = (t_ms, serial, speculative, submitted_at)
                             self._condition.notify()
                         continue
+                    with self._condition:
+                        churned = generation != self._generation
+                    if churned:
+                        # 代际作废豁免（2026-10 用户实测：疯狂播放/暂停 +
+                        # zx/space seek 高频翻代际）：失败请求所属代际已被
+                        # 用户操作作废时，这是预期搅动而非渲染器生病——
+                        # 温和重试，不杀进程、不 CPU 补帧、不记断路器。
+                        # 真死亡经「当前代际的新请求失败」正常升级（重试
+                        # 注回的 pending 会以最新代际重新提交）。
+                        self._note("churn_stale_failures")
+                        with self._condition:
+                            if needs_configure:
+                                self._needs_configure = True
+                            if needs_target_resize:
+                                self._needs_target_resize = True
+                            if self._pending is None:
+                                self._pending = (t_ms, serial, speculative, submitted_at)
+                            self._condition.notify()
+                        continue
                     if (
                         isinstance(exc, NativeRendererError)
                         # configure/resize 阶段的失败不做帧级温和重试：
