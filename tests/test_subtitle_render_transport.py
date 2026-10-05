@@ -5655,3 +5655,207 @@ def test_busy_badge_prefers_fresh_sidecar_stage(qapp, monkeypatch):
         graphics.close()
         graphics.deleteLater()
         qapp.processEvents()
+
+
+# ---------------------------------------------------------------------------
+# G6 直画帧仓（2026-10）：present 按 (generation, t_ms) 身份取帧
+# ---------------------------------------------------------------------------
+
+
+def test_native_due_queue_capacity_clamped_to_frame_store():
+    """到点队列容量必须钳到帧仓容量：队列超仓只会制造登记不进仓的无效渲染。"""
+    from krok_helper.subtitle_render.frontend.preview.preview_async import (
+        native_due_queue_capacity,
+    )
+
+    # 60fps：容忍窗 120ms ≈ 8 帧 < 仓容量，钳制不生效。
+    assert native_due_queue_capacity(120.0, 60, 25) == 8
+    # 默认 25 槽仓下 120fps 容忍窗 15 装得下，钳制不生效。
+    assert native_due_queue_capacity(120.0, 120, 25) == 15
+    # env 缩仓（如 12）时 120fps 容忍窗 15 > 12 → 钳到仓容量。
+    assert native_due_queue_capacity(120.0, 120, 12) == 12
+    # env 覆盖仓容量后随动。
+    assert native_due_queue_capacity(120.0, 120, 3) == 3
+    # 仓容量 1 时队列也钳到 1：单槽仓渲染下一帧必然顶掉未呈现帧。
+    assert native_due_queue_capacity(120.0, 60, 1) == 1
+
+
+def test_gpu_native_paused_dropped_present_is_frame_drop(qapp, monkeypatch):
+    """G6 暂停态 present 帧仓未命中：按丢帧收场——不上屏、不记账、不进失败链。
+
+    帧仓语义（2026-10 用户拍板）：present 吐出的像素必须属于它宣称的
+    (generation, t_ms)；仓里没有这帧就丢帧，屏幕延续上一帧，绝不允许
+    单纹理时代「拿最新渲染结果冒充到点帧」的错帧上屏。
+    """
+    from krok_helper.subtitle_render.frontend.preview import preview_async as pa
+    from krok_helper.subtitle_render.domain.models import Style, TimingTrack
+
+    presents: list[dict] = []
+    presented_signals: list[int] = []
+
+    class FakeGpuProcess:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def start(self):
+            return {"ok": True, "event": "ready"}
+
+        def configure_gpu(self, *args, **kwargs):
+            return {"ok": True, "event": "gpu_configured", "native_preview": True}
+
+        def resize_gpu_target(self, *args, **kwargs):
+            return {"ok": True, "event": "gpu_configured", "worker_count": 1}
+
+        def render_gpu_frame_direct(self, t_ms, **kwargs):
+            return {
+                "ok": True,
+                "event": "gpu_frame_rendered_direct",
+                "t_ms": int(t_ms),
+                "render_ms": 1.0,
+            }
+
+        def present_rendered_gpu_frame(self, **kwargs):
+            presents.append(dict(kwargs))
+            return {
+                "ok": True,
+                "event": "gpu_frame_dropped",
+                "dropped": True,
+                "t_ms": int(kwargs.get("t_ms", 0)),
+                "generation": int(kwargs.get("generation", 0)),
+            }
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(pa, "gpu_native_preview_enabled", lambda: True)
+    monkeypatch.setattr(pa, "NativeRendererProcess", FakeGpuProcess)
+    renderer = pa.GpuAsyncSubtitleRenderer(320, 180)
+    renderer.frame_presented.connect(presented_signals.append)
+    try:
+        renderer.set_native_target(12345, 0, 0, 320, 180)
+        renderer.set_state(TimingTrack(), Style())
+        renderer.request(1000)
+        deadline = time.monotonic() + 2.0
+        while time.monotonic() < deadline and not presents:
+            qapp.processEvents()
+            time.sleep(0.01)
+        assert presents, "暂停态应已完成一次 render+present 尝试"
+        # present 必须携带帧身份（帧仓按 (generation, t_ms) 取帧）。
+        assert "t_ms" in presents[0] and "generation" in presents[0]
+        stats = renderer.stats_snapshot()
+        assert stats["stale_frames_dropped"] >= 1
+        assert stats["renderer_failures"] == 0
+        assert presented_signals == [], "丢帧不得发 frame_presented"
+    finally:
+        renderer.stop()
+
+
+def test_gpu_native_due_scheduler_dropped_present_keeps_bookkeeping_monotonic(
+    qapp, monkeypatch
+):
+    """播放态帧仓丢帧：跳过该拍、成功呈现的帧序严格单调、不进重启链。"""
+    from krok_helper.subtitle_render.frontend.preview import preview_async as pa
+    from krok_helper.subtitle_render.domain.models import Style, TimingTrack
+
+    lock = threading.Lock()
+    renders: list[int] = []
+    successes: list[int] = []
+    drops: list[int] = []
+    call_count = {"n": 0}
+
+    class FakeGpuProcess:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def start(self):
+            return {"ok": True, "event": "ready"}
+
+        def configure_gpu(self, *args, **kwargs):
+            return {"ok": True, "event": "gpu_configured", "native_preview": True}
+
+        def resize_gpu_target(self, *args, **kwargs):
+            return {"ok": True, "event": "gpu_configured", "worker_count": 1}
+
+        def render_gpu_frame_direct(self, t_ms, **kwargs):
+            with lock:
+                renders.append(int(t_ms))
+            return {
+                "ok": True,
+                "event": "gpu_frame_rendered_direct",
+                "t_ms": int(t_ms),
+                "render_ms": 1.0,
+            }
+
+        def present_rendered_gpu_frame(self, **kwargs):
+            t = int(kwargs.get("t_ms", 0))
+            with lock:
+                call_count["n"] += 1
+                drop = call_count["n"] % 3 == 0
+                (drops if drop else successes).append(t)
+            if drop:
+                return {
+                    "ok": True,
+                    "event": "gpu_frame_dropped",
+                    "dropped": True,
+                    "t_ms": t,
+                    "generation": int(kwargs.get("generation", 0)),
+                }
+            return {
+                "ok": True,
+                "event": "gpu_frame_presented",
+                "t_ms": t,
+                "render_ms": 0.0,
+                "present_ms": 0.2,
+                "readback_ms": 0.0,
+                "child_hwnd": 1,
+                "transport": "direct_composition",
+            }
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(pa, "gpu_native_preview_enabled", lambda: True)
+    monkeypatch.setattr(pa, "NativeRendererProcess", FakeGpuProcess)
+    renderer = pa.GpuAsyncSubtitleRenderer(320, 180)
+    try:
+        renderer.set_native_target(12345, 0, 0, 320, 180)
+        renderer.set_state(TimingTrack(), Style())
+        renderer.set_playing(True)
+        t0 = time.monotonic()
+        while time.monotonic() - t0 < 1.2:
+            renderer.request(60_000 + int((time.monotonic() - t0) * 1000.0))
+            qapp.processEvents()
+            time.sleep(0.016)
+        time.sleep(0.2)
+        qapp.processEvents()
+
+        assert len(drops) >= 3, "测试期内应制造过丢帧"
+        assert len(successes) >= 5, "丢帧不阻断后续到点呈现"
+        # 成功呈现的帧序严格递增：丢帧只跳拍，记账不倒退（回退根因回归）。
+        assert all(
+            successes[i] < successes[i + 1] for i in range(len(successes) - 1)
+        ), f"成功呈现帧序倒退: {successes}"
+        # 每个被成功呈现的 t 都确实渲染过（present 忠实于存在的帧）。
+        rendered_set = set(renders)
+        assert all(t in rendered_set for t in successes)
+        stats = renderer.stats_snapshot()
+        assert stats["renderer_failures"] == 0
+        assert stats["stale_frames_dropped"] >= len(drops)
+    finally:
+        renderer.stop()
+
+
+def test_gpu_native_frame_store_default_matches_g5_cache_formula(qapp, monkeypatch):
+    """帧仓默认容量与 G5 帧缓存同口径：max_lookahead(24)+native 单 worker(1)+1 = 25。
+
+    两侧（Python env 解析 / sidecar Impl）必须同 env 同默认，否则调度队列
+    与仓容量失配：队列按 Python 侧容量放行、仓按 C++ 侧容量登记。
+    """
+    from krok_helper.subtitle_render.frontend.preview import preview_async as pa
+
+    monkeypatch.delenv("KROK_SUBTITLE_GPU_FRAME_STORE", raising=False)
+    renderer = pa.GpuAsyncSubtitleRenderer(320, 180)
+    try:
+        assert renderer._native_frame_store_capacity == 25  # noqa: SLF001
+    finally:
+        renderer.stop()

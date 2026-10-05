@@ -150,6 +150,8 @@ void Direct2DGpuBackend::configure(const RenderScene &scene) {
         // every positioned geometry/realization alive; alpha/mode/image/stop
         // topology remains part of the comparison and falls back to rebuild.
         impl_->scene = scene;
+        // 帧仓登记的像素是旧色画的，随画笔一起作废（纹理同尺寸可复用）。
+        clearFrameStoreRegistrations();
         // 仅改色也会换掉 glow 画笔颜色：稳态模糊缓存条目按旧色烘焙，作废。
         impl_->glowBlurCache.clear();
         for (std::size_t index = 0; index < impl_->lines.size(); ++index) {
@@ -221,8 +223,12 @@ void Direct2DGpuBackend::configure(const RenderScene &scene) {
         impl_->glowEffectInUse = 0;
         impl_->frameSurfaceWidth = scene.width;
         impl_->frameSurfaceHeight = scene.height;
+        // 尺寸变化：仓里的纹理全部失配，连登记带纹理整仓释放。
+        releaseFrameStoreTextures();
     }
     impl_->scene = scene;
+    // 全量重建（含同尺寸）：行集/几何全部换血，仓里任何登记帧都已过期。
+    clearFrameStoreRegistrations();
     // 稳态 glow 模糊缓存随场景整体失效：行向量即将清空重建，缓存条目
     // 持有的行指针全部悬空。
     impl_->glowBlurCache.clear();

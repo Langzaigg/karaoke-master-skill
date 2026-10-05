@@ -403,6 +403,28 @@ struct Direct2DGpuBackend::Impl {
     Microsoft::WRL::ComPtr<ID3D11Texture2D> frameTargetTexture;
     Microsoft::WRL::ComPtr<ID2D1Bitmap1> frameTargetBitmap;
     Microsoft::WRL::ComPtr<ID3D11Texture2D> frameStagingTexture;
+    // G6 直画帧仓（2026-10 用户拍板与 G5 帧缓存同口径 24+1+1 = 25 槽，
+    // 60fps 语义 ~417ms 窗口）：
+    // direct 渲染完成后按 (generation, tMs) 登记进仓，present 按同一身份
+    // 取槽上屏——present 的像素永远属于它宣称的时刻，「到点才播放」第一
+    // 次在运输层成立。此前单纹理下渲染 N+k 会覆盖 N 的像素，而调度器
+    // 仍按 N 的到点记账出队，慢机上表现为字幕回退/超前。
+    // 失效三类：configure 改场景或改色（登记作废；尺寸变化连纹理释放）、
+    // 渲染/present 遇到更新代际（旧代整仓释放纹理）、present 成功后
+    // 同代更早的帧按时间丢弃（登记清空、纹理留作复用）。槽懒分配：稳态
+    // 只占实际在飞深度，25 是上界不是常态。env KROK_SUBTITLE_GPU_FRAME_STORE。
+    struct FrameStoreSlot {
+        Microsoft::WRL::ComPtr<ID3D11Texture2D> texture;
+        Microsoft::WRL::ComPtr<ID2D1Bitmap1> bitmap;
+        int generation = -1;
+        std::int64_t tMs = -1;  // -1 = 未登记（空闲 / 已消费 / 待渲染）
+        std::uint64_t lastUse = 0;
+    };
+    std::vector<FrameStoreSlot> frameStore;
+    std::size_t frameStoreCapacity = direct2d::environmentSize(
+        "KROK_SUBTITLE_GPU_FRAME_STORE", 25, 1, 64
+    );
+    std::uint64_t frameStoreUseSerial = 0;
     // Persistent glow scratch targets and GaussianBlur effects. Dirty-rect
     // mode grows each scratch slot only to its largest requested region;
     // entries rewind per line after the composite is flushed.

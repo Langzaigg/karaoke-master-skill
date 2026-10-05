@@ -14,10 +14,15 @@ public:
     virtual ProbeResult renderFrame(int tMs, bool compactBands = false) = 0;
     virtual NativePreviewResult presentFrame(
         int tMs,
-        const NativePreviewTarget &target
+        const NativePreviewTarget &target,
+        int generation
     ) = 0;
-    virtual NativeRenderOnlyResult renderFrameOnly(int tMs) = 0;
-    virtual NativePreviewResult presentRendered(const NativePreviewTarget &target) = 0;
+    virtual NativeRenderOnlyResult renderFrameOnly(int tMs, int generation) = 0;
+    virtual NativePreviewResult presentRendered(
+        const NativePreviewTarget &target,
+        int generation,
+        int tMs
+    ) = 0;
     virtual void closeNativePreview() = 0;
     // 空闲心跳：只派发 DComp 子窗口积压的鼠标转发消息。
     virtual void pumpNativePreviewMessages() {}

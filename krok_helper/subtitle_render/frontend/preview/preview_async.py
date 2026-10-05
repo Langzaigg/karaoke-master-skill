@@ -312,6 +312,22 @@ def gpu_preview_enabled() -> bool:
     return _env_enabled("KROK_SUBTITLE_GPU_PREVIEW", default)
 
 
+def native_due_queue_capacity(
+    stale_tolerance_ms: float, fps: int, store_capacity: int
+) -> int:
+    """G6 到点队列容量：容忍窗内帧数，钳到帧仓容量。
+
+    渲染前沿登记进仓才有槽可落，队列超仓只会制造「登记不进仓、present
+    必丢」的无效渲染。默认仓 25 槽下 60/120fps 的容忍窗（8/15 帧）都装
+    得下，钳制只在 env 缩仓时生效。
+    """
+    interval_ms = 1000.0 / max(int(fps), 1)
+    return min(
+        max(2, int(float(stale_tolerance_ms) / interval_ms) + 1),
+        max(int(store_capacity), 1),
+    )
+
+
 def _gpu_direct_present_preference() -> bool:
     """Read the persisted G6 preference (set by the export-page toggle)."""
     try:
@@ -812,6 +828,14 @@ class GpuAsyncSubtitleRenderer(QObject):
         # 的鼠标转发消息（→父窗口→Qt 控件）靠它周期投递，悬浮控件才有
         # hover/点击。
         self._NATIVE_IDLE_PUMP_S = 0.03
+        # G6 直画帧仓容量（2026-10 用户拍板与 G5 帧缓存同口径：
+        # max_lookahead 24 + native 单 worker 1 + 1 = 25 槽；与 sidecar
+        # Impl::frameStoreCapacity 同 env 同默认）。sidecar 侧 direct 渲染
+        # 完成后按 (generation, t_ms) 登记进仓、present 按同一身份取槽上
+        # 屏；调度队列容量钳到仓容量，渲染前沿才永远装得进仓。
+        self._native_frame_store_capacity = _env_int(
+            "KROK_SUBTITLE_GPU_FRAME_STORE", 25, minimum=1
+        )
         # 同键去重 + 时延感知投喂（2026-10 用户提议的追帧/降无效帧方案）。
         # _render_ms_ema 服务 GPU 直渲/读回路径；CPU 回退帧量级差一个数量
         # 级，单独一条 EMA。
@@ -1675,6 +1699,11 @@ class GpuAsyncSubtitleRenderer(QObject):
                             force_warp=force_warp,
                             generation=generation,
                         )
+                        if event.get("dropped"):
+                            # 帧仓未命中（渲染期间代际被作废）：丢帧收场，
+                            # 不上屏也不记账。
+                            self._note("stale_frames_dropped")
+                            continue
                         if event.get("render_ms") in (None, 0.0):
                             event["render_ms"] = render_event.get("render_ms", 0.0)
                         self._native_note_presented(generation, render_t, event)
@@ -2311,7 +2340,9 @@ class GpuAsyncSubtitleRenderer(QObject):
         """
         fps = max(int(self._frame_cache._fps), 1)  # noqa: SLF001
         interval_ms = 1000.0 / fps
-        queue_cap = max(2, int(self._STALE_TOLERANCE_MS / interval_ms) + 1)
+        queue_cap = native_due_queue_capacity(
+            self._STALE_TOLERANCE_MS, fps, self._native_frame_store_capacity
+        )
         rendered_queue: list[tuple[int, int]] = []  # native: (key, t_ms) 递增
         # 读回（G5）连续饱和提交的在途表：wire serial → 填充目标时间戳。
         inflight: dict[int, int] = {}
@@ -2628,6 +2659,12 @@ class GpuAsyncSubtitleRenderer(QObject):
             force_warp=force_warp,
             generation=generation,
         )
+        if event.get("dropped"):
+            # 帧仓未命中（代际翻动 / 池满丢帧）：本拍不上屏，屏幕延续上一
+            # 帧。绝不把别的时刻的像素端出去——这是慢机「预览回退」的根
+            # 因修复点。
+            self._note("stale_frames_dropped")
+            return
         completed_at = time.monotonic()
         self._frame_error_streak = 0
         self._native_preview_failures = 0

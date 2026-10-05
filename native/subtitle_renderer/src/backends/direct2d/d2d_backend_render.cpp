@@ -147,7 +147,8 @@ ProbeResult Direct2DGpuBackend::renderFrame(int tMs, bool compactBands) {
 ProbeResult Direct2DGpuBackend::renderFrameInternal(
     int tMs,
     bool compactBands,
-    bool readback
+    bool readback,
+    int frameStoreIndex
 ) {
     if (!impl_->configured) {
         throw BackendError("GPU backend is not configured");
@@ -217,31 +218,57 @@ ProbeResult Direct2DGpuBackend::renderFrameInternal(
         96.0f,
         96.0f
     );
-    if (!impl_->frameTargetTexture || !impl_->frameTargetBitmap) {
+    const auto createTargetPair = [&](
+        Microsoft::WRL::ComPtr<ID3D11Texture2D> &texture,
+        Microsoft::WRL::ComPtr<ID2D1Bitmap1> &bitmap,
+        const char *operation
+    ) {
         checkHr(
             device_.d3dDevice()->CreateTexture2D(
                 &targetDesc,
                 nullptr,
-                impl_->frameTargetTexture.ReleaseAndGetAddressOf()
+                texture.ReleaseAndGetAddressOf()
             ),
-            "ID3D11Device::CreateTexture2D(frame target)",
+            operation,
             device_
         );
         Microsoft::WRL::ComPtr<IDXGISurface> targetSurface;
-        checkHr(
-            impl_->frameTargetTexture.As(&targetSurface),
-            "Query frame target IDXGISurface",
-            device_
-        );
+        checkHr(texture.As(&targetSurface), operation, device_);
         checkHr(
             device_.d2dContext()->CreateBitmapFromDxgiSurface(
                 targetSurface.Get(),
                 &bitmapProperties,
-                impl_->frameTargetBitmap.ReleaseAndGetAddressOf()
+                bitmap.ReleaseAndGetAddressOf()
             ),
-            "ID2D1DeviceContext::CreateBitmapFromDxgiSurface(frame)",
+            operation,
             device_
         );
+    };
+    ID3D11Texture2D *targetTexture = nullptr;
+    ID2D1Bitmap1 *targetBitmap = nullptr;
+    if (frameStoreIndex >= 0) {
+        Impl::FrameStoreSlot &slot = impl_->frameStore[
+            static_cast<std::size_t>(frameStoreIndex)
+        ];
+        if (!slot.texture || !slot.bitmap) {
+            createTargetPair(
+                slot.texture,
+                slot.bitmap,
+                "frame store slot target"
+            );
+        }
+        targetTexture = slot.texture.Get();
+        targetBitmap = slot.bitmap.Get();
+    } else {
+        if (!impl_->frameTargetTexture || !impl_->frameTargetBitmap) {
+            createTargetPair(
+                impl_->frameTargetTexture,
+                impl_->frameTargetBitmap,
+                "frame target"
+            );
+        }
+        targetTexture = impl_->frameTargetTexture.Get();
+        targetBitmap = impl_->frameTargetBitmap.Get();
     }
     if (readback && !impl_->frameStagingTexture) {
         D3D11_TEXTURE2D_DESC stagingDesc = targetDesc;
@@ -258,8 +285,6 @@ ProbeResult Direct2DGpuBackend::renderFrameInternal(
             device_
         );
     }
-    ID3D11Texture2D *targetTexture = impl_->frameTargetTexture.Get();
-    ID2D1Bitmap1 *targetBitmap = impl_->frameTargetBitmap.Get();
 
     const auto renderStart = Clock::now();
     ID2D1DeviceContext *context = device_.d2dContext();
@@ -8496,9 +8521,13 @@ ProbeResult Direct2DGpuBackend::renderFrameInternal(
 
 NativePreviewResult Direct2DGpuBackend::presentFrame(
     int tMs,
-    const NativePreviewTarget &target
+    const NativePreviewTarget &target,
+    int generation
 ) {
-    const auto rendered = renderFrameInternal(tMs, false, false);
+    purgeForeignFrameGenerations(generation);
+    const int slotIndex = acquireFrameStoreSlot(generation, tMs);
+    const auto rendered = renderFrameInternal(tMs, false, false, slotIndex);
+    registerFrameStoreSlot(slotIndex, generation, tMs);
     // present 的 backbuffer 拷贝走 immediate context，与回读互斥。
     const std::lock_guard<std::mutex> immediateContextLock(
         device_.immediateContextMutex()
@@ -8506,7 +8535,7 @@ NativePreviewResult Direct2DGpuBackend::presentFrame(
     return previewSurface_.present(
         device_.d3dDevice(),
         device_.d3dContext(),
-        impl_->frameTargetTexture.Get(),
+        impl_->frameStore[static_cast<std::size_t>(slotIndex)].texture.Get(),
         rendered.renderMs,
         target
     );
@@ -8520,27 +8549,145 @@ void Direct2DGpuBackend::pumpNativePreviewMessages() {
     previewSurface_.pumpMessages();
 }
 
-NativeRenderOnlyResult Direct2DGpuBackend::renderFrameOnly(int tMs) {
-    const auto rendered = renderFrameInternal(tMs, false, false);
+NativeRenderOnlyResult Direct2DGpuBackend::renderFrameOnly(
+    int tMs,
+    int generation
+) {
+    purgeForeignFrameGenerations(generation);
+    const int slotIndex = acquireFrameStoreSlot(generation, tMs);
+    const auto rendered = renderFrameInternal(tMs, false, false, slotIndex);
+    registerFrameStoreSlot(slotIndex, generation, tMs);
     NativeRenderOnlyResult result;
     result.renderMs = rendered.renderMs;
     return result;
 }
 
 NativePreviewResult Direct2DGpuBackend::presentRendered(
-    const NativePreviewTarget &target
+    const NativePreviewTarget &target,
+    int generation,
+    int tMs
 ) {
-    // present 的 backbuffer 拷贝走 immediate context，与回读互斥。
-    const std::lock_guard<std::mutex> immediateContextLock(
-        device_.immediateContextMutex()
-    );
-    return previewSurface_.present(
-        device_.d3dDevice(),
-        device_.d3dContext(),
-        impl_->frameTargetTexture.Get(),
-        0.0,
-        target
-    );
+    NativePreviewResult result;
+    int found = -1;
+    for (std::size_t index = 0; index < impl_->frameStore.size(); ++index) {
+        const Impl::FrameStoreSlot &slot = impl_->frameStore[index];
+        if (slot.tMs >= 0 && slot.generation == generation && slot.tMs == tMs) {
+            found = static_cast<int>(index);
+            break;
+        }
+    }
+    if (found < 0) {
+        // 帧仓未命中（代际已翻 / 槽被池满策略丢弃）：丢帧而非上错帧。
+        result.dropped = true;
+        return result;
+    }
+    purgeForeignFrameGenerations(generation);
+    const std::size_t foundIndex = static_cast<std::size_t>(found);
+    {
+        // present 的 backbuffer 拷贝走 immediate context，与回读互斥。
+        const std::lock_guard<std::mutex> immediateContextLock(
+            device_.immediateContextMutex()
+        );
+        result = previewSurface_.present(
+            device_.d3dDevice(),
+            device_.d3dContext(),
+            impl_->frameStore[foundIndex].texture.Get(),
+            0.0,
+            target
+        );
+    }
+    // 时间丢弃：到点帧已上屏，同代里更早的帧永远不会再被播放，登记
+    // 即刻释放（纹理保留复用，避免 seek 前后反复分配全幅目标）。
+    for (Impl::FrameStoreSlot &slot : impl_->frameStore) {
+        if (slot.tMs >= 0 && slot.generation == generation && slot.tMs < tMs) {
+            slot.tMs = -1;
+        }
+    }
+    return result;
+}
+
+int Direct2DGpuBackend::acquireFrameStoreSlot(
+    int generation,
+    std::int64_t tMs
+) {
+    if (impl_->frameStore.empty()) {
+        impl_->frameStore.resize(impl_->frameStoreCapacity);
+    }
+    const std::uint64_t use = ++impl_->frameStoreUseSerial;
+    std::size_t chosen = impl_->frameStore.size();
+    // 同一帧重渲（暂停态重复请求同 t / EMA 抖动回落）：复用原槽覆盖。
+    for (std::size_t index = 0; index < impl_->frameStore.size(); ++index) {
+        if (impl_->frameStore[index].generation == generation
+            && impl_->frameStore[index].tMs == tMs) {
+            chosen = index;
+            break;
+        }
+    }
+    if (chosen == impl_->frameStore.size()) {
+        // 空闲槽优先（未登记 = 从未渲染 / 已消费 / 已作废）。
+        for (std::size_t index = 0; index < impl_->frameStore.size(); ++index) {
+            if (impl_->frameStore[index].tMs < 0) {
+                chosen = index;
+                break;
+            }
+        }
+    }
+    if (chosen == impl_->frameStore.size()) {
+        // 池满：丢最久未用的登记帧（时间策略的池满兜底；Python 侧调度
+        // 队列容量已钳到仓容量，这里只在代际搅动余波里触达）。
+        std::uint64_t oldest = impl_->frameStore[0].lastUse;
+        chosen = 0;
+        for (std::size_t index = 1; index < impl_->frameStore.size(); ++index) {
+            if (impl_->frameStore[index].lastUse < oldest) {
+                oldest = impl_->frameStore[index].lastUse;
+                chosen = index;
+            }
+        }
+    }
+    Impl::FrameStoreSlot &slot = impl_->frameStore[chosen];
+    // 认领即摘牌：渲染中途抛错时该槽必须以空闲收场，绝不能带着旧登记
+    // （像素可能已被部分绘制污染）留在仓里被后续 present 取走。
+    slot.generation = -1;
+    slot.tMs = -1;
+    slot.lastUse = use;
+    return static_cast<int>(chosen);
+}
+
+void Direct2DGpuBackend::registerFrameStoreSlot(
+    int index,
+    int generation,
+    std::int64_t tMs
+) {
+    Impl::FrameStoreSlot &slot = impl_->frameStore[
+        static_cast<std::size_t>(index)
+    ];
+    slot.generation = generation;
+    slot.tMs = tMs;
+    slot.lastUse = ++impl_->frameStoreUseSerial;
+}
+
+void Direct2DGpuBackend::clearFrameStoreRegistrations() {
+    for (Impl::FrameStoreSlot &slot : impl_->frameStore) {
+        slot.generation = -1;
+        slot.tMs = -1;
+    }
+}
+
+void Direct2DGpuBackend::releaseFrameStoreTextures() {
+    impl_->frameStore.clear();
+}
+
+void Direct2DGpuBackend::purgeForeignFrameGenerations(int generation) {
+    for (Impl::FrameStoreSlot &slot : impl_->frameStore) {
+        if (slot.tMs >= 0 && slot.generation != generation) {
+            // seek / 样式改动翻代际后，旧代整帧永不再播：连纹理一起释放，
+            // 不让至多一仓的旧全幅纹理在弱显存机器上压秤。
+            slot.texture.Reset();
+            slot.bitmap.Reset();
+            slot.generation = -1;
+            slot.tMs = -1;
+        }
+    }
 }
 
 }  // namespace krok::subtitle::native

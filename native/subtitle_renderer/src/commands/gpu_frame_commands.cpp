@@ -417,9 +417,10 @@ QJsonObject handlePresentGpuFrame(
     }
     try {
         const int tMs = intValue(request, QStringLiteral("t_ms"), 0);
-        const auto result = backend->presentFrame(tMs, target);
+        const int generation = intValue(request, QStringLiteral("generation"), 0);
+        const auto result = backend->presentFrame(tMs, target, generation);
         QJsonObject out = response(true, QStringLiteral("gpu_frame_presented"));
-        out.insert(QStringLiteral("generation"), intValue(request, QStringLiteral("generation"), 0));
+        out.insert(QStringLiteral("generation"), generation);
         out.insert(QStringLiteral("frame_index"), intValue(request, QStringLiteral("frame_index"), 0));
         out.insert(QStringLiteral("t_ms"), tMs);
         out.insert(QStringLiteral("render_ms"), result.renderMs);
@@ -458,9 +459,10 @@ QJsonObject handleRenderGpuFrameDirect(
     }
     try {
         const int tMs = intValue(request, QStringLiteral("t_ms"), 0);
-        const auto result = backend->renderFrameOnly(tMs);
+        const int generation = intValue(request, QStringLiteral("generation"), 0);
+        const auto result = backend->renderFrameOnly(tMs, generation);
         QJsonObject out = response(true, QStringLiteral("gpu_frame_rendered_direct"));
-        out.insert(QStringLiteral("generation"), intValue(request, QStringLiteral("generation"), 0));
+        out.insert(QStringLiteral("generation"), generation);
         out.insert(QStringLiteral("t_ms"), tMs);
         out.insert(QStringLiteral("render_ms"), result.renderMs);
         return out;
@@ -521,9 +523,19 @@ QJsonObject handlePresentRenderedGpuFrame(
     }
     try {
         const int tMs = intValue(request, QStringLiteral("t_ms"), 0);
-        const auto result = backend->presentRendered(target);
+        const int generation = intValue(request, QStringLiteral("generation"), 0);
+        const auto result = backend->presentRendered(target, generation, tMs);
+        if (result.dropped) {
+            // 帧仓未命中：丢帧而非上错帧（事件名与渲染路径的丢弃语义对齐，
+            // Python 侧 gpu_frame_dropped 分支可统一吸收）。
+            QJsonObject out = response(true, QStringLiteral("gpu_frame_dropped"));
+            out.insert(QStringLiteral("generation"), generation);
+            out.insert(QStringLiteral("t_ms"), tMs);
+            out.insert(QStringLiteral("dropped"), true);
+            return out;
+        }
         QJsonObject out = response(true, QStringLiteral("gpu_frame_presented"));
-        out.insert(QStringLiteral("generation"), intValue(request, QStringLiteral("generation"), 0));
+        out.insert(QStringLiteral("generation"), generation);
         out.insert(QStringLiteral("t_ms"), tMs);
         out.insert(QStringLiteral("render_ms"), 0.0);
         out.insert(QStringLiteral("present_ms"), result.presentMs);

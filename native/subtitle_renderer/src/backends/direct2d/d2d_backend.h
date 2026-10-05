@@ -24,12 +24,17 @@ public:
     ProbeResult renderFrame(int tMs, bool compactBands = false) override;
     NativePreviewResult presentFrame(
         int tMs,
-        const NativePreviewTarget &target
+        const NativePreviewTarget &target,
+        int generation
     ) override;
     void closeNativePreview() override;
     void pumpNativePreviewMessages() override;
-    NativeRenderOnlyResult renderFrameOnly(int tMs) override;
-    NativePreviewResult presentRendered(const NativePreviewTarget &target) override;
+    NativeRenderOnlyResult renderFrameOnly(int tMs, int generation) override;
+    NativePreviewResult presentRendered(
+        const NativePreviewTarget &target,
+        int generation,
+        int tMs
+    ) override;
 
     std::shared_ptr<D2DDeviceResources> sharedDeviceResources() const noexcept;
     void cancelRealizationPrewarm();
@@ -37,7 +42,25 @@ public:
     void adoptSharedGlyphResources(const Direct2DGpuBackend &source);
 
 private:
-    ProbeResult renderFrameInternal(int tMs, bool compactBands, bool readback);
+    // frameStoreIndex >= 0 时渲染进帧仓槽（G6 直画），否则进共享 scratch
+    // 目标（G5 回读路径）。见 Impl::frameStore 的注释。
+    ProbeResult renderFrameInternal(
+        int tMs,
+        bool compactBands,
+        bool readback,
+        int frameStoreIndex = -1
+    );
+    // ---- G6 直画帧仓（Impl::frameStore）的策略体，全在主协议线程执行 ----
+    // 取槽：同 (generation, tMs) 复用（暂停态重复渲同帧）、空闲优先、
+    // 池满丢最久未用的（时间策略，不做 frame_index 取模撞槽）。
+    int acquireFrameStoreSlot(int generation, std::int64_t tMs);
+    // 渲染成功后登记身份；acquire 时已把旧登记清掉（渲染中途抛错则槽空闲）。
+    void registerFrameStoreSlot(int index, int generation, std::int64_t tMs);
+    // configure 改场景/改色：登记全部作废（纹理按尺寸决定是否保留）。
+    void clearFrameStoreRegistrations();
+    void releaseFrameStoreTextures();
+    // 渲染/present 遇到更新代际：旧代整仓释放（seek/样式改动后不压显存）。
+    void purgeForeignFrameGenerations(int generation);
 
     struct Impl;
     D2DDevice device_;

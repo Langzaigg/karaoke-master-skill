@@ -52,6 +52,11 @@ struct NativePreviewResult {
     double renderMs = 0.0;
     double presentMs = 0.0;
     std::uintptr_t childWindow = 0;
+    // 帧仓未命中（present 声称的 (generation, tMs) 不在仓里）：本次不上屏，
+    // 调用方按丢帧处理。仓命中前绝不把「别的时刻的像素」端出去——G6 单
+    // 纹理时代 present 无视 t_ms 直接拷最新渲染结果，是慢机预览回退的
+    // 根因（2026-10）。
+    bool dropped = false;
 };
 
 struct ProbeOptions {
