@@ -68,6 +68,7 @@ FX_PARTICLE_OPTIONS = (
 FX_SING_OPTIONS = (
     ("无", "none"),
     ("星光闪烁", "twinkle"),
+    ("星光闪烁（旧版）", "twinkle_classic"),
     ("音符飘出", "note"),
     ("涟漪光环", "ripple"),
 )

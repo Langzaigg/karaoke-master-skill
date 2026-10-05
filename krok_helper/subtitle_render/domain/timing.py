@@ -52,13 +52,19 @@ CHAR_TRANSITION_ANIMS: frozenset[str] = frozenset(
 # 入场/退场装饰粒子（星光闪烁 / 涟漪光环）与唱字粒子（星光闪烁 / 音符飘出）。
 EntryFx = Literal["none", "sparkle", "ripple"]
 ExitFx = Literal["none", "sparkle", "ripple"]
-SingFx = Literal["none", "twinkle", "note", "ripple"]
+# ``twinkle_classic`` = 2026-10 运动学改造前的旧版唱字星光（原地 sin 包络
+# 闪烁、对称铺满字框），与新版扫过+漂移运动学并存供用户选择。
+SingFx = Literal["none", "twinkle", "twinkle_classic", "note", "ripple"]
 # 逐行唱字装饰粒子覆盖比全局多一档「跟随全局」，语义与 KaraokeAnimation 的 inherit 对齐。
-LineSingFx = Literal["inherit", "none", "twinkle", "note", "ripple"]
+LineSingFx = Literal[
+    "inherit", "none", "twinkle", "twinkle_classic", "note", "ripple"
+]
 # 入退场 fx 字段保留作工程兼容（UI 已并入入退场动画档，规划器不再消费）。
 ENTRY_FX_KINDS: frozenset[str] = frozenset({"none", "sparkle", "ripple"})
 EXIT_FX_KINDS: frozenset[str] = frozenset({"none", "sparkle", "ripple"})
-SING_FX_KINDS: frozenset[str] = frozenset({"none", "twinkle", "note", "ripple"})
+SING_FX_KINDS: frozenset[str] = frozenset(
+    {"none", "twinkle", "twinkle_classic", "note", "ripple"}
+)
 KaraokeAnimation = Literal[
     "inherit", "none", "no_wipe", "utopia", "scanline", "utopia_scanline",
     "zoom_pulse", "zoom_pulse_scanline"

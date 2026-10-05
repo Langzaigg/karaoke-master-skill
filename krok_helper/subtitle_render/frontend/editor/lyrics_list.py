@@ -195,6 +195,7 @@ _SING_FX_EFFECTS = (
     ("inherit", "跟随全局"),
     ("none", "无"),
     ("twinkle", "星光闪烁"),
+    ("twinkle_classic", "星光闪烁（旧版）"),
     ("note", "音符飘出"),
     ("ripple", "涟漪光环"),
 )

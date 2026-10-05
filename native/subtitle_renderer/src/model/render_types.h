@@ -243,7 +243,7 @@ struct DisplayWindow {
 /// plan_line_bursts 规划后随行 IR 下发；锚点坐标由各后端按自身布局解析，
 /// 轨迹在渲染时按 seed 确定性求值（与 Python particles.py 镜像）。
 struct ParticleBurst {
-    std::string kind;  // sparkle / ripple / twinkle / note
+    std::string kind;  // sparkle / ripple / twinkle / twinkle_classic / note / assemble / dissolve
     std::string anchor;  // "line" | "char"
     int charIndex = -1;
     int startMs = 0;

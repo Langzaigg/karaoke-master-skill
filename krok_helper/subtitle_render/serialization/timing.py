@@ -175,7 +175,9 @@ def line_animation_override_from_dict(value: object) -> Optional[LineAnimationOv
         # 旧项目没有这一项，按继承处理——渲染结果与加这个字段之前一致。
         karaoke = "inherit"
     sing_fx = value.get("sing_fx")
-    if sing_fx not in {"inherit", "none", "twinkle", "note", "ripple"}:
+    if sing_fx not in {
+        "inherit", "none", "twinkle", "twinkle_classic", "note", "ripple",
+    }:
         sing_fx = "inherit"
     return LineAnimationOverride(
         entry_anim=entry,

@@ -30,6 +30,10 @@ from krok_helper.subtitle_render.engine.render.effects.particles import (
     sprite_for_kind,
 )
 from krok_helper.subtitle_render.native.protocol import gpu_unsupported_features
+from krok_helper.subtitle_render.serialization.timing import (
+    line_animation_override_from_dict,
+    line_animation_override_to_dict,
+)
 
 
 def _entry_transition(effect: str, start_ms: int = 0) -> LineCharTransition:
@@ -252,6 +256,119 @@ def test_plan_line_bursts_kinds_and_windows():
     assert again[0]["seed"] == sparkle["seed"]
 
 
+def test_plan_line_bursts_twinkle_classic_keeps_legacy_shape():
+    """旧版唱字星光档：颗数/画层/无扫过保持 2026-10 运动学改造前口径。"""
+    style = Style(
+        sing_fx="twinkle_classic",
+        fx_particle_size_em=0.5,
+        fx_particle_count=10,
+        font_size_px=100,
+        karaoke_anim="none",
+    )
+    bursts = plan_line_bursts(
+        style, 2, 1000, 4000, 3900, [(1200, 1600), (1600, 1600), (1600, 3000)]
+    )
+    # 零时长字符不发射，与新版档同口径。
+    assert [b["kind"] for b in bursts] == ["twinkle_classic", "twinkle_classic"]
+    classic = bursts[0]
+    # 旧版密度口径 max(3, count//4)（新版 max(5, count//2)）。
+    assert classic["count"] == max(3, 10 // 4)
+    assert classic["anchor"] == "char"
+    assert classic["char_index"] == 0
+    assert classic["start_ms"] == 1200
+    assert classic["end_ms"] == 1200 + 700
+    assert classic["front"] is True
+    assert classic["sweep"] == 0
+    assert classic["size_px"] == pytest.approx(50.0)
+    assert sprite_for_kind("twinkle_classic") == "star4"
+    # 新版档不受影响：保持扫过运动学与新密度口径。
+    modern = plan_line_bursts(
+        Style(
+            sing_fx="twinkle",
+            fx_particle_size_em=0.5,
+            fx_particle_count=10,
+            font_size_px=100,
+            karaoke_anim="none",
+        ),
+        2, 1000, 4000, 3900, [(1200, 1600), (1600, 1600), (1600, 3000)],
+    )
+    assert modern[0]["kind"] == "twinkle"
+    assert modern[0]["sweep"] == 1
+    assert modern[0]["count"] == 5
+
+
+def test_twinkle_classic_in_place_sin_envelope():
+    """旧版求值器：原地闪烁——位置/旋转恒定，sin 包络放大-熄灭。
+
+    每颗寿命 300–450ms、出生延迟 u3×0.8×(700−寿命)；用哈希直接算出
+    12 颗的公共存活窗，在窗内取两个时刻逐颗对位（全存活 → 顺序对位安全）。
+    """
+    burst = {
+        "kind": "twinkle_classic", "anchor": "char", "char_index": 0,
+        "start_ms": 0, "end_ms": 700, "count": 12, "seed": 1234,
+        "size_px": 40.0, "travel_px": 72.0, "front": True, "sweep": 0,
+    }
+    delays, ends = [], []
+    for i in range(12):
+        u3 = fx_unit_hash(1234 + i, 3)
+        u4 = fx_unit_hash(1234 + i, 4)
+        life_i = 300.0 + 150.0 * u4
+        spread = max(700.0 - life_i, 0.0)
+        delays.append(u3 * spread * 0.8)
+        ends.append(u3 * spread * 0.8 + life_i)
+    t_early = math.ceil(max(delays)) + 1
+    t_later = math.floor(min(ends)) - 1
+    assert t_early < t_later  # 公共存活窗非空
+    early = burst_particles_at(burst, t_early, 500.0, 300.0, 120.0, 100.0)
+    later = burst_particles_at(burst, t_later, 500.0, 300.0, 120.0, 100.0)
+    assert len(early) == len(later) == 12
+    for state_a, state_b in zip(early, later):
+        # 原地：位置与固定旋转不随 t 变化（新版运动学有漂移项）。
+        assert state_b.x == pytest.approx(state_a.x)
+        assert state_b.y == pytest.approx(state_a.y)
+        assert state_b.rotation_deg == pytest.approx(state_a.rotation_deg)
+        assert -30.0 <= state_a.rotation_deg <= 90.0  # u3*120-30
+        assert 0.0 < state_a.alpha <= 1.0
+        assert state_a.size_px > 0.0
+    # 对称铺满字框：y ∈ ±0.425×box_h（新版偏置带 [-0.62,+0.30] 外加漂移）。
+    for state in early:
+        assert -42.5 - 1e-6 <= state.y - 300.0 <= 42.5 + 1e-6
+    # 窗口外/寿命终了即消失。
+    assert burst_particles_at(burst, -1, 500.0, 300.0, 120.0, 100.0) == []
+    assert burst_particles_at(burst, 701, 500.0, 300.0, 120.0, 100.0) == []
+
+
+def test_twinkle_classic_wireup_serialization_gpu_and_colors():
+    """旧版档接线：.yurika 行级覆盖 round-trip、GPU 白名单、多颜色粒子。"""
+    # 行级覆盖序列化 round-trip。
+    override = LineAnimationOverride(sing_fx="twinkle_classic")
+    data = line_animation_override_to_dict(override)
+    assert data["sing_fx"] == "twinkle_classic"
+    restored = line_animation_override_from_dict(data)
+    assert restored is not None and restored.sing_fx == "twinkle_classic"
+    # GPU sidecar 原生求值（burst 随 IR 下发），不触发整帧 Painter 回退。
+    track = type("Track", (), {"lines": []})()
+    style = Style(sing_fx="twinkle_classic", karaoke_anim="none")
+    assert gpu_unsupported_features(track, style) == ()
+    # 多颜色粒子设计接线：颜色模式与新版档同路——「跟随字体·走字后」
+    # 产出实色 + paint 完整装饰规格（渐变/描边随粒子下发）。
+    wired = plan_line_bursts(
+        Style(
+            sing_fx="twinkle_classic",
+            fx_particle_size_em=0.5,
+            fx_particle_count=10,
+            fx_particle_color_mode="follow_after",
+            font_size_px=100,
+            karaoke_anim="none",
+        ),
+        0, 0, 1000, 900, [(0, 400)],
+    )
+    assert wired and wired[0]["kind"] == "twinkle_classic"
+    assert wired[0]["color"].startswith("#")
+    assert "paint" in wired[0]
+    assert {"fill", "stroke", "stroke2"} <= set(wired[0]["paint"])
+
+
 def test_plan_line_bursts_anim_kinds_and_sing_ripple():
     """音符/拼接入场动画 + 唱字涟漪档。"""
     style = Style(
@@ -398,6 +515,35 @@ def test_painter_sing_fx_char_anchor_smoke(qapp):
     img = QImage(800, 450, QImage.Format.Format_ARGB32_Premultiplied)
     img.fill(0xFF101010)
     paint_frame(img, track, 1300, style)  # 「あ」唱到一半，wipe 锚点命中
+
+
+def test_painter_sing_fx_classic_smoke(qapp):
+    """CPU painter 旧版唱字星光冒烟：char 锚点 + 原地闪烁不抛异常。"""
+    from PyQt6.QtGui import QImage
+
+    from krok_helper.subtitle_render.domain.timing import TimingChar, TimingTrack
+    from krok_helper.subtitle_render.engine.painter import paint_frame
+
+    track = TimingTrack(
+        lines=[
+            TimingLine(
+                chars=[
+                    TimingChar(text="あ", start_ms=1000),
+                    TimingChar(text="い", start_ms=1600),
+                ],
+                end_ms=2200,
+            )
+        ]
+    )
+    style = Style(
+        sing_fx="twinkle_classic",
+        karaoke_anim="utopia",
+        fx_particle_size_em=0.6,
+        fx_particle_count=8,
+    )
+    img = QImage(800, 450, QImage.Format.Format_ARGB32_Premultiplied)
+    img.fill(0xFF101010)
+    paint_frame(img, track, 1300, style)
 
 
 def test_style_controller_keeps_new_geo_kinds():

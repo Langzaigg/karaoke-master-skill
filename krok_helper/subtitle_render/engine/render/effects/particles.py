@@ -370,6 +370,7 @@ _SPRITE_FOR_KIND = {
     "sparkle": "star4",
     "ripple": "ring",
     "twinkle": "star4",
+    "twinkle_classic": "star4",
     "note": "note",
     "assemble": "pixel",
     "dissolve": "pixel",
@@ -755,10 +756,17 @@ def plan_line_bursts(
                 "sweep": 0,
                 **_burst_paint(char_index, ring_px, anim=False, ring=True),
             })
-    elif style.sing_fx in ("twinkle", "note"):
-        # 唱字星光并入出入场星光运动学后，密度对齐出入场观感（默认 7/字）。
-        per_char = max(5, count // 2) if style.sing_fx == "twinkle" else 3
-        total = SING_TWINKLE_TOTAL_MS if style.sing_fx == "twinkle" else SING_NOTE_TOTAL_MS
+    elif style.sing_fx in ("twinkle", "twinkle_classic", "note"):
+        # 唱字星光并入出入场星光运动学后，密度对齐出入场观感（默认 7/字）；
+        # 「旧版」档（twinkle_classic）保留 2026-10 运动学改造前的原地闪烁
+        # 观感，颗数沿用旧口径（默认 3/字）。
+        if style.sing_fx == "twinkle":
+            per_char = max(5, count // 2)
+        elif style.sing_fx == "twinkle_classic":
+            per_char = max(3, count // 4)
+        else:
+            per_char = 3
+        total = SING_NOTE_TOTAL_MS if style.sing_fx == "note" else SING_TWINKLE_TOTAL_MS
         for char_index, (start_ms, end_ms) in enumerate(char_windows):
             duration = int(end_ms) - int(start_ms)
             if duration <= 0:
@@ -777,7 +785,8 @@ def plan_line_bursts(
                 "count": per_char,
                 "seed": seed,
                 # 星光族画主文字前（背后看不清——2026-10 用户复调）；
-                # 唱字星光自字左向右小扫过（出入场同款波向运动学）。
+                # 唱字星光自字左向右小扫过（出入场同款波向运动学）；
+                # 旧版档原地闪烁（sweep=0，无扫过）。
                 "size_px": size, "travel_px": size * 1.8, "front": True,
                 "sweep": 1 if style.sing_fx == "twinkle" else 0,
                 **_burst_paint(char_index, size, anim=False),
@@ -890,6 +899,30 @@ def burst_particles_at(
                 u3 * 90.0 + 60.0 * p,
                 scale,
                 1.0 - p,
+            ))
+        elif kind == "twinkle_classic":
+            # 旧版唱字星光（2026-10 运动学改造前的形态，逐字复刻自被
+            # 2775dc99 删除的 twinkle 分支）：位置对称铺满整个字框、随机
+            # 固定旋转、随机寿命（300–450ms）与峰值大小，sin 包络「出生
+            # →放大→熄灭」的原地闪烁。镜像 C++ d2d_fx.cpp 同名分支。
+            u1 = fx_unit_hash(seed + i, 1)
+            u2 = fx_unit_hash(seed + i, 2)
+            u3 = fx_unit_hash(seed + i, 3)
+            u4 = fx_unit_hash(seed + i, 4)
+            life_i = 300.0 + 150.0 * u4
+            spread = max(life - life_i, 0.0)
+            delay = u3 * spread * 0.8
+            p = min(max((tau - delay) / life_i, 0.0), 1.0)
+            if p <= 0.0 or p >= 1.0:
+                continue
+            envelope = math.sin(math.pi * p)
+            peak = size * (0.65 + 0.70 * u4)
+            out.append(ParticleDraw(
+                origin_x + (u1 - 0.5) * box_w * 0.95,
+                origin_y + (u2 - 0.5) * box_h * 0.85,
+                u3 * 120.0 - 30.0,
+                peak * (0.30 + 0.70 * envelope),
+                envelope,
             ))
         elif kind == "assemble":
             # 粒子拼接：每颗粒子自随机方向的远端飞向字形内随机落点，

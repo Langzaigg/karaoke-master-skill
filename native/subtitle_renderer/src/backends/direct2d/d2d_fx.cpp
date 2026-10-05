@@ -333,6 +333,34 @@ std::vector<FxParticle> burstParticlesAt(
                 scale,
                 1.0f - p,
             });
+        } else if (burst.kind == "twinkle_classic") {
+            // 旧版唱字星光（2026-10 运动学改造前的形态，逐字复刻自被
+            // 2775dc99 删除的 twinkle 分支；镜像 particles.py 同名分支）：
+            // 位置对称铺满整个字框、随机固定旋转、随机寿命（300–450ms）
+            // 与峰值大小，sin 包络「出生→放大→熄灭」的原地闪烁。
+            const float u1 = fxUnitHash(index, 1u);
+            const float u2 = fxUnitHash(index, 2u);
+            const float u3 = fxUnitHash(index, 3u);
+            const float u4 = fxUnitHash(index, 4u);
+            const float lifeI = 300.0f + 150.0f * u4;
+            const float spread = std::max(
+                static_cast<float>(life) - lifeI, 0.0f
+            );
+            const float delay = u3 * spread * 0.8f;
+            const float p = std::clamp((tau - delay) / lifeI, 0.0f, 1.0f);
+            if (p <= 0.0f || p >= 1.0f) {
+                continue;
+            }
+            constexpr float pi = 3.14159265358979323846f;
+            const float envelope = std::sin(pi * p);
+            const float peak = size * (0.65f + 0.70f * u4);
+            out.push_back(FxParticle{
+                originX + (u1 - 0.5f) * boxW * 0.95f,
+                originY + (u2 - 0.5f) * boxH * 0.85f,
+                u3 * 120.0f - 30.0f,
+                peak * (0.30f + 0.70f * envelope),
+                envelope,
+            });
         } else if (burst.kind == "assemble" || burst.kind == "dissolve") {
             // 粒子拼接/消散（镜像 particles.burst_particles_at）：
             // 拼接=自随机方向远端飞向字形内随机落点后缩小熄灭；

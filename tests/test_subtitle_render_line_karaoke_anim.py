@@ -292,7 +292,9 @@ class TestSingFxDialog:
             dialog._sing_combo.itemData(i)
             for i in range(dialog._sing_combo.count())
         }
-        assert values == {"inherit", "none", "twinkle", "note", "ripple"}
+        assert values == {
+            "inherit", "none", "twinkle", "twinkle_classic", "note", "ripple",
+        }
 
     def test_it_round_trips_the_choice(self) -> None:
         override = LineAnimationOverride(
