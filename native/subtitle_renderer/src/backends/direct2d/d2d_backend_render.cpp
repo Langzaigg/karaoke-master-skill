@@ -6648,9 +6648,12 @@ ProbeResult Direct2DGpuBackend::renderFrameInternal(
                     anim._11 * anim._22 - anim._12 * anim._21
                 ) > 1.02f;
             }
-            // 8px 使用侧门随任务生成侧一并废除（2026-10）：烘好的
-            // realization 恒优于直绘——存在即用，仅动画字走动态几何。
-            const bool realizationEligible = !animated;
+            // 8px 使用侧门恢复（2026-10-05 回归复盘）：usage 必须与任务
+            // 生成同门（样式的纯函数）——「存在即用」会把预热进度泄漏进
+            // 帧字节，差分重配/池化路径间产生 ±4 alpha 的边缘 AA 分歧。
+            const bool realizationEligible = !animated
+                && std::max(charStyle.strokeWidth, 0.0f)
+                    >= Impl::realizationStrokeThreshold;
             if (layer == 0) {
                 if (charStyle.stroke2Width <= 0.0f) {
                     return;
@@ -7091,7 +7094,10 @@ ProbeResult Direct2DGpuBackend::renderFrameInternal(
                 const D2D1_MATRIX_3X2_F identityTransform =
                     D2D1::Matrix3x2F::Identity();
                 const bool rubyTransformed = rubyUnitTransformed(ruby, index);
-                const bool realizationEligible = !rubyTransformed;
+                // 与主字形同门（样式的纯函数，2026-10-05 回归复盘）。
+                const bool realizationEligible = !rubyTransformed
+                    && std::max(rubyStyle.rubyStrokeWidth, 0.0f)
+                        >= Impl::realizationStrokeThreshold;
                 if (rubyStyle.rubyStroke2Width > 0.0f) {
                     if (rubyTransformed && animatedStroke2 != nullptr) {
                         fillCountedStroke(

@@ -2821,11 +2821,15 @@ void Direct2DGpuBackend::configure(const RenderScene &scene) {
             float stroke2Width
         ) {
             const float mainWidth = std::max(strokeWidth, 0.0f);
-            // 8px 硬门限已废除（2026-10 用户拍板）：它拿输入形状当帧成
-            // 本的代理——小窗宽描边被白白预热、大窗/导出细描边该预热被
-            // 挡。描边任务只剩 0.5px 发丝卫生阀（防任务洪泛）；何时/何
-            // 序创建由预热线程按实测帧耗时自适应决定（见预热线程）。
-            // 填充 realization 与描边宽度无关，不再被连坐。
+            // 8px 门恢复（2026-10-05 回归复盘）：它不只是成本代理，更是
+            // 字节确定性的边界——「是否使用 realization」必须是样式的纯
+            // 函数，否则同一场景在差分重配 / 池化 worker / 预热进度不同
+            // 的路径间会出现 ±4 alpha 的边缘 AA 分歧（worker_pool/
+            // style_patch 金标准失败）。自适应预热调度只作用于门内的
+            // eligible 集合（何时/何序烘焙），门下细描边恒直绘、零任务。
+            if (mainWidth < Impl::realizationStrokeThreshold) {
+                return;
+            }
             const float strokeTaskWidth = mainWidth >= 0.5f ? mainWidth : 0.0f;
             // 矢量字形（有预展开轮廓）的描边任务：几何换成轮廓、按填充
             // 语义烘焙（毫秒级）；文本字形保持原生描边 realization。
