@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 from pathlib import Path
 import subprocess
-from typing import Optional
+from typing import Callable, Optional
 
 from PyQt6.QtCore import QObject, QThread, pyqtSignal as Signal
 
@@ -15,6 +15,32 @@ from krok_helper.models import MediaInfo
 from krok_helper.subtitle_render.engine.export.render_job import RenderJob
 from krok_helper.subtitle_render.engine.renderer import render_subtitle_video
 from krok_helper.subtitle_render.project.store import save_recovery_project
+
+
+class _N3ImportWorker(QObject):
+    """Load an ``.n3proj`` (含字幕源 ``.sug`` 重建) outside the UI thread.
+
+    ``loader`` 由主窗口注入（穿好进度回调），返回 :class:`N3ImportResult`；
+    进度经 :attr:`progressChanged` 跨线程回到 UI，结果/错误经
+    :attr:`succeeded` / :attr:`failed` 交还。读取/重建全程不碰任何 Qt 控件。
+    """
+
+    progressChanged = Signal(int, str)
+    succeeded = Signal(object, object)  # (worker, N3ImportResult)
+    failed = Signal(object, str)  # (worker, message)
+
+    def __init__(self, path: Path, loader: Callable[[Path], object]) -> None:
+        super().__init__()
+        self.path = Path(path)
+        self._loader = loader
+
+    def run(self) -> None:
+        try:
+            result = self._loader(self.path)
+        except (OSError, ValueError) as exc:
+            self.failed.emit(self, str(exc))
+            return
+        self.succeeded.emit(self, result)
 
 
 class _RecoverySaveWorker(QObject):

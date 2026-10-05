@@ -10,6 +10,7 @@ from krok_helper.subtitle_render.domain.models import Style
 from krok_helper.subtitle_render.n3.project_import import (
     N3ImportResult,
     N3_PROJECT_FILTER,
+    ProgressCallback,
     load_n3proj,
 )
 
@@ -39,8 +40,14 @@ class N3ProjectImportController:
         return Path(path_text) if path_text else None
 
     @staticmethod
-    def load(path: Path) -> N3ImportResult:
-        return load_n3proj(Path(path))
+    def load(
+        path: Path, progress_cb: Optional[ProgressCallback] = None
+    ) -> N3ImportResult:
+        # progress_cb 为空时按旧签名调用——既有测试与调用方的 loader 替身
+        # 只收一个位置参数。
+        if progress_cb is None:
+            return load_n3proj(Path(path))
+        return load_n3proj(Path(path), progress_cb=progress_cb)
 
     @staticmethod
     def rebase_style_for_video(style: Style, video_height: int) -> Style:

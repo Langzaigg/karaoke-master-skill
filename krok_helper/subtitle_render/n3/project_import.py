@@ -48,7 +48,9 @@ import zipfile
 from copy import deepcopy
 from dataclasses import dataclass, fields as dataclass_fields, replace
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Callable, Optional
+
+from krok_helper.settings import load_app_settings
 
 from krok_helper.subtitle_render.n3.font_scheme import (
     convert_n3_font_scheme as _scheme_changes,
@@ -151,12 +153,69 @@ def is_n3proj_file(path: object) -> bool:
     return isinstance(path, (str, Path)) and str(path).lower().endswith(N3_PROJECT_FILE_SUFFIX)
 
 
-def load_n3proj(path: str | Path) -> N3ImportResult:
-    """读取并转换 ``.n3proj``。文件不可读/非法时抛 :class:`ValueError`。"""
+ProgressCallback = Callable[[int, str], None]
+"""导入进度回调：``(percent, message)``，由 UI 在后台线程里转发。"""
+
+
+def _sug_export_compensation_ms() -> int:
+    """打轴模块（SUG）「设置 → 导出 → 软件导出补偿」的当前值（毫秒）。
+
+    与 ``frontend.main_window._sug_software_compensation_ms`` 同源同逻辑
+    （``AppSettings.lyrics_timing["export"]["software_compensation_ms"]``），
+    供非 UI 模块复用；读取失败按无补偿处理。
+    """
+    try:
+        sug_settings = load_app_settings().lyrics_timing
+    except Exception:  # noqa: BLE001 — 设置读取失败按无补偿处理
+        return 0
+    export = (
+        sug_settings.get("export") if isinstance(sug_settings, dict) else None
+    )
+    value = (
+        export.get("software_compensation_ms")
+        if isinstance(export, dict)
+        else None
+    )
+    try:
+        return int(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return 0
+
+
+def _wrap_progress_callback(
+    progress_cb: Optional[ProgressCallback],
+) -> Optional[ProgressCallback]:
+    """进度回调不容错失败——UI 侧异常不允许影响导入本身。"""
+    if progress_cb is None:
+        return None
+
+    def report(percent: int, message: str) -> None:
+        try:
+            progress_cb(percent, message)
+        except Exception:  # noqa: BLE001
+            pass
+
+    return report
+
+
+def load_n3proj(
+    path: str | Path,
+    *,
+    progress_cb: Optional[ProgressCallback] = None,
+) -> N3ImportResult:
+    """读取并转换 ``.n3proj``。文件不可读/非法时抛 :class:`ValueError`。
+
+    ``progress_cb(percent, message)`` 在各阶段（读取 / 素材解析 / 字幕源
+    重建 / 行级对齐）回调，供后台导入任务向前台报告进度；回调异常被吞掉。
+    """
+    report = _wrap_progress_callback(progress_cb)
     path = Path(path)
+    if report is not None:
+        report(5, "正在读取工程文件…")
     data = _read_payload(path)
     warnings: list[str] = []
     base_dir = path.parent
+    compensation_ms = _sug_export_compensation_ms()
 
     # ---------------------------------------------------------------- 素材
     source = _dict(data.get("SourceInfo"))
@@ -213,7 +272,10 @@ def load_n3proj(path: str | Path) -> N3ImportResult:
     ]
     subtitle_path: Optional[Path] = None
     subtitle_track: Optional[TimingTrack] = None
+    subtitle_shift_ms = 0
     if lyrics_with_source:
+        if report is not None:
+            report(20, "正在检查主字幕源…")
         subtitle_path = _resolve_media(
             lyrics_with_source[0].get("SourceLyricsPath"),
             lyrics_with_source[0].get("SourceLyricsRelativePath"),
@@ -222,17 +284,22 @@ def load_n3proj(path: str | Path) -> N3ImportResult:
             "字幕源",
         )
         subtitle_track = _load_track(subtitle_path, warnings)
-        subtitle_path, subtitle_track = _ensure_usable_subtitle_source(
+        subtitle_path, subtitle_track, subtitle_shift_ms = _ensure_usable_subtitle_source(
             lyrics_with_source[0],
             subtitle_path,
             subtitle_track,
             base_dir,
             warnings,
             "字幕源",
+            compensation_ms=compensation_ms,
+            report=report,
+            rebuild_percent=40,
         )
     lyrics_dir = subtitle_path.parent if subtitle_path is not None else base_dir
 
     # ---------------------------------------------------------------- 画面
+    if report is not None:
+        report(55, "正在解析素材与样式…")
     fonts = [_dict(item) for item in _list(data.get("LyricsFonts"))]
     layouts = [_dict(item) for item in _list(data.get("LyricsLayouts"))]
     width = _int(source.get("BackgroundWidth"), 1920)
@@ -346,6 +413,8 @@ def load_n3proj(path: str | Path) -> N3ImportResult:
         if track is None:
             warnings.append("已跳过每行布局、分页与逐字配色导入")
         if track is not None:
+            if report is not None:
+                report(90, "正在对齐行级数据…")
             emoji_specs = _parse_emoji_tags(
                 _emoji_tag_lines(lyrics_with_source[0], track),
                 subtitle_path.parent if subtitle_path is not None else base_dir,
@@ -368,10 +437,13 @@ def load_n3proj(path: str | Path) -> N3ImportResult:
                 default_animation,
                 warnings,
                 emoji_specs,
+                # 重建源的 .sug 回读已含软件导出补偿，上屏/消失时刻同步平移
+                display_time_shift_ms=subtitle_shift_ms,
             )
 
         # 副字幕源（コーラス等）：与主字幕同时渲染，逐源导入路径 / 每行布局 / 逐字配色。
-        for info in lyrics_with_source[1:]:
+        total_extras = len(lyrics_with_source) - 1
+        for extra_index, info in enumerate(lyrics_with_source[1:], start=1):
             name = str(info.get("SettingsName") or "").strip() or "コーラス"
             extra_path = _resolve_media(
                 info.get("SourceLyricsPath"),
@@ -383,7 +455,11 @@ def load_n3proj(path: str | Path) -> N3ImportResult:
             if extra_path is None:
                 continue
             extra_track = _load_track(extra_path, warnings)
-            extra_path, extra_track = _ensure_usable_subtitle_source(
+            (
+                extra_path,
+                extra_track,
+                extra_shift_ms,
+            ) = _ensure_usable_subtitle_source(
                 info,
                 extra_path,
                 extra_track,
@@ -392,6 +468,9 @@ def load_n3proj(path: str | Path) -> N3ImportResult:
                 f"字幕源「{name}」",
                 # 同名防撞：副源重建文件名带上源名（主源保持纯 <原名>_从N3重建）
                 name_suffix=f"_{_safe_file_name(name)}",
+                compensation_ms=compensation_ms,
+                report=report,
+                rebuild_percent=60 + (25 * extra_index) // max(total_extras, 1),
             )
             extra_payload: dict[str, Any] = {"name": name, "path": str(extra_path)}
             if extra_track is not None:
@@ -418,6 +497,7 @@ def load_n3proj(path: str | Path) -> N3ImportResult:
                     default_animation,
                     warnings,
                     extra_emoji_specs,
+                    display_time_shift_ms=extra_shift_ms,
                 )
                 if extra_layouts is not None:
                     extra_payload["line_layout_indices"] = extra_layouts
@@ -488,6 +568,8 @@ def load_n3proj(path: str | Path) -> N3ImportResult:
         project_data["line_inline_guide_symbols"] = line_inline_guide_symbols
     if extra_sources:
         project_data["extra_subtitle_sources"] = extra_sources
+    if report is not None:
+        report(100, "导入完成")
     return N3ImportResult(project_data=project_data, warnings=warnings)
 
 
@@ -885,6 +967,24 @@ def _load_track(subtitle_path: Optional[Path], warnings: list[str]) -> Optional[
 # 重新生成同名文件（内容由 n3proj 决定，可重放），不触碰任何其他文件。
 _N3_REBUILT_SUFFIX = "_从N3重建"
 
+# 重建 .sug 的 nicokara_tags 内嵌标记键：值是源字幕文件名。撞名时先看既有
+# 文件有没有这个标记——有 = 本模块上次重建的产物，可安全覆写；没有 = 用户
+# 自己的文件，绝不覆盖（换名重建并提示）。
+_N3_REBUILD_MARKER = "n3_rebuild_source"
+
+
+def _is_n3_rebuilt_sug(path: Path) -> bool:
+    """该 ``.sug`` 是否为本模块此前从 N3 数据重建出的产物。"""
+    try:
+        with open(path, "r", encoding="utf-8-sig") as handle:
+            data = json.load(handle)
+    except Exception:  # noqa: BLE001 — 读不出来就当未知文件，走保护分支
+        return False
+    tags = data.get("nicokara_tags") if isinstance(data, dict) else None
+    return isinstance(tags, dict) and isinstance(
+        tags.get(_N3_REBUILD_MARKER), str
+    )
+
 
 def _n3_lyric_line_count(info: dict) -> int:
     """N3 ``LineInfos`` 里 Kind==1 且有可见字符的行数（对应轨道非空行数）。"""
@@ -1178,10 +1278,19 @@ def _rebuild_sug_source(
     label: str,
     *,
     name_suffix: str = "",
+    compensation_ms: int = 0,
+    report: Optional[ProgressCallback] = None,
+    rebuild_percent: int = 0,
 ) -> Optional[tuple[Path, TimingTrack]]:
     """按 N3 内嵌数据在 n3proj 同目录落盘新 ``.sug``，并返回其解析轨道。
 
     ``name_suffix`` 用于多字幕源同名防撞：副源传入 ``_<SettingsName>``。
+    目标文件名若已存在，先校验它是否也是本模块从 N3 重建出的产物（内嵌
+    ``n3_rebuild_source`` 标记）——是则安全覆写（内容可由 n3proj 重放），
+    不是（用户自己的同名文件）则绝不覆盖，顺延 ``_2``/``_3``… 换名并提示。
+    回读走 :func:`load_sug_timing_track` 并叠加 ``compensation_ms``（SUG
+    「软件导出补偿」预设）——与主窗口加载 ``.sug`` 的口径一致，解析后所有
+    时间戳即含该补偿。
     """
     project, tags, has_inline_ruby = _sug_project_from_n3(info)
     if project is None:
@@ -1193,11 +1302,31 @@ def _rebuild_sug_source(
     target = target_dir / (
         f"{source_name.stem}{name_suffix}{_N3_REBUILT_SUFFIX}.sug"
     )
+    target, renamed = _claim_rebuild_target(target)
+    if renamed:
+        warnings.append(
+            f"{label}重建文件名与既有文件冲突（该文件不是本模块 N3 重建产物，"
+            f"未覆盖），已改用：{target.name}"
+        )
+    # 内嵌重建标记：既标识产物归属（撞名校验），也记录源字幕名便于追溯。
+    tags = dict(tags or {})
+    tags[_N3_REBUILD_MARKER] = source_name.name
+
+    def save_stage(stage: str) -> None:
+        if report is not None:
+            report(rebuild_percent, f"正在重建{label}：{stage}")
+
+    if report is not None:
+        report(rebuild_percent, f"正在按 N3 数据重建{label}…")
     try:
-        SugProjectParser.save(project, str(target), nicokara_tags=tags)
+        SugProjectParser.save(
+            project, str(target), nicokara_tags=tags, progress_cb=save_stage
+        )
         # 回读落盘文件（而非内存对象），保证行级 payload 对齐的就是应用后续
-        # 加载的同一条轨道。
-        track = load_sug_timing_track(target)
+        # 加载的同一条轨道；补偿值与主窗口 .sug 加载口径一致。
+        track = load_sug_timing_track(
+            target, software_compensation_ms=compensation_ms
+        )
     except Exception as exc:  # noqa: BLE001 — 重建任何一步失败都退回原行为
         warnings.append(f"{label}无法按 N3 数据重建 .sug 字幕源（{exc}）")
         return None
@@ -1206,6 +1335,22 @@ def _rebuild_sug_source(
             f"{label}字符流内嵌注音（IsRuby）无法无损关联基底字，已跳过该部分注音"
         )
     return target, track
+
+
+def _claim_rebuild_target(target: Path) -> tuple[Path, bool]:
+    """为重建产物占用目标文件名；撞到非重建产物时顺延换名。
+
+    返回 ``(最终路径, 是否换名)``。同名但带重建标记的旧产物可直接覆写
+    （内容由 n3proj 决定，可重放）；连续顺延 99 次仍撞名则放弃（视为异常
+    环境交由上层失败处理）。
+    """
+    if not target.is_file() or _is_n3_rebuilt_sug(target):
+        return target, False
+    for attempt in range(2, 100):
+        candidate = target.with_name(f"{target.stem}_{attempt}{target.suffix}")
+        if not candidate.is_file() or _is_n3_rebuilt_sug(candidate):
+            return candidate, True
+    return target, True
 
 
 def _ensure_usable_subtitle_source(
@@ -1217,7 +1362,10 @@ def _ensure_usable_subtitle_source(
     label: str,
     *,
     name_suffix: str = "",
-) -> tuple[Optional[Path], Optional[TimingTrack]]:
+    compensation_ms: int = 0,
+    report: Optional[ProgressCallback] = None,
+    rebuild_percent: int = 0,
+) -> tuple[Optional[Path], Optional[TimingTrack], int]:
     """字幕文件缺失或行数与 N3 记录不一致时，以 N3 数据为准重建 ``.sug``。
 
     N3 的 ``LineInfos`` 本身就是完整歌词快照（逐字文本 + 逐字时间），文件
@@ -1226,19 +1374,30 @@ def _ensure_usable_subtitle_source(
     落在 n3proj 同目录，工程字幕源改指它——后续保存/重载都走 SUG 高保真
     路径，不再经历 LRC 有损往返。原字幕文件一律不改动。无法重建（N3 无
     行数据/写盘失败）时返回原状，行级导入退回按文本对齐的兜底路径。
+
+    返回 ``(path, track, applied_shift_ms)``：重建成功时 ``applied_shift_ms``
+    是随 .sug 回读叠加的软件导出补偿值（供行级 display 等绝对时刻同步
+    平移），未重建时为 0。
     """
     n3_count = _n3_lyric_line_count(info)
     if n3_count <= 0:
-        return path, track
+        return path, track, 0
     if track is not None and (
         sum(1 for line in track.lines if not line.is_blank) == n3_count
     ):
-        return path, track
+        return path, track, 0
     rebuilt = _rebuild_sug_source(
-        info, base_dir, warnings, label, name_suffix=name_suffix
+        info,
+        base_dir,
+        warnings,
+        label,
+        name_suffix=name_suffix,
+        compensation_ms=compensation_ms,
+        report=report,
+        rebuild_percent=rebuild_percent,
     )
     if rebuilt is None:
-        return path, track
+        return path, track, 0
     sug_path, sug_track = rebuilt
     if track is None:
         if path is not None and path.is_file():
@@ -1254,7 +1413,7 @@ def _ensure_usable_subtitle_source(
             f"{n3_count} 行），已按 N3 数据重建字幕源：{sug_path}"
             "（原歌词文件未改动）"
         )
-    return sug_path, sug_track
+    return sug_path, sug_track, compensation_ms
 
 
 def _stripped_n3_chars(line: dict) -> list[dict]:
@@ -1486,6 +1645,7 @@ def _per_line_payloads(
     default_animation: tuple[str, int, str, int],
     warnings: list[str],
     emoji_specs: list[_N3EmojiSpec] | None = None,
+    display_time_shift_ms: int = 0,
 ) -> tuple[
     Optional[list[int]],
     Optional[list[str]],
@@ -1589,9 +1749,19 @@ def _per_line_payloads(
         show_begin = n3_line.get("ShowBeginTime")
         show_end = n3_line.get("ShowEndTime")
         if isinstance(show_begin, (int, float)) or isinstance(show_end, (int, float)):
+            # 重建源的 .sug 回读叠加了软件导出补偿，上屏/消失时刻同步平移，
+            # 保持与轨道时间同一坐标。
             display_payload[line_index] = [
-                int(show_begin) if isinstance(show_begin, (int, float)) else None,
-                int(show_end) if isinstance(show_end, (int, float)) else None,
+                (
+                    int(show_begin) + display_time_shift_ms
+                    if isinstance(show_begin, (int, float))
+                    else None
+                ),
+                (
+                    int(show_end) + display_time_shift_ms
+                    if isinstance(show_end, (int, float))
+                    else None
+                ),
             ]
         signature = _line_animation_signature(n3_line)
         if signature is not None and signature != default_animation:

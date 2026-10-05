@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import shutil
 import zipfile
 from pathlib import Path
@@ -231,6 +232,18 @@ def _write_n3proj(tmp_path: Path, payload: dict) -> Path:
 @pytest.fixture()
 def imported(tmp_path) -> N3ImportResult:
     return load_n3proj(_write_n3proj(tmp_path, _project_payload(tmp_path)))
+
+
+@pytest.fixture(autouse=True)
+def _isolated_settings_dir(tmp_path_factory, monkeypatch):
+    """隔离应用设置目录。
+
+    导入会读 SUG「软件导出补偿」等预设；不隔离的话断言将依赖本机真实
+    settings.json，换机器随意失效。
+    """
+    settings_dir = tmp_path_factory.mktemp("n3-import-settings")
+    monkeypatch.setenv("KARAOKE_STUDIO_SETTINGS_DIR", str(settings_dir))
+    return settings_dir
 
 
 def test_is_n3proj_file():
@@ -1277,6 +1290,104 @@ def test_rebuild_applies_head_offset_tag(tmp_path):
     # 行首时间戳被烘焙：1000 → 900，5000 → 4900
     assert track.lines[0].chars[0].start_ms == 900
     assert track.lines[1].chars[0].start_ms == 4900
+
+
+def test_rebuild_applies_sug_export_compensation(tmp_path, _isolated_settings_dir):
+    """预设了 SUG 软件导出补偿时：.sug 回读与行级 display 时刻同步平移。"""
+    settings_file = _isolated_settings_dir / "settings.json"
+    settings_file.write_text(
+        json.dumps(
+            {"lyrics_timing": {"export": {"software_compensation_ms": 250}}}
+        ),
+        encoding="utf-8",
+    )
+    payload = _project_payload(tmp_path)
+    (tmp_path / "demo.lrc").unlink()
+    payload["SourceLyricsInfos"][0]["LineInfos"] = [
+        _line_info(
+            [_char("あ", 1000, 2000), _char("い", 2000, 3000)],
+            show_begin=500,
+            show_end=4000,
+        ),
+    ]
+    result = load_n3proj(_write_n3proj(tmp_path, payload))
+
+    data = result.project_data
+    sug = Path(data["subtitle_path"])
+    # 导入回读按补偿口径：与主窗口加载 .sug 的行为一致
+    track = load_sug_timing_track(sug, software_compensation_ms=250)
+    assert [char.start_ms for char in track.lines[0].chars] == [1250, 2250]
+    # 行级 display 覆盖（上屏/消失时刻）随轨道同坐标平移
+    assert data["line_display_overrides"][0] == [750, 4250]
+
+
+def test_rebuild_without_compensation_keeps_raw_times(tmp_path):
+    """未预设补偿时重建时间戳保持 N3 原值（默认 settings 为空）。"""
+    payload = _project_payload(tmp_path)
+    (tmp_path / "demo.lrc").unlink()
+    result = load_n3proj(_write_n3proj(tmp_path, payload))
+
+    track = load_sug_timing_track(Path(result.project_data["subtitle_path"]))
+    assert [char.start_ms for char in track.lines[0].chars] == [1000, 2000]
+
+
+def test_rebuild_never_overwrites_foreign_same_name_file(tmp_path):
+    """撞名保护：既有同名文件不是 N3 重建产物时换名重建，原文件不动。"""
+    payload = _project_payload(tmp_path)
+    (tmp_path / "demo.lrc").unlink()
+    # 预置用户自己的同名 .sug（无重建标记）
+    foreign = tmp_path / "demo_从N3重建.sug"
+    foreign.write_text('{"version": "0.3.0", "sentences": []}', encoding="utf-8")
+
+    result = load_n3proj(_write_n3proj(tmp_path, payload))
+
+    renamed = tmp_path / "demo_从N3重建_2.sug"
+    assert renamed.is_file()
+    assert foreign.read_text(encoding="utf-8") == '{"version": "0.3.0", "sentences": []}'
+    assert result.project_data["subtitle_path"] == str(renamed)
+    assert any("冲突" in warning and "demo_从N3重建_2.sug" in warning for warning in result.warnings)
+    # 新产物带重建标记
+    saved = json.loads(renamed.read_text(encoding="utf-8-sig"))
+    assert saved["nicokara_tags"]["n3_rebuild_source"] == "demo.lrc"
+
+
+def test_rebuild_regenerates_over_own_previous_output(tmp_path):
+    """撞名保护：同名旧产物（带标记）直接覆写，不换名、无告警。"""
+    payload = _project_payload(tmp_path)
+    (tmp_path / "demo.lrc").unlink()
+    first = load_n3proj(_write_n3proj(tmp_path, payload))
+    target = Path(first.project_data["subtitle_path"])
+    assert target.name == "demo_从N3重建.sug"
+
+    second = load_n3proj(_write_n3proj(tmp_path, payload))
+
+    assert Path(second.project_data["subtitle_path"]) == target
+    assert not (tmp_path / "demo_从N3重建_2.sug").exists()
+    assert not any("冲突" in warning for warning in second.warnings)
+
+
+def test_load_n3proj_reports_progress(tmp_path):
+    """progress_cb 在读取与重建阶段回调，回调异常不影响导入。"""
+    payload = _project_payload(tmp_path)
+    (tmp_path / "demo.lrc").unlink()
+
+    events: list[tuple[int, str]] = []
+
+    def progress(percent: int, message: str) -> None:
+        events.append((percent, message))
+        if len(events) == 1:
+            raise RuntimeError("前台回调炸了也不许影响导入")
+
+    result = load_n3proj(
+        _write_n3proj(tmp_path, payload), progress_cb=progress
+    )
+
+    assert Path(result.project_data["subtitle_path"]).is_file()
+    percents = [percent for percent, _message in events]
+    assert percents == sorted(percents)  # 单调推进
+    assert percents[-1] >= 90
+    assert any("重建" in message for _p, message in events)
+    assert any("读取工程" in message for _p, message in events)
 
 
 def test_extra_source_missing_file_rebuilds_sug(tmp_path):

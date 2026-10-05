@@ -159,6 +159,7 @@ from krok_helper.subtitle_render.sources.guide_symbols import (
 )
 from krok_helper.subtitle_render.frontend.workflow.background_tasks import (
     _MediaProbeWorker,
+    _N3ImportWorker,
 )
 from krok_helper.subtitle_render.frontend.workflow.export_runtime import (
     ExportRuntimeCallbacks,
@@ -1066,6 +1067,14 @@ class SubtitleRenderWindow(QWidget):
         self._auto_save_interval_minutes = DEFAULT_AUTO_SAVE_INTERVAL_MINUTES
         self._project_backup_count = DEFAULT_PROJECT_BACKUP_COUNT
         self._handoff_probe_thread: Optional[QThread] = None
+        self._n3_import_thread: Optional[QThread] = None
+        self._n3_import_worker: Optional[_N3ImportWorker] = None
+        self._n3_import_path: Optional[Path] = None
+        self._n3_import_tooltip: Optional[StateToolTip] = None
+        self._n3_import_tooltip_timer = QTimer(self)
+        self._n3_import_tooltip_timer.setSingleShot(True)
+        self._n3_import_tooltip_timer.setInterval(400)
+        self._n3_import_tooltip_timer.timeout.connect(self._show_n3_import_tooltip)
         self._handoff_probe_worker: Optional[_MediaProbeWorker] = None
         self._last_auto_save_error = ""
         self._render_thread: Optional[QThread] = None
@@ -2415,17 +2424,98 @@ class SubtitleRenderWindow(QWidget):
         *,
         confirm_discard: bool = True,
     ) -> bool:
-        """Import an N3 project selected from the menu or dropped onto a panel."""
+        """Import an N3 project selected from the menu or dropped onto a panel.
+
+        读取与字幕源 ``.sug`` 重建放到后台线程执行，前台经 StateToolTip 报
+        进度；完成后回 UI 线程套用工程。返回 True 表示导入已启动（不是已
+        完成）。
+        """
         path = Path(path)
         if confirm_discard and not self._confirm_discard_changes():
             return False
-        try:
-            result = self._n3_import_controller.load(path)
-        except (OSError, ValueError) as exc:
-            fluent_error(
-                self, "导入失败", f"无法读取 NicoKaraMaker3 项目文件：\n{path}\n\n{exc}"
+        if self._n3_import_worker is not None:
+            InfoBar.info(
+                title="正在导入 N3 项目",
+                content="请等待当前导入完成后再试。",
+                parent=self,
+                position=InfoBarPosition.BOTTOM_RIGHT,
+                duration=2500,
             )
             return False
+        worker = _N3ImportWorker(
+            path,
+            loader=lambda source: self._n3_import_controller.load(
+                source, progress_cb=self._on_n3_import_progress
+            ),
+        )
+        thread = QThread(self)
+        worker.moveToThread(thread)
+        thread.started.connect(worker.run)
+        worker.progressChanged.connect(self._on_n3_import_progress)
+        worker.succeeded.connect(self._on_n3_import_succeeded)
+        worker.failed.connect(self._on_n3_import_failed)
+        # 线程收尾：run 返回后退出事件循环，对象随线程销毁。
+        worker.succeeded.connect(thread.quit)
+        worker.failed.connect(thread.quit)
+        thread.finished.connect(worker.deleteLater)
+        thread.finished.connect(thread.deleteLater)
+        self._n3_import_worker = worker
+        self._n3_import_thread = thread
+        self._n3_import_path = path
+        self._n3_import_tooltip: Optional[StateToolTip] = None
+        # 短导入（<400ms）不打扰用户；仍在跑才弹 StateToolTip。
+        self._n3_import_tooltip_timer.start()
+        thread.start()
+        return True
+
+    def _on_n3_import_progress(self, percent: int, message: str) -> None:
+        if self._n3_import_worker is None:
+            return
+        if self._n3_import_tooltip is not None:
+            self._n3_import_tooltip.setContent(f"{message} {percent}%")
+
+    def _show_n3_import_tooltip(self) -> None:
+        if self._n3_import_worker is None or self._n3_import_tooltip is not None:
+            return
+        tooltip = StateToolTip("正在导入 N3 项目", "准备中…", self)
+        tooltip.move(tooltip.getSuitablePos())
+        tooltip.show()
+        self._n3_import_tooltip = tooltip
+
+    def _dismiss_n3_import_tooltip(self) -> None:
+        tooltip = self._n3_import_tooltip
+        self._n3_import_tooltip = None
+        if tooltip is not None:
+            tooltip.close()
+
+    def _on_n3_import_succeeded(self, worker: "_N3ImportWorker", result) -> None:
+        if self._n3_import_worker is not worker:
+            return  # 过期结果（新的导入已开始），丢弃
+        path = self._n3_import_path
+        self._n3_import_worker = None
+        self._n3_import_thread = None
+        self._n3_import_path = None
+        self._n3_import_tooltip_timer.stop()
+        self._dismiss_n3_import_tooltip()
+        self._finish_n3_import(result, path)
+
+    def _on_n3_import_failed(self, worker: "_N3ImportWorker", message: str) -> None:
+        if self._n3_import_worker is not worker:
+            return
+        path = self._n3_import_path
+        self._n3_import_worker = None
+        self._n3_import_thread = None
+        self._n3_import_path = None
+        self._n3_import_tooltip_timer.stop()
+        self._dismiss_n3_import_tooltip()
+        fluent_error(
+            self,
+            "导入失败",
+            f"无法读取 NicoKaraMaker3 项目文件：\n{path}\n\n{message}",
+        )
+
+    def _finish_n3_import(self, result, path: Path) -> None:
+        """后台导入完成后在 UI 线程套用工程（同步，供完成回调与测试复用）。"""
         self._begin_project_generation()
         self._clear_loaded_media()
         self._apply_project_data(result.project_data)
@@ -2470,7 +2560,6 @@ class SubtitleRenderWindow(QWidget):
                 position=InfoBarPosition.BOTTOM_RIGHT,
                 duration=2500,
             )
-        return True
 
     def _save_project(self) -> bool:
         if self._project_path is None:

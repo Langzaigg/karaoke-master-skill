@@ -96,6 +96,20 @@ def _make_window(qapp, monkeypatch):
     return mw.SubtitleRenderWindow(embedded=False)
 
 
+def _wait_n3_import(win, qapp, timeout_s: float = 10.0) -> None:
+    """N3 导入是后台任务：泵事件直到完成回调把 worker 清空。"""
+    import time as _time
+
+    deadline = _time.monotonic() + timeout_s
+    while win._n3_import_worker is not None:
+        assert _time.monotonic() < deadline, "N3 后台导入超时未完成"
+        qapp.processEvents()
+        _time.sleep(0.01)
+    # 再泵一轮，让完成回调里排队的主线程收尾信号落地
+    for _ in range(5):
+        qapp.processEvents()
+
+
 def test_save_render_project_round_trip(tmp_path):
     path = tmp_path / "demo.yurika"
     data = {"style": {"font_size_px": 80}, "selected_scheme_key": "global"}
@@ -1726,7 +1740,9 @@ def test_dropped_n3proj_imports_complete_project_like_file_menu(
 
     loaded_paths: list[Path] = []
 
-    def fake_load(path):
+    def fake_load(path, progress_cb=None):
+        if progress_cb is not None:
+            progress_cb(50, "测试进度")
         loaded_paths.append(path)
         return Result()
 
@@ -1734,6 +1750,7 @@ def test_dropped_n3proj_imports_complete_project_like_file_menu(
     monkeypatch.setattr(mw.InfoBar, "success", lambda **kwargs: None)
 
     getattr(win, panel_name).pathDropped.emit(project_path)
+    _wait_n3_import(win, qapp)
 
     assert loaded_paths == [project_path]
     assert win._project_path is None
@@ -2110,7 +2127,9 @@ def test_n3_import_warnings_use_copyable_fluent_dialog(qapp, monkeypatch):
         project_data = {}
         warnings = ["输出格式已改为 MP4", "歌词间隔使用默认布局"]
 
-    monkeypatch.setattr(import_controller_module, "load_n3proj", lambda _path: Result())
+    monkeypatch.setattr(
+        import_controller_module, "load_n3proj", lambda _path, progress_cb=None: Result()
+    )
     monkeypatch.setattr(win, "_clear_loaded_media", lambda: None)
     monkeypatch.setattr(win, "_apply_project_data", lambda _data: None)
     monkeypatch.setattr(win, "_refresh_project_title", lambda: None)
@@ -2123,6 +2142,7 @@ def test_n3_import_warnings_use_copyable_fluent_dialog(qapp, monkeypatch):
     monkeypatch.setattr(mw, "fluent_info", capture)
 
     win._import_n3_project()
+    _wait_n3_import(win, qapp)
 
     assert captured["args"][1] == "导入完成（部分设置需注意）"
     assert captured["args"][2] == (
@@ -2420,10 +2440,13 @@ def test_direct_n3_import_uses_video_resolution_and_rebases_style_without_scalin
         }
         warnings = []
 
-    monkeypatch.setattr(import_controller_module, "load_n3proj", lambda _path: Result())
+    monkeypatch.setattr(
+        import_controller_module, "load_n3proj", lambda _path, progress_cb=None: Result()
+    )
     monkeypatch.setattr(mw.InfoBar, "success", lambda **kwargs: None)
 
     win._import_n3_project()
+    _wait_n3_import(win, qapp)
 
     assert (win._screen_settings.width, win._screen_settings.height) == (3840, 2160)
     assert (win._export_width_spin.value(), win._export_height_spin.value()) == (
