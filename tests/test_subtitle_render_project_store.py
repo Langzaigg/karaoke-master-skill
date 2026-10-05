@@ -4136,3 +4136,64 @@ def test_selected_rows_context_menu_sets_head_overrides(qapp, monkeypatch):
     assert "音量柱特效" not in panel.table_widget.item(
         1, lyrics_list.COL_EFFECT
     ).text()
+
+
+def test_edit_animation_rows_emits_switch_signals_only_when_changed(qapp, monkeypatch):
+    # 双击特效列弹「逐行特效」：弹窗里改动的挂载/反向开关才发信号
+    # （未改动不发，避免确认弹窗冲掉既有覆盖）；动画覆盖恒发。
+    from PyQt6.QtWidgets import QDialog
+
+    panel = lyrics_list.LyricsPanel()
+    track = TimingTrack(
+        lines=[
+            TimingLine(
+                chars=[TimingChar("甲", 1000)],
+                end_ms=1500,
+                wipe_reverse=True,
+                volume_head_override=False,
+            )
+        ]
+    )
+    panel.set_track(track)
+    monkeypatch.setattr(
+        lyrics_list._LineAnimationDialog,
+        "exec",
+        lambda self: QDialog.DialogCode.Accepted,
+    )
+    captured: dict[str, object] = {
+        "override": None, "volume": None, "lit": None, "wipe": None,
+    }
+    panel.animationOverrideRequested.connect(
+        lambda rows, value: captured.update(override=(list(rows), value))
+    )
+    panel.volumeHostRequested.connect(
+        lambda rows, value: captured.update(volume=(list(rows), value))
+    )
+    panel.litHostRequested.connect(
+        lambda rows, value: captured.update(lit=(list(rows), value))
+    )
+    panel.wipeReverseRequested.connect(
+        lambda rows, value: captured.update(wipe=(list(rows), value))
+    )
+
+    # 弹窗初始即当前值、三个开关都没动：只发动画覆盖。
+    panel._edit_animation_rows([0])
+    assert captured["override"] is not None
+    assert captured["volume"] is None
+    assert captured["lit"] is None
+    assert captured["wipe"] is None
+
+    # 用户在弹窗里改了三个开关：三个信号按目标值发出。
+    monkeypatch.setattr(
+        lyrics_list._LineAnimationDialog, "volume_host_value", lambda self: True
+    )
+    monkeypatch.setattr(
+        lyrics_list._LineAnimationDialog, "lit_host_value", lambda self: False
+    )
+    monkeypatch.setattr(
+        lyrics_list._LineAnimationDialog, "wipe_reverse_value", lambda self: False
+    )
+    panel._edit_animation_rows([0])
+    assert captured["volume"] == ([0], True)
+    assert captured["lit"] == ([0], False)
+    assert captured["wipe"] == ([0], False)

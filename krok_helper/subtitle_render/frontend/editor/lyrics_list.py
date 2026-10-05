@@ -290,14 +290,40 @@ def _animation_summary(
     return summary
 
 
+_DIALOG_NO_CHANGE = object()
+"""逐行特效弹窗三态开关的「不修改」哨兵（区别于真实值 None/True/False）。"""
+
+# 挂载行开关与反向走字的三态选项（value, label）——与右键菜单同口径。
+_HOST_SWITCH_ITEMS = (
+    (_DIALOG_NO_CHANGE, "不修改"),
+    (None, "跟随默认（段首）"),
+    (True, "强制开启"),
+    (False, "强制关闭"),
+)
+_WIPE_SWITCH_ITEMS = (
+    (_DIALOG_NO_CHANGE, "不修改"),
+    (True, "反向走字"),
+    (False, "正向走字"),
+)
+
+
 class _LineAnimationDialog(ModelessDialog):
-    """歌词列表逐行动画的紧凑编辑弹窗。"""
+    """歌词列表逐行动画的紧凑编辑弹窗。
+
+    除入退场/唱字动画外，还承载三个行级开关——音量柱特效、指示灯特效
+    （挂载行三态覆盖）与反向走字；每个开关初始显示所选行的当前值
+    （多行混合时显示「不修改」），确认时只有被改动的开关才发信号。
+    """
 
     def __init__(
         self,
         style: Style,
         override: Optional[LineAnimationOverride],
         parent: Optional[QWidget] = None,
+        *,
+        wipe_reverse: object = _DIALOG_NO_CHANGE,
+        volume_host: object = _DIALOG_NO_CHANGE,
+        lit_host: object = _DIALOG_NO_CHANGE,
     ) -> None:
         super().__init__(parent)
         self.setWindowTitle("逐行特效")
@@ -332,6 +358,29 @@ class _LineAnimationDialog(ModelessDialog):
             "位置冒星、音符飘出=自字框升起、涟漪光环=每字两圈细环扩散；"
             "粒子尺寸/数量/颜色仍用全局设置（属性面板·动画页）"
         )
+        self._volume_host_combo = _StableFluentComboBox(self)
+        self._lit_host_combo = _StableFluentComboBox(self)
+        for combo in (self._volume_host_combo, self._lit_host_combo):
+            for value, label in _HOST_SWITCH_ITEMS:
+                combo.addItem(label, userData=value)
+            combo.setToolTip(
+                "本行挂载覆盖（总开关未开启时仅记录、不生效）：跟随默认"
+                "（段首）= 只挂每段第一行；强制开启 = 非段首行也挂；"
+                "强制关闭 = 段首行也不挂"
+            )
+        self._select_by_data(self._volume_host_combo, volume_host)
+        self._select_by_data(self._lit_host_combo, lit_host)
+        self._wipe_combo = _StableFluentComboBox(self)
+        for value, label in _WIPE_SWITCH_ITEMS:
+            self._wipe_combo.addItem(label, userData=value)
+        self._wipe_combo.setToolTip(
+            "反向消费本行时间戳（横排从右往左、竖排从下往上走字）；"
+            "正向 = 按正常顺序走字"
+        )
+        self._select_by_data(self._wipe_combo, wipe_reverse)
+        self._initial_volume_host = volume_host
+        self._initial_lit_host = lit_host
+        self._initial_wipe = wipe_reverse
         self._entry_duration = FluentSpinBox(self)
         self._exit_duration = FluentSpinBox(self)
         for spin in (self._entry_duration, self._exit_duration):
@@ -358,6 +407,9 @@ class _LineAnimationDialog(ModelessDialog):
         form.addRow("退场时长", self._exit_duration)
         form.addRow("唱字特效", self._karaoke_combo)
         form.addRow("唱字装饰粒子", self._sing_combo)
+        form.addRow("音量柱特效", self._volume_host_combo)
+        form.addRow("指示灯特效", self._lit_host_combo)
+        form.addRow("反向走字", self._wipe_combo)
         root.addLayout(form)
 
         buttons = QHBoxLayout()
@@ -378,6 +430,33 @@ class _LineAnimationDialog(ModelessDialog):
     def _set_combo_value(combo: FluentComboBox, value: str) -> None:
         index = combo.findData(value)
         combo.setCurrentIndex(index if index >= 0 else 0)
+
+    @staticmethod
+    def _select_by_data(combo: FluentComboBox, value: object) -> None:
+        for index in range(combo.count()):
+            if combo.itemData(index) is value:
+                combo.setCurrentIndex(index)
+                return
+        combo.setCurrentIndex(0)
+
+    def _switch_value(self, combo: FluentComboBox, initial: object) -> object:
+        """开关当前选中值；与打开时的初值相同（或仍是「不修改」）时返回哨兵。"""
+        value = combo.currentData()
+        if value is initial:
+            return _DIALOG_NO_CHANGE
+        return value
+
+    def volume_host_value(self) -> object:
+        """音量柱特效挂载行的目标值；``_DIALOG_NO_CHANGE`` = 未改动。"""
+        return self._switch_value(self._volume_host_combo, self._initial_volume_host)
+
+    def lit_host_value(self) -> object:
+        """指示灯特效挂载行的目标值；``_DIALOG_NO_CHANGE`` = 未改动。"""
+        return self._switch_value(self._lit_host_combo, self._initial_lit_host)
+
+    def wipe_reverse_value(self) -> object:
+        """反向走字目标值；``_DIALOG_NO_CHANGE`` = 未改动。"""
+        return self._switch_value(self._wipe_combo, self._initial_wipe)
 
     def _sync_enabled(self, inherit: bool) -> None:
         for widget in (
@@ -3386,10 +3465,44 @@ class LyricsPanel(DropPanel):
     def _edit_animation_rows(self, rows: list[int]) -> None:
         if self._track is None or not rows:
             return
-        first = self._track.lines[rows[0]].animation_override
-        dialog = _LineAnimationDialog(self._style, first, self)
+        valid_rows = [row for row in rows if 0 <= row < len(self._track.lines)]
+        if not valid_rows:
+            return
+        lines = [self._track.lines[row] for row in valid_rows]
+        first = lines[0].animation_override
+
+        def uniform(getter):
+            values = [getter(line) for line in lines]
+            return (
+                values[0]
+                if all(value == values[0] for value in values)
+                else _DIALOG_NO_CHANGE
+            )
+
+        dialog = _LineAnimationDialog(
+            self._style,
+            first,
+            self,
+            wipe_reverse=uniform(lambda line: line.wipe_reverse),
+            volume_host=uniform(lambda line: line.volume_head_override),
+            lit_host=uniform(lambda line: line.lit_head_override),
+        )
         if dialog.exec() == QDialog.DialogCode.Accepted:
-            self.animationOverrideRequested.emit(list(rows), dialog.animation_override())
+            target_rows = list(valid_rows)
+            self.animationOverrideRequested.emit(
+                target_rows, dialog.animation_override()
+            )
+            # 行级开关只在弹窗内真的改动了才发（未改动返回「不修改」哨兵），
+            # 避免打开看一眼就确认把所选行的既有覆盖冲掉。
+            volume_host = dialog.volume_host_value()
+            if volume_host is not _DIALOG_NO_CHANGE:
+                self.volumeHostRequested.emit(target_rows, volume_host)
+            lit_host = dialog.lit_host_value()
+            if lit_host is not _DIALOG_NO_CHANGE:
+                self.litHostRequested.emit(target_rows, lit_host)
+            wipe = dialog.wipe_reverse_value()
+            if wipe is not _DIALOG_NO_CHANGE:
+                self.wipeReverseRequested.emit(target_rows, bool(wipe))
 
     def _edit_char_roles(self, row: int) -> None:
         """打开行内逐字符角色编辑器，确定后按整行标签列表发给宿主。"""

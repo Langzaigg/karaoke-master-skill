@@ -836,3 +836,44 @@ class TestSectionEdgeListRefresh:
         # 关掉开关回到全局值——来回切都要跟得上。
         panel.set_style(Style())
         assert self._effect_texts(panel) == ["全局：淡入 / 淡出"] * 8
+
+
+def test_dialog_host_and_wipe_switches_round_trip() -> None:
+    from krok_helper.subtitle_render.frontend.editor.lyrics_list import (
+        _DIALOG_NO_CHANGE,
+        _LineAnimationDialog,
+    )
+
+    # 初值 = 当前行状态：未改动时取值返回「不修改」哨兵。
+    dialog = _LineAnimationDialog(
+        Style(), None, wipe_reverse=True, volume_host=False, lit_host=None
+    )
+    assert dialog.wipe_reverse_value() is _DIALOG_NO_CHANGE
+    assert dialog.volume_host_value() is _DIALOG_NO_CHANGE
+    assert dialog.lit_host_value() is _DIALOG_NO_CHANGE
+
+    # 改动后返回目标值；清回默认（None）也能被区分（发 None 信号）——
+    # 初值是「跟随默认」时再选它 = 未改动；要测清回得从强制开启出发。
+    dialog._select_by_data(dialog._wipe_combo, False)
+    assert dialog.wipe_reverse_value() is False
+    dialog._select_by_data(dialog._volume_host_combo, True)
+    assert dialog.volume_host_value() is True
+    clearable = _LineAnimationDialog(
+        Style(), None, wipe_reverse=True, volume_host=False, lit_host=True
+    )
+    clearable._select_by_data(clearable._lit_host_combo, None)
+    assert clearable.lit_host_value() is None
+    clearable._select_by_data(clearable._lit_host_combo, True)
+    assert clearable.lit_host_value() is _DIALOG_NO_CHANGE
+
+    # 多行混合态（初值哨兵）：不动 = 不修改；选了就发。
+    mixed = _LineAnimationDialog(
+        Style(),
+        None,
+        wipe_reverse=_DIALOG_NO_CHANGE,
+        volume_host=_DIALOG_NO_CHANGE,
+        lit_host=_DIALOG_NO_CHANGE,
+    )
+    assert mixed.volume_host_value() is _DIALOG_NO_CHANGE
+    mixed._select_by_data(mixed._volume_host_combo, False)
+    assert mixed.volume_host_value() is False
