@@ -1811,6 +1811,27 @@ class GpuAsyncSubtitleRenderer(QObject):
                                 self._pending = (t_ms, serial, speculative, submitted_at)
                             self._condition.notify()
                         continue
+                    if (
+                        isinstance(exc, NativeRendererError)
+                        and "resource deadlock would occur" in str(exc)
+                    ):
+                        # G6 直画瞬态竞态（2026-10 用户实测：刚播放即连续
+                        # 拖回开头多次触发，最终熔断）：快速 seek 的代际翻
+                        # 动下 present 与渲染/取消竞态，D3D/D2D 以
+                        # ERROR_POSSIBLE_DEADLOCK 拒绝该次操作——sidecar
+                        # 返回的是错误应答而非死亡，设备状态仍可用。温和
+                        # 重试（丢这一拍），不杀进程不记断路器；持续发生
+                        # 才经帧级 streak 走重启链。
+                        self._note("gpu_deadlock_retries")
+                        with self._condition:
+                            if needs_configure:
+                                self._needs_configure = True
+                            if needs_target_resize:
+                                self._needs_target_resize = True
+                            if self._pending is None:
+                                self._pending = (t_ms, serial, speculative, submitted_at)
+                            self._condition.notify()
+                        continue
                     with self._condition:
                         churned = generation != self._generation
                     if churned:
