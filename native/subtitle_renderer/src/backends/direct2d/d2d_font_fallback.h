@@ -26,12 +26,19 @@ struct ResolvedFontFaces {
 // is tried typographic-first, then classic, then the Win32
 // informational-name scan, so both spellings the Qt font picker offers
 // resolve to the face the CPU renderer draws.
+//
+// ``faceWeight`` > 0 selects the explicitly resolved face (the CPU side's
+// authoritative outcome shipped with the render IR); ``simBold`` adds DWrite
+// bold simulation to that face.  ``faceWeight`` <= 0 falls back to the
+// autonomous bucket rules (legacy producers / tests).
 ResolvedFontFaces resolveFontFaces(
     IDWriteFontCollection *collection,
     IDWriteFontCollection *typographicCollection,
     const std::wstring &familyName,
     int weight,
-    bool italic
+    bool italic,
+    int faceWeight = -1,
+    bool simBold = false
 );
 
 // Outline-only view of resolveFontFaces for callers that do not need the
@@ -41,7 +48,9 @@ Microsoft::WRL::ComPtr<IDWriteFontFace> createFontFace(
     IDWriteFontCollection *typographicCollection,
     const std::wstring &familyName,
     int weight,
-    bool italic
+    bool italic,
+    int faceWeight = -1,
+    bool simBold = false
 );
 
 bool containsEmoji(const std::wstring &text);

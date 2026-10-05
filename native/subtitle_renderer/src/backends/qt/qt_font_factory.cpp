@@ -10,10 +10,23 @@ namespace krok::subtitle::native::legacy_qt {
 
 using protocol::ResolvedStyle;
 
+namespace {
+// 统一字重解析：合成粗体用原始请求字重（Qt 匹配器自会复现 CPU 侧的
+// 模拟结果），否则用下发的生效 face 字重精确实例。
+int effectiveQtWeight(const ResolvedStyle &style) {
+    if (style.fontSimBold) {
+        return std::clamp(style.fontWeight, 1, 999);
+    }
+    return std::clamp(
+        style.fontFaceWeight > 0 ? style.fontFaceWeight : style.fontWeight, 1, 999
+    );
+}
+}  // namespace
+
 QFont buildLineFont(const ResolvedStyle &style) {
     QFont font(style.fontFamily);
     font.setPixelSize(style.fontSizePx);
-    font.setWeight(static_cast<QFont::Weight>(std::clamp(style.fontWeight, 1, 999)));
+    font.setWeight(static_cast<QFont::Weight>(effectiveQtWeight(style)));
     return font;
 }
 
@@ -37,7 +50,7 @@ QFont buildEmojiFont(const ResolvedStyle &style) {
     });
     QFont font(QStringLiteral("Segoe UI Symbol"));
     font.setPixelSize(style.fontSizePx);
-    font.setWeight(static_cast<QFont::Weight>(std::clamp(style.fontWeight, 1, 999)));
+    font.setWeight(static_cast<QFont::Weight>(effectiveQtWeight(style)));
     font.setItalic(style.italic);
     return font;
 }
@@ -45,7 +58,7 @@ QFont buildEmojiFont(const ResolvedStyle &style) {
 QFont buildRubyFont(const ResolvedStyle &style) {
     QFont font(style.fontFamily);
     font.setPixelSize(style.rubyFontSizePx);
-    font.setWeight(static_cast<QFont::Weight>(std::clamp(style.fontWeight, 1, 999)));
+    font.setWeight(static_cast<QFont::Weight>(effectiveQtWeight(style)));
     return font;
 }
 

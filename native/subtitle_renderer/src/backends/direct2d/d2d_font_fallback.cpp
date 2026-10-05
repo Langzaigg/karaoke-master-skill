@@ -258,7 +258,9 @@ ResolvedFontFaces resolveUnifiedFaces(
     IDWriteFont *matchedFont,
     IDWriteFontFamily *family,
     int weight,
-    bool italic
+    bool italic,
+    int faceWeight,
+    bool simBold
 ) {
     ResolvedFontFaces result;
     Microsoft::WRL::ComPtr<IDWriteFontFace> probeFace;
@@ -266,7 +268,9 @@ ResolvedFontFaces resolveUnifiedFaces(
         return result;
     }
 
-    if (auto axisFace = axisWeightFace(probeFace.Get(), weight)) {
+    // 可变字体：faceWeight 即钳制后的轴值（CPU 侧统一解析下发）。
+    if (auto axisFace = axisWeightFace(
+            probeFace.Get(), faceWeight > 0 ? faceWeight : weight)) {
         result.outline = axisFace;
         result.metrics = defaultAxisFace(probeFace.Get());
         if (!result.metrics) {
@@ -319,31 +323,48 @@ ResolvedFontFaces resolveUnifiedFaces(
         faces = std::move(matchingStyle);
     }
 
-    const int bucket = weightBucket(weight);
-    const auto exact = std::find_if(
-        faces.begin(), faces.end(),
-        [&](const FaceEntry &entry) { return entry.weight == bucket; }
-    );
     const FaceEntry *chosen = nullptr;
     DWRITE_FONT_SIMULATIONS simulations = DWRITE_FONT_SIMULATIONS_NONE;
-    if (exact != faces.end()) {
-        chosen = &*exact;
-    } else if (
-        faces.size() == 1 && bucket >= 600 && bucket > faces.front().weight) {
-        chosen = &faces.front();
-        simulations = DWRITE_FONT_SIMULATIONS_BOLD;
-    } else {
-        chosen = &*std::min_element(
+    if (faceWeight > 0) {
+        // 显式决策（CPU 侧统一解析的权威结果）：按 face 字重精确选 face，
+        // simBold 时叠加 DWrite 合成粗体。
+        const auto explicitFace = std::find_if(
             faces.begin(), faces.end(),
-            [&](const FaceEntry &lhs, const FaceEntry &rhs) {
-                const int lhsDistance = std::abs(lhs.weight - bucket);
-                const int rhsDistance = std::abs(rhs.weight - bucket);
-                if (lhsDistance != rhsDistance) {
-                    return lhsDistance < rhsDistance;
-                }
-                return lhs.weight < rhs.weight;
-            }
+            [&](const FaceEntry &entry) { return entry.weight == faceWeight; }
         );
+        if (explicitFace != faces.end()) {
+            chosen = &*explicitFace;
+            simulations = simBold
+                ? DWRITE_FONT_SIMULATIONS_BOLD
+                : DWRITE_FONT_SIMULATIONS_NONE;
+        }
+    }
+    if (chosen == nullptr) {
+        const int bucket = weightBucket(weight);
+        const auto exact = std::find_if(
+            faces.begin(), faces.end(),
+            [&](const FaceEntry &entry) { return entry.weight == bucket; }
+        );
+        if (exact != faces.end()) {
+            chosen = &*exact;
+        } else if (
+            faces.size() == 1 && bucket >= 600
+            && bucket > faces.front().weight) {
+            chosen = &faces.front();
+            simulations = DWRITE_FONT_SIMULATIONS_BOLD;
+        } else {
+            chosen = &*std::min_element(
+                faces.begin(), faces.end(),
+                [&](const FaceEntry &lhs, const FaceEntry &rhs) {
+                    const int lhsDistance = std::abs(lhs.weight - bucket);
+                    const int rhsDistance = std::abs(rhs.weight - bucket);
+                    if (lhsDistance != rhsDistance) {
+                        return lhsDistance < rhsDistance;
+                    }
+                    return lhs.weight < rhs.weight;
+                }
+            );
+        }
     }
     result.outline = faceFromFont(chosen->font.Get(), simulations);
     // Vertical metrics always come from the unsimulated base face: DWrite's
@@ -365,7 +386,9 @@ ResolvedFontFaces resolveFontFaces(
     IDWriteFontCollection *typographicCollection,
     const std::wstring &familyName,
     int weight,
-    bool italic
+    bool italic,
+    int faceWeight,
+    bool simBold
 ) {
     if (familyName.empty()) {
         return {};
@@ -380,18 +403,21 @@ ResolvedFontFaces resolveFontFaces(
         Microsoft::WRL::ComPtr<IDWriteFontFamily> family;
         if (auto font = tryFamilyFont(
                 typographicCollection, familyName, weight, italic, &family)) {
-            return resolveUnifiedFaces(font.Get(), family.Get(), weight, italic);
+            return resolveUnifiedFaces(
+                font.Get(), family.Get(), weight, italic, faceWeight, simBold);
         }
     }
     {
         Microsoft::WRL::ComPtr<IDWriteFontFamily> family;
         if (auto font = tryFamilyFont(
                 collection, familyName, weight, italic, &family)) {
-            return resolveUnifiedFaces(font.Get(), family.Get(), weight, italic);
+            return resolveUnifiedFaces(
+                font.Get(), family.Get(), weight, italic, faceWeight, simBold);
         }
     }
     if (auto font = findFontByGdiFamilyName(collection, familyName)) {
-        return resolveUnifiedFaces(font.Get(), nullptr, weight, italic);
+        return resolveUnifiedFaces(
+            font.Get(), nullptr, weight, italic, faceWeight, simBold);
     }
     return {};
 }
@@ -401,10 +427,13 @@ Microsoft::WRL::ComPtr<IDWriteFontFace> createFontFace(
     IDWriteFontCollection *typographicCollection,
     const std::wstring &familyName,
     int weight,
-    bool italic
+    bool italic,
+    int faceWeight,
+    bool simBold
 ) {
     return resolveFontFaces(
-        collection, typographicCollection, familyName, weight, italic
+        collection, typographicCollection, familyName, weight, italic,
+        faceWeight, simBold
     ).outline;
 }
 

@@ -335,7 +335,13 @@ struct TextStyle {
     float fontSize = 100.0f;
     std::optional<float> latinFontSize;
     int fontWeight = 400;
+    // 统一字重解析的生效结果（缺省 -1/false 时渲染端回落自治规则）：
+    // faceWeight = 实际渲染 face 的字重（可变字体=轴值），simBold = 合成粗体。
+    int fontFaceWeight = -1;
+    bool fontSimBold = false;
     std::optional<int> latinFontWeight;
+    int latinFontFaceWeight = -1;
+    bool latinFontSimBold = false;
     int latinFontStretchPct = 100;
     bool italic = false;
     bool allowBiting = false;
@@ -392,7 +398,11 @@ struct TextStyle {
     float rubyFontSize = 45.0f;
     std::optional<float> rubyLatinFontSize;
     int rubyFontWeight = 400;
+    int rubyFontFaceWeight = -1;
+    bool rubyFontSimBold = false;
     std::optional<int> rubyLatinFontWeight;
+    int rubyLatinFontFaceWeight = -1;
+    bool rubyLatinFontSimBold = false;
     int rubyLatinFontStretchPct = 100;
     float rubyGap = 0.0f;
     float rubyInterval = 0.0f;

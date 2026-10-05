@@ -495,7 +495,10 @@ void Direct2DGpuBackend::configure(const RenderScene &scene) {
             typographicFontCollection = typedCollection;
         }
     }
-    auto resolveFaces = [&](const std::wstring &family, int weight, bool italic) {
+    auto resolveFaces = [&](
+        const std::wstring &family, int weight, bool italic,
+        int faceWeight = -1, bool simBold = false
+    ) {
         const std::wstring resolvedFamily = family.empty() ? L"Segoe UI" : family;
         const Impl::FontFaceKey key{resolvedFamily, weight, italic};
         const auto found = impl_->fontFaces.find(key);
@@ -513,7 +516,9 @@ void Direct2DGpuBackend::configure(const RenderScene &scene) {
             typographicFontCollection.Get(),
             resolvedFamily,
             weight,
-            italic
+            italic,
+            faceWeight,
+            simBold
         );
         if (!faces.outline && resolvedFamily != L"Segoe UI") {
             faces = resolveFontFaces(
@@ -534,11 +539,17 @@ void Direct2DGpuBackend::configure(const RenderScene &scene) {
     };
     // Outline face (axis-value instance / simulated) for glyph runs and
     // per-glyph metrics; vertical box math must use the metrics face below.
-    auto resolveFace = [&](const std::wstring &family, int weight, bool italic) {
-        return resolveFaces(family, weight, italic).first;
+    auto resolveFace = [&](
+        const std::wstring &family, int weight, bool italic,
+        int faceWeight = -1, bool simBold = false
+    ) {
+        return resolveFaces(family, weight, italic, faceWeight, simBold).first;
     };
-    auto resolveMetricsFace = [&](const std::wstring &family, int weight, bool italic) {
-        return resolveFaces(family, weight, italic).second;
+    auto resolveMetricsFace = [&](
+        const std::wstring &family, int weight, bool italic,
+        int faceWeight = -1, bool simBold = false
+    ) {
+        return resolveFaces(family, weight, italic, faceWeight, simBold).second;
     };
 
     auto extendBounds = [](D2D1_RECT_F &target, bool &hasBounds, const D2D1_RECT_F &value) {
@@ -793,26 +804,33 @@ void Direct2DGpuBackend::configure(const RenderScene &scene) {
         const TextStyle &style = lineIndex < scene.lineStyles.size()
             ? scene.lineStyles[lineIndex]
             : scene.style;
-        const auto mainFace = resolveFace(style.fontFamily, style.fontWeight, style.italic);
+        const auto mainFace = resolveFace(
+            style.fontFamily, style.fontWeight, style.italic,
+            style.fontFaceWeight, style.fontSimBold
+        );
         const auto mainMetricsFace = resolveMetricsFace(
-            style.fontFamily, style.fontWeight, style.italic
+            style.fontFamily, style.fontWeight, style.italic,
+            style.fontFaceWeight, style.fontSimBold
         );
         const auto latinFace = resolveFace(
             style.latinFontFamily.value_or(style.fontFamily),
             style.latinFontWeight.value_or(style.fontWeight),
-            style.italic
+            style.italic,
+            style.latinFontFaceWeight, style.latinFontSimBold
         );
         const auto rubyFace = resolveFace(
             style.rubyFontFamily.empty() ? style.fontFamily : style.rubyFontFamily,
             style.rubyFontWeight,
-            style.italic
+            style.italic,
+            style.rubyFontFaceWeight, style.rubyFontSimBold
         );
         const auto rubyLatinFace = resolveFace(
             style.rubyLatinFontFamily.value_or(
                 style.rubyFontFamily.empty() ? style.fontFamily : style.rubyFontFamily
             ),
             style.rubyLatinFontWeight.value_or(style.rubyFontWeight),
-            style.italic
+            style.italic,
+            style.rubyLatinFontFaceWeight, style.rubyLatinFontSimBold
         );
         Impl::CachedLine cached;
         cached.style = style;
@@ -945,7 +963,13 @@ void Direct2DGpuBackend::configure(const RenderScene &scene) {
                     latin
                         ? charStyle.latinFontWeight.value_or(charStyle.fontWeight)
                         : charStyle.fontWeight,
-                    charStyle.italic
+                    charStyle.italic,
+                    latin
+                        ? charStyle.latinFontFaceWeight
+                        : charStyle.fontFaceWeight,
+                    latin
+                        ? charStyle.latinFontSimBold
+                        : charStyle.fontSimBold
                 );
             }
             const float fontSize = latin
@@ -973,7 +997,13 @@ void Direct2DGpuBackend::configure(const RenderScene &scene) {
                 latin
                     ? charStyle.latinFontWeight.value_or(charStyle.fontWeight)
                     : charStyle.fontWeight,
-                charStyle.italic
+                charStyle.italic,
+                latin
+                    ? charStyle.latinFontFaceWeight
+                    : charStyle.fontFaceWeight,
+                latin
+                    ? charStyle.latinFontSimBold
+                    : charStyle.fontSimBold
             )->GetMetrics(&fontMetrics);
             if (!hasFirstSlot) {
                 const int metricTotal = std::max(
@@ -1760,7 +1790,8 @@ void Direct2DGpuBackend::configure(const RenderScene &scene) {
                         ? rubyStyle.fontFamily
                         : rubyStyle.rubyFontFamily,
                     rubyStyle.rubyFontWeight,
-                    rubyStyle.italic
+                    rubyStyle.italic,
+                    rubyStyle.rubyFontFaceWeight, rubyStyle.rubyFontSimBold
                 )
                 : rubyFace;
             const auto selectedRubyMetricsFace = hasRubyStyle
@@ -1769,12 +1800,14 @@ void Direct2DGpuBackend::configure(const RenderScene &scene) {
                         ? rubyStyle.fontFamily
                         : rubyStyle.rubyFontFamily,
                     rubyStyle.rubyFontWeight,
-                    rubyStyle.italic
+                    rubyStyle.italic,
+                    rubyStyle.rubyFontFaceWeight, rubyStyle.rubyFontSimBold
                 )
                 : resolveMetricsFace(
                     style.rubyFontFamily.empty() ? style.fontFamily : style.rubyFontFamily,
                     style.rubyFontWeight,
-                    style.italic
+                    style.italic,
+                    style.rubyFontFaceWeight, style.rubyFontSimBold
                 );
             const auto selectedRubyLatinFace = hasRubyStyle
                 ? resolveFace(
@@ -1836,7 +1869,13 @@ void Direct2DGpuBackend::configure(const RenderScene &scene) {
                     latin
                         ? rubyStyle.rubyLatinFontWeight.value_or(rubyStyle.rubyFontWeight)
                         : rubyStyle.rubyFontWeight,
-                    rubyStyle.italic
+                    rubyStyle.italic,
+                    latin
+                        ? rubyStyle.rubyLatinFontFaceWeight
+                        : rubyStyle.rubyFontFaceWeight,
+                    latin
+                        ? rubyStyle.rubyLatinFontSimBold
+                        : rubyStyle.rubyFontSimBold
                 )->GetMetrics(&fontMetrics);
                 const float boxMetricTotal = static_cast<float>(std::max(
                     static_cast<int>(fontMetrics.ascent) + static_cast<int>(fontMetrics.descent),
@@ -2064,7 +2103,13 @@ void Direct2DGpuBackend::configure(const RenderScene &scene) {
                 rubyIsLatin
                     ? rubyStyle.rubyLatinFontWeight.value_or(rubyStyle.rubyFontWeight)
                     : rubyStyle.rubyFontWeight,
-                rubyStyle.italic
+                rubyStyle.italic,
+                rubyIsLatin
+                    ? rubyStyle.rubyLatinFontFaceWeight
+                    : rubyStyle.rubyFontFaceWeight,
+                rubyIsLatin
+                    ? rubyStyle.rubyLatinFontSimBold
+                    : rubyStyle.rubyFontSimBold
             )->GetMetrics(&rubyFillMetrics);
             const int rubyMetricTotal = std::max(
                 static_cast<int>(rubyFillMetrics.ascent)

@@ -205,6 +205,72 @@ def gpu_unsupported_feature_labels(reasons: tuple[str, ...]) -> tuple[str, ...]:
     return tuple(GPU_UNSUPPORTED_FEATURE_LABELS.get(reason, reason) for reason in reasons)
 
 
+def _font_face_slot_overrides(payload: dict[str, Any]) -> None:
+    """为单个样式字典追加统一字重解析的生效结果。
+
+    不改动既有 ``*_font_weight`` 键（C++ 侧行内覆盖启发式与 sidecar 内置
+    Qt 后端继续消费原始请求值），只追加两类键：
+
+    - ``*_font_face_weight``：该槽实际渲染的 face 字重（静态=钉扎/模拟基
+      face；可变=轴值），GPU 端据此精确建 face；
+    - ``*_sim_bold``：该槽是否走合成粗体（Qt 实测指纹判定）。
+
+    回退链与 C++ 解析端一一对应：latin→main、ruby→main、ruby_latin→
+    ruby_latin→ruby→main。
+    """
+    from krok_helper.subtitle_render.engine.text.font_weight import resolve_weight_plan
+
+    if "font_family" not in payload or "font_weight" not in payload:
+        return
+    italic = bool(payload.get("italic"))
+    main_weight = int(payload["font_weight"] or 400)
+
+    def resolved(family: Any, weight: Any) -> tuple[int, bool]:
+        if weight is None:
+            weight = main_weight
+        plan = resolve_weight_plan(str(family or ""), int(weight), italic)
+        return plan.base_weight, bool(plan.synthetic_bold)
+
+    main_family = payload.get("font_family")
+    face_weight, sim_bold = resolved(main_family, main_weight)
+    payload["font_face_weight"] = face_weight
+    payload["font_sim_bold"] = sim_bold
+
+    latin_family = payload.get("latin_font_family") or main_family
+    face_weight, sim_bold = resolved(latin_family, payload.get("latin_font_weight"))
+    payload["latin_font_face_weight"] = face_weight
+    payload["latin_font_sim_bold"] = sim_bold
+
+    ruby_family = payload.get("ruby_font_family") or main_family
+    face_weight, sim_bold = resolved(ruby_family, payload.get("ruby_font_weight"))
+    payload["ruby_font_face_weight"] = face_weight
+    payload["ruby_font_sim_bold"] = sim_bold
+
+    ruby_latin_family = payload.get("ruby_latin_font_family") or ruby_family
+    ruby_latin_weight = payload.get("ruby_latin_font_weight")
+    if ruby_latin_weight is None:
+        ruby_latin_weight = payload.get("ruby_font_weight")
+    face_weight, sim_bold = resolved(ruby_latin_family, ruby_latin_weight)
+    payload["ruby_latin_font_face_weight"] = face_weight
+    payload["ruby_latin_font_sim_bold"] = sim_bold
+
+
+def apply_resolved_font_faces(node: Any) -> None:
+    """整棵渲染 IR 递归注入统一字重解析结果（configure 发送前调用一次）。
+
+    命中所有携带 ``font_family``+``font_weight`` 的样式字典：全局 style、
+    逐行/逐字符样式、标题与角色样式——它们共用同一组字段名，且都由
+    C++ 渲染端按 (family, weight) 解析 face。
+    """
+    if isinstance(node, dict):
+        _font_face_slot_overrides(node)
+        for value in node.values():
+            apply_resolved_font_faces(value)
+    elif isinstance(node, list):
+        for item in node:
+            apply_resolved_font_faces(item)
+
+
 def title_overlay_to_ir(
     title: TitleOverlay,
     scheme: SubtitleStyleScheme | None,
@@ -263,12 +329,12 @@ def gpu_unsupported_features(
     if style.entry_anim not in {
         "none", "fade", "slide_in", "rise", "char_fade", "char_drip", "spin_flip", "utopia",
         "tracking_in", "wave_in", "stretch_in", "glow_in", "assemble_in",
-        "sparkle", "ripple", "note",
+        "sparkle", "ripple", "note", "petal",
     } or (
         style.exit_anim not in {
             "none", "fade", "slide_out", "rise", "char_fade", "char_drip", "spin_flip", "utopia",
             "scatter_out", "converge_out", "stretch_out", "glow_out", "dissolve_out",
-            "sparkle", "ripple", "note",
+            "sparkle", "ripple", "note", "petal",
         }
     ):
         reasons.append("line_animation")
@@ -320,6 +386,7 @@ def gpu_unsupported_features(
                     "sparkle",
                     "ripple",
                     "note",
+                    "petal",
                 }:
                     reasons.append("line_animation_override")
     # 标题图片导唱符（2026-09 新增）由 GPU sidecar 原生渲染（gpu_scene_projection

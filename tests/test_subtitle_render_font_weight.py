@@ -57,27 +57,61 @@ def _require_family(family: str) -> None:
         pytest.skip(f"font family not installed: {family}")
 
 
-def test_static_multiface_family_pins_exact_and_nearest():
-    _require_family("Yu Gothic")
-    faces = physical_weight_styles("Yu Gothic")
-    weights = [weight for weight, _name in faces]
-    assert 400 in weights and 700 in weights
+_YUGOTH_FONT_PATH = r"C:\Windows\Fonts\YuGothR.ttc"
 
-    exact = resolve_weight_plan("Yu Gothic", 400)
+
+def _register_yu_gothic() -> str:
+    if not os.path.exists(_YUGOTH_FONT_PATH):
+        pytest.skip("Yu Gothic font file not present")
+    QFontDatabase.addApplicationFont(_YUGOTH_FONT_PATH)
+    family = "Yu Gothic"
+    _require_family(family)
+    return family
+
+
+def test_static_multiface_family_pins_exact_and_missing():
+    family = _register_yu_gothic()
+    faces = physical_weight_styles(family)
+    weights = [weight for weight, _name in faces]
+    assert 400 in weights
+
+    exact = resolve_weight_plan(family, 400)
     assert exact.style_name is not None
     assert exact.base_weight == 400
     assert exact.synthetic_bold is False
     assert exact.mark is None
 
-    missing = resolve_weight_plan("Yu Gothic", 600)
-    assert missing.style_name is not None
+    # 缺档 600：以实测的 Qt 实际选择为权威（合成或就近随平台字体库而变，
+    # 由指纹实测；跨环境一致性由下方的「复现不变量」用例保证）。
+    missing = resolve_weight_plan(family, 600)
     assert missing.base_weight in weights
-    assert missing.synthetic_bold is False
-    assert missing.mark == "就近"
+    assert missing.mark in {"模拟", "就近"}
+    assert (missing.mark == "模拟") == missing.synthetic_bold
 
-    font = build_weight_font("Yu Gothic", 64, 600)
-    assert font.styleName() == missing.style_name
-    assert QFontInfo(font).styleName() == missing.style_name
+
+@pytest.mark.skipif(
+    not os.path.exists(_YUGOTH_FONT_PATH), reason="Yu Gothic font file not present"
+)
+def test_missing_weight_plan_reproduces_plain_qt_rendering(qapp):
+    """指纹解析的核心不变量：按 plan 构造的字体与「交给 Qt 决定」的字体
+    逐字 advance + 墨迹完全一致（否则 CPU/GPU 分叉）。"""
+    family = _register_yu_gothic()
+    probe = QFont(family)
+    probe.setPixelSize(48)
+    probe.setWeight(QFont.Weight(600))
+    plain_metrics = QFontMetrics(probe)
+    plan = resolve_weight_plan(family, 600)
+    planned = build_weight_font(family, 48, 600)
+    planned_metrics = QFontMetrics(planned)
+    for text in ("Ag0Wg指あソ", "歌詞表示"):
+        for index, char in enumerate(text):
+            assert planned_metrics.horizontalAdvance(
+                char
+            ) == plain_metrics.horizontalAdvance(char), (text, index)
+    assert QFontInfo(planned).styleName() in {
+        QFontInfo(probe).styleName(),
+        plan.style_name,
+    }
 
 
 def test_static_single_face_family_simulates_bold_only_above_600():

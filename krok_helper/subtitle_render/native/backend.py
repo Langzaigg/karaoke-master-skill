@@ -25,6 +25,7 @@ from typing import Any, Callable
 import numpy as np
 
 from krok_helper.subtitle_render.engine.render.render_ir import build_render_ir
+from krok_helper.subtitle_render.native.protocol import apply_resolved_font_faces
 from krok_helper.subtitle_render.domain.timing import TimingTrack
 from krok_helper.subtitle_render.domain.models import Style
 
@@ -978,6 +979,9 @@ class NativeRendererProcess:
             # 分别表示仅标题或仅上色变化，歌词布局计划按签名复用。
             ir_kwargs["relayout_scope"] = relayout_scope
         ir = build_render_ir(track, style, **ir_kwargs)
+        # 统一字重解析的生效结果（face 字重 + 模拟标志）随 IR 下发，
+        # GPU 端按显式决策建 face，不再独立匹配（见 protocol.py 注释）。
+        apply_resolved_font_faces(ir)
         if progress is not None:
             # IR（Python 侧整轨重排）完成、即将进入 sidecar 场景构建等待。
             progress()

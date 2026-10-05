@@ -35,7 +35,7 @@ import struct
 import threading
 from dataclasses import dataclass
 
-from PyQt6.QtGui import QFont, QFontDatabase, QRawFont
+from PyQt6.QtGui import QFont, QFontDatabase, QFontInfo, QFontMetrics, QPainterPath, QRawFont
 
 _AXIS_TAG_WEIGHT = b"wght"
 
@@ -89,6 +89,7 @@ class FontWeightPlan:
 
 _AXIS_CACHE: dict[str, dict[bytes, WeightAxis] | None] = {}
 _FACE_CACHE: dict[str, tuple[tuple[int, str, bool], ...]] = {}
+_PLAN_CACHE: dict[tuple[str, int, bool], FontWeightPlan] = {}
 _LOCK = threading.Lock()
 
 
@@ -97,6 +98,7 @@ def clear_font_weight_cache() -> None:
     with _LOCK:
         _AXIS_CACHE.clear()
         _FACE_CACHE.clear()
+        _PLAN_CACHE.clear()
 
 
 def _parse_fvar(raw: bytes) -> dict[bytes, WeightAxis] | None:
@@ -195,11 +197,102 @@ def physical_weight_styles(family: str) -> tuple[tuple[int, str], ...]:
     return tuple(sorted(seen.items()))
 
 
+# 指纹探测：多字号 + advance + 墨迹包围盒。双字号是为了打断单字号的
+# 取整碰撞（Yu Gothic UI 的 Semibold/Bold 在 62px 的 advance 完全相同），
+# 拉丁大小写/数字 + 假名/汉字的混合串保证不同字重实例必然分离。
+_FINGERPRINT_TEXT = "Ag0Wg指あソ"
+_FINGERPRINT_SIZES = (40, 41)
+
+
+def _font_fingerprint(font: QFont) -> tuple:
+    signature: list = []
+    for size in _FINGERPRINT_SIZES:
+        font.setPixelSize(size)
+        metrics = QFontMetrics(font)
+        signature.extend(metrics.horizontalAdvance(ch) for ch in _FINGERPRINT_TEXT)
+        path = QPainterPath()
+        path.addText(0.0, 0.0, font, _FINGERPRINT_TEXT)
+        rect = path.boundingRect()
+        signature.extend(
+            (round(rect.left() * 8), round(rect.top() * 8),
+             round(rect.right() * 8), round(rect.bottom() * 8))
+        )
+    font.setPixelSize(_FINGERPRINT_SIZES[0])
+    return tuple(signature)
+
+
+def _resolve_missing_static_weight(
+    family: str,
+    inventory: tuple[tuple[int, str, bool], ...],
+    bucket: int,
+    italic: bool,
+) -> tuple[int, str, bool] | None:
+    """实测 Qt 对缺失档的实际渲染目标：``(face字重, styleName, 是否合成)``。
+
+    Qt 对静态族缺失字重的选择（就近吸附 vs 某个基 face + 合成粗体）由
+    其内部匹配器打分决定，跨族结构不可预测也读不回来（QFontInfo/QRawFont
+    只回显请求）。这里用公开 API 实测：把「交给 Qt 决定」的字体与每个
+    候选 face 的「真实渲染 / 钉扎+加粗」构造做逐字 advance + 墨迹指纹
+    比对，匹配者即 Qt 的实际选择。无匹配（字体被替换 / 度量异常）返回
+    None，由调用方走就近吸附兜底。
+    """
+    plain = QFont(family)
+    plain.setWeight(QFont.Weight(bucket))
+    if italic:
+        plain.setItalic(True)
+    if QFontInfo(plain).family().casefold() != family.casefold():
+        # 族名解析失败会静默替换默认字体，指纹毫无意义。
+        return None
+    target = _font_fingerprint(plain)
+
+    candidates = [
+        (weight, style) for weight, style, face_italic in inventory
+        if face_italic == italic
+    ] or [(weight, style) for weight, style, _face_italic in inventory]
+
+    synthetic_hits: list[tuple[int, str]] = []
+    real_hits: list[tuple[int, str]] = []
+    for weight, style in candidates:
+        font = QFont(family)
+        font.setStyleName(style)
+        if italic:
+            font.setItalic(True)
+        if _font_fingerprint(font) == target:
+            real_hits.append((weight, style))
+            continue
+        if weight < bucket:
+            font.setWeight(QFont.Weight(bucket))
+            if _font_fingerprint(font) == target:
+                synthetic_hits.append((weight, style))
+    if real_hits:
+        # 多个真实 face 指纹相同（理论上的同度量实例）：取字重最近者。
+        best = min(real_hits, key=lambda item: (abs(item[0] - bucket), item[0]))
+        return best[0], best[1], False
+    if synthetic_hits:
+        best = min(synthetic_hits, key=lambda item: (abs(item[0] - bucket), item[0]))
+        return best[0], best[1], True
+    return None
+
+
 def resolve_weight_plan(
     family: str, weight: int, italic: bool = False
 ) -> FontWeightPlan:
     """(family, 请求字重, 请求斜体) → 权威渲染计划。"""
     requested = int(weight)
+    cache_key = (str(family), requested, bool(italic))
+    with _LOCK:
+        cached_plan = _PLAN_CACHE.get(cache_key)
+    if cached_plan is not None:
+        return cached_plan
+    plan = _compute_weight_plan(family, requested, bool(italic))
+    with _LOCK:
+        _PLAN_CACHE[cache_key] = plan
+    return plan
+
+
+def _compute_weight_plan(
+    family: str, requested: int, italic: bool
+) -> FontWeightPlan:
     axis = family_weight_axis(family)
     if axis is not None:
         value = min(max(float(requested), axis.minimum), axis.maximum)
@@ -217,7 +310,7 @@ def resolve_weight_plan(
     inventory = face_inventory(family)
     # 斜体请求优先斜体 face；族内没有斜体 face 时回退直立 face 并由
     # 调用方的 setItalic 走合成斜体（与旧解析行为一致）。
-    selected = [face for face in inventory if face[2] == bool(italic)]
+    selected = [face for face in inventory if face[2] == italic]
     if not selected and italic:
         selected = list(inventory)
     if not selected:
@@ -244,19 +337,23 @@ def resolve_weight_plan(
             italic=bool(italic),
         )
 
-    single_weight, single_style, _single_italic = selected[0]
-    if len(selected) == 1 and bucket >= 600 and bucket > single_weight:
+    # 缺失档：以实测的 Qt 实际渲染目标为权威（含合成粗体——旧版模拟
+    # 字重语义；Qt 选哪个基 face 跨族不可预测，必须指纹实测）。
+    resolved = _resolve_missing_static_weight(family, inventory, bucket, italic)
+    if resolved is not None:
+        base_weight, style_name, synthetic = resolved
         return FontWeightPlan(
             family=family,
             requested_weight=requested,
-            style_name=single_style,
-            base_weight=single_weight,
-            synthetic_bold=True,
+            style_name=style_name,
+            base_weight=base_weight,
+            synthetic_bold=synthetic,
             enum_weight=bucket,
             italic=bool(italic),
-            mark="模拟",
+            mark="模拟" if synthetic else "就近",
         )
 
+    # 指纹无匹配（被替换字体 / 度量异常）：就近吸附兜底（平局取较轻）。
     base_weight = min(weights, key=lambda value: (abs(value - bucket), value))
     base_weight, style_name, _face_italic = selected[weights.index(base_weight)]
     return FontWeightPlan(
