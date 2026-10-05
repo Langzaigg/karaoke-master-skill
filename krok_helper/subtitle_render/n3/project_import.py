@@ -998,12 +998,12 @@ def _rebuild_sug_source(
     tags = {"custom": tag_lines} if tag_lines else None
     try:
         SugProjectParser.save(project, str(target), nicokara_tags=tags)
-    except Exception as exc:  # noqa: BLE001 — 重建失败退回原行为
+        track = timing_track_from_sug_project(
+            project, nicokara_tags=tags, base_dir=target_dir
+        )
+    except Exception as exc:  # noqa: BLE001 — 重建任何一步失败都退回原行为
         warnings.append(f"{label}无法按 N3 数据重建 .sug 字幕源（{exc}）")
         return None
-    track = timing_track_from_sug_project(
-        project, nicokara_tags=tags, base_dir=target_dir
-    )
     if has_ruby:
         warnings.append(
             f"从 N3 重建的{label}不含注音（ルビ）数据，如需注音请恢复原字幕文件"
