@@ -2334,6 +2334,60 @@ def test_build_render_ir_materializes_lit_auto_appearance():
     assert disabled_ir["style"]["lit_size"] == 7
 
 
+def test_build_render_ir_auto_size_follows_dominant_role_scheme():
+    # 「跟随字体」大小推导基准 = 主轨最高频使用的角色方案（非空白字符计数），
+    # 不是全局主样式：角色工程里画面主字号来自主导角色。IR 物化与 CPU
+    # painter（paint_frame_to_painter 入口登记）同源，native 只消费数值。
+    track = TimingTrack(
+        lines=[
+            TimingLine(
+                chars=[
+                    TimingChar("あ", 100, role_label="主"),
+                    TimingChar("い", 120, role_label="主"),
+                    TimingChar("う", 140, role_label="副"),
+                ],
+                end_ms=500,
+            )
+        ]
+    )
+    style = Style(
+        font_size_px=100,
+        stroke_width_px=0,
+        volume_enabled=True,
+        volume_appearance_mode="auto",
+        lit_enabled=True,
+        lit_style="circle",
+        lit_appearance_mode="auto",
+        custom_style_schemes={
+            "主": SubtitleStyleScheme(font_size_px=200),
+            "副": SubtitleStyleScheme(font_size_px=40),
+        },
+    )
+
+    ir = build_render_ir(track, style, width=640, height=360, fps=30)
+
+    # 主导角色「主」字号 200：整体高度/灯边长 = 200 × 50% = 100。
+    assert ir["style"]["volume_size"] == 100
+    assert ir["style"]["lit_size"] == 100
+    # 无角色字符占多数时基准回到全局主样式（100 × 50% = 50，旧口径）。
+    plain_ir = build_render_ir(
+        TimingTrack(
+            lines=[
+                TimingLine(
+                    chars=[TimingChar("あ", 100), TimingChar("い", 120)],
+                    end_ms=500,
+                )
+            ]
+        ),
+        style,
+        width=640,
+        height=360,
+        fps=30,
+    )
+    assert plain_ir["style"]["volume_size"] == 50
+    assert plain_ir["style"]["lit_size"] == 50
+
+
 def test_build_render_ir_carries_role_appearance_sources():
     # role 外观档（复用配色方案）：大小推导同 auto 物化成数值；来源名与
     # 方案表原样下发——native 端按名解析装饰源（gpu_scene_projection 的

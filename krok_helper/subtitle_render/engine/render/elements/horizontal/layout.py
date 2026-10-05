@@ -136,11 +136,16 @@ def signal_band_left_local(
     # 函数内导入：elements.signal 经 horizontal 包 __init__ 反向依赖本模块，
     # 顶层导入成环。
     from krok_helper.subtitle_render.engine.render.elements.signal import (
+        signal_auto_basis,
         volume_signal_geometry,
         volume_style,
     )
 
-    geometry = volume_signal_geometry(volume_style(style))
+    # auto 档柱体尺寸与 Painter 布局/绘制同基准（主轨最高频角色方案；
+    # paint/边界分析入口已登记，未登记场景回退全局主样式）。
+    geometry = volume_signal_geometry(
+        volume_style(style, auto_basis=signal_auto_basis(style))
+    )
     return (
         float(style.volume_offset_x)
         - geometry.group_width

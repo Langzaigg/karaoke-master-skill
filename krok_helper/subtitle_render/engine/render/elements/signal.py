@@ -59,8 +59,10 @@ from krok_helper.subtitle_render.engine.render.effects.metrics import (
 from krok_helper.subtitle_render.engine.render.effects.raster import (
     paint_text_layer_stack,
 )
+from krok_helper.subtitle_render.engine.layout.layout_context import _LAYOUT_PASS
 from krok_helper.subtitle_render.engine.style.style_semantics import (
     appearance_role_source,
+    auto_appearance_basis,
     effective_karaoke_colors,
     style_for_role,
 )
@@ -158,14 +160,15 @@ SignalLineMeasurer = Callable[
 ]
 
 
-def volume_style(style: Style) -> Style:
+def volume_style(style: Style, *, auto_basis: Style | None = None) -> Style:
     """Project independent volume controls onto the legacy signal renderer.
 
     auto 外观模式在这里先行物化（大小/颜色跟随主文字），保证布局 union、
     绘制与 native IR（render_ir 同样经过 resolve_volume_appearance）三处
-    消费到同一组数值。
+    消费到同一组数值。``auto_basis`` 是「跟随字体」推导源（主轨最高频
+    角色方案），与 render_ir / painter 布局入口同源传入。
     """
-    style = resolve_volume_appearance(style)
+    style = resolve_volume_appearance(style, auto_basis=auto_basis)
     return replace(
         style,
         lit_enabled=True,
@@ -176,6 +179,29 @@ def volume_style(style: Style) -> Style:
         lit_stroke_width=style.volume_stroke_width,
         lit_opacity_pct=style.volume_opacity_pct,
     )
+
+
+def set_signal_auto_basis(style: Style, primary_track: TimingTrack | None) -> None:
+    """渲染入口登记「跟随字体」大小推导基准（主轨最高频角色方案）。
+
+    只在排版区间内生效（区间外是独立工具调用，回退全局主样式旧口径）。
+    基准以 ``id(style)`` 为键：入口做完输出高度换算后传入换算后的 style
+    对象，深处的物化点用同一个对象取值。每帧一次计数，区间内复用。
+    """
+    cache = getattr(_LAYOUT_PASS, "signal_auto_basis", None)
+    if cache is None:
+        return
+    basis = auto_appearance_basis(style, primary_track)
+    cache[id(style)] = basis
+    _LAYOUT_PASS.signal_auto_basis_refs.append(style)
+
+
+def signal_auto_basis(style: Style) -> Style | None:
+    """读取当前排版区间登记的推导基准；未登记返回 ``None``（旧口径）。"""
+    cache = getattr(_LAYOUT_PASS, "signal_auto_basis", None)
+    if cache is None:
+        return None
+    return cache.get(id(style))
 
 
 def signal_stroke_extent(style: Style, *, is_volume: bool) -> float:
@@ -1975,12 +2001,19 @@ def resolve_signal_layers(
 ) -> list[SignalLitsLayer]:
     styles: list[Style] = []
     legacy_volume = style.lit_enabled and style.lit_style == "volume"
+    # 「跟随字体」大小推导基准（主轨最高频角色方案）：布局 union、绘制与
+    # native IR（render_ir 显式传基准）三处同源。
+    auto_basis = signal_auto_basis(style)
     if style.volume_enabled or legacy_volume:
-        styles.append(volume_style(style) if style.volume_enabled else style)
+        styles.append(
+            volume_style(style, auto_basis=auto_basis)
+            if style.volume_enabled
+            else style
+        )
     if style.lit_enabled and not legacy_volume:
         # auto 外观（大小/颜色跟随主文字）在这里物化，与 painter 布局、
         # native IR（render_ir 同门）消费同一组数值。
-        styles.append(resolve_lit_appearance(style))
+        styles.append(resolve_lit_appearance(style, auto_basis=auto_basis))
     layers: list[SignalLitsLayer] = []
     for active_style in styles:
         metrics = signal_layout_metrics(active_style)
@@ -2066,7 +2099,7 @@ def active_lit_indices(
     # 独立音量柱工程的 lit_style 是形状灯值，必须先投影到 volume 口径，
     # 否则会按形状灯的尺寸/时序参数计算活跃索引。
     if style.volume_enabled:
-        style = volume_style(style)
+        style = volume_style(style, auto_basis=signal_auto_basis(style))
     is_volume = style.lit_style == "volume"
     groups = resolve_signal_lit_groups(
         track,

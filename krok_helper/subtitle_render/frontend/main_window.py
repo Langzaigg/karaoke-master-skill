@@ -3537,6 +3537,9 @@ class SubtitleRenderWindow(QWidget):
         self._property_panel.set_n3_template_lyrics_directory(
             source_path.parent if source_path is not None else None
         )
+        # 「跟随字体」大小推导基准随主轨内容变化：换轨/开工程在这里重推，
+        # 后续角色标注编辑走 _refresh_after_role_labels_changed 等漏斗。
+        self._property_panel.set_auto_appearance_track(track)
         self._active_source_index = 0
         self._active_title_index = None
         # 换字幕源后旧的行索引全部失效
@@ -7727,6 +7730,9 @@ class SubtitleRenderWindow(QWidget):
             return
         self._lyrics_panel.set_track(track)
         self._lyrics_panel.set_role_options(self._merged_role_options())
+        # 导唱符编辑会连带逐字角色标签，「跟随字体」推导基准可能翻转，
+        # 面板 auto 档回显同源重算。
+        self._property_panel.set_auto_appearance_track(self._timing_track)
         if self._active_source_index == 0:
             self._preview_panel.set_track(track)
         else:
@@ -7971,6 +7977,10 @@ class SubtitleRenderWindow(QWidget):
             self._preview_panel.set_track(self._timing_track)
         else:
             self._sync_extra_tracks_to_preview()
+        # 角色分布变了，「跟随字体」的推导基准（主轨最高频角色方案）可能
+        # 翻转——面板 auto 档回显跟着重算（副轨编辑对主轨基准无影响，重推
+        # 幂等）。
+        self._property_panel.set_auto_appearance_track(self._timing_track)
         affected_rows = (rows,) if isinstance(rows, int) else rows
         for row in affected_rows:
             self._lyrics_panel.refresh_row_role(row)
@@ -7996,6 +8006,7 @@ class SubtitleRenderWindow(QWidget):
             self._sync_extra_tracks_to_preview()
         if track_index == self._active_source_index:
             self._lyrics_panel.refresh_row_role(row)
+        self._property_panel.set_auto_appearance_track(self._timing_track)
         self._mark_project_dirty()
         return True
 
@@ -8029,6 +8040,7 @@ class SubtitleRenderWindow(QWidget):
         if track_index == self._active_source_index:
             for row in rows:
                 self._lyrics_panel.refresh_row_role(row)
+        self._property_panel.set_auto_appearance_track(self._timing_track)
         self._mark_project_dirty()
         return True
 

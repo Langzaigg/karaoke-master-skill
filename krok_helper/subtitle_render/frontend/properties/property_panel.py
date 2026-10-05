@@ -226,7 +226,10 @@ from krok_helper.subtitle_render.settings.screen import (
     screen_settings_to_dict,
 )
 from krok_helper.subtitle_render.engine.timing.timecode import format_timecode_ms, parse_timecode_ms
-from krok_helper.subtitle_render.engine.style.style_semantics import style_for_role
+from krok_helper.subtitle_render.engine.style.style_semantics import (
+    auto_appearance_basis,
+    style_for_role,
+)
 from krok_helper.subtitle_render.engine.text.font_weight import (
     physical_weight_styles,
     resolve_weight_plan,
@@ -688,6 +691,10 @@ class PropertyPanel(QWidget):
         super().__init__(parent)
         self._style = Style()
         self._syncing = False
+        # 「跟随字体」大小推导基准的主轨引用（auto/role 档回显与渲染同源，
+        # 见 auto_appearance_basis）；None = 尚未收到轨道，回显用全局主样式
+        # 旧口径。引用不拥有轨道——内容变更由宿主重推。
+        self._auto_appearance_track = None
         # 时间卡片按轴上下文：names[0] 恒为主字幕槽位（分轴时显示「主字幕
         # （分组名）」）；follows/override_views 与副字幕源一一对应。宿主经
         # set_timing_context 推送；源增删/重排后 scope 重置为 0，杜绝把 A 轴
@@ -1266,6 +1273,21 @@ class PropertyPanel(QWidget):
         self._sync_font_preview()
         if emit:
             self.styleChanged.emit(self._style)
+
+    def set_auto_appearance_track(self, track: object) -> None:
+        """推送「跟随字体」大小推导基准的主轨（auto/role 档回显同源渲染）。
+
+        轨道内容或角色标注变化后由宿主重推（轨道对象就地修改，不能做
+        身份短路）；面板重刷指示灯/音量柱的 auto 档回显推导值——尺寸
+        spin 在 auto/role 档停用，纯回显，不会打断输入中的控件。
+        """
+        self._auto_appearance_track = track
+        if self._style_synced:
+            self._syncing = True
+            try:
+                self._sync_lit_controls()
+            finally:
+                self._syncing = False
 
     def set_rescaled_style(self, style: Style) -> None:
         """Apply an output-height rescale without rewriting unrelated controls.
@@ -4532,8 +4554,13 @@ class PropertyPanel(QWidget):
         ):
             control.setEnabled(image_mode)
         # auto/role 模式下大小/颜色由主文字推导：控件停用但回显推导值，让
-        # 用户看到「自动配合字体」实际产出的数字与颜色。
-        lit_display_style = resolve_lit_appearance(self._style)
+        # 用户看到「自动配合字体」实际产出的数字与颜色。推导基准 = 主轨
+        # 最高频角色方案（与渲染入口同一口径，宿主经 set_auto_appearance_track
+        # 推送轨道；未推送时回退全局主样式）。
+        lit_auto_basis = auto_appearance_basis(self._style, self._auto_appearance_track)
+        lit_display_style = resolve_lit_appearance(
+            self._style, auto_basis=lit_auto_basis
+        )
         lit_manual = self._style.lit_appearance_mode == "custom"
         self._lit_appearance_mode_combo.setCurrentIndex(
             max(
@@ -4597,8 +4624,11 @@ class PropertyPanel(QWidget):
             )
         )
         # auto/role 模式下大小/颜色由主文字推导：控件停用但回显推导值，让
-        # 用户看到「自动配合字体」实际产出的数字与颜色。
-        volume_display_style = resolve_volume_appearance(self._style)
+        # 用户看到「自动配合字体」实际产出的数字与颜色（基准同上：主轨
+        # 最高频角色方案）。
+        volume_display_style = resolve_volume_appearance(
+            self._style, auto_basis=lit_auto_basis
+        )
         volume_manual = self._style.volume_appearance_mode == "custom"
         volume_role = self._style.volume_appearance_mode == "role"
         if hasattr(self, "_volume_role_combo"):

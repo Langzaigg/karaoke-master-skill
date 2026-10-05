@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections import Counter
 from dataclasses import replace
 
 from krok_helper.subtitle_render.domain.paint import (
@@ -133,6 +134,37 @@ def style_for_role(style: Style, role_label: str | None) -> Style:
     if not changes:
         return style
     return replace(style, **changes)
+
+
+def auto_appearance_basis(style: Style, track: object) -> Style:
+    """「跟随字体」（auto/role 外观档）大小推导的基准样式。
+
+    主轨每个非空白字符按 ``role_label`` 归桶（未命中 ``custom_style_schemes``
+    的标签与无标签一并计入全局默认桶）；最高频桶命中真实角色方案时返回
+    ``style_for_role(style, name)`` 叠加后的完整样式，否则原样返回全局样式。
+    平票取先出现者（Counter 首遇序），对同一轨道稳定。
+
+    为什么是「项目最高频角色」而不是全局主样式：指示灯/音量柱的 auto 档
+    大小要「配合实际唱到的字」，而角色项目的正文大多逐字挂着角色方案，
+    全局主样式的字号可能与画面主字号差一截。为什么只数主轨：auto 档大小
+    是场景级单值（native IR 只物化一份、所有字幕源共用），副字幕源的
+    角色分布不该劫持主歌词的画面口径。
+    """
+    schemes = style.custom_style_schemes
+    counts: Counter = Counter()
+    for line in getattr(track, "lines", None) or ():
+        for char in getattr(line, "chars", None) or ():
+            text = getattr(char, "text", "")
+            if not text or text.isspace():
+                continue
+            label = getattr(char, "role_label", None)
+            counts[label if label in schemes else None] += 1
+    if not counts:
+        return style
+    dominant, _ = counts.most_common(1)[0]
+    if dominant is None:
+        return style
+    return style_for_role(style, dominant)
 
 
 def appearance_role_source(style: Style, role_name: str | None) -> Style | None:

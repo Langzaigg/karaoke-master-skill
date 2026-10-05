@@ -22,6 +22,10 @@ from krok_helper.subtitle_render.domain.timing import (
     guide_symbol_role_labels,
 )
 from krok_helper.subtitle_render.engine.render.effects.particles import FX_SPRITES
+from krok_helper.subtitle_render.engine.render.elements.signal import (
+    set_signal_auto_basis,
+    signal_auto_basis,
+)
 from krok_helper.subtitle_render.domain.models import (
     TITLE_SCHEME_NAME,
     Style,
@@ -204,6 +208,11 @@ def build_render_ir(
     # 局部复用仅对已知 scope 生效;未知值按全量。
     use_plan_cache = relayout_scope in {"titles", "paint"}
     with layout_pass():
+        # 「跟随字体」大小推导基准（主轨最高频角色方案）在 pass 顶部登记：
+        # IR 内不只 style 段物化尺寸，行布局（正文拓宽带/union 摆放）同样
+        # 消费信号尺寸，必须与 style 段同一基准；native 只拿物化后的数值。
+        # 主轨恒为本函数 track 参数（与 CPU paint_frame_to_painter 同口径）。
+        set_signal_auto_basis(style, track)
         # 主轨与附加轨共用一张轮廓表：同一 SVG 导唱符全片只序列化一次。
         glyph_table = VectorGlyphTable()
         fx_table = FxPayloadTable()
@@ -245,7 +254,12 @@ def build_render_ir(
             # 数值，native 端只消费数值（与 Painter 的 volume_style /
             # resolve_lit_appearance 投影同源）。
             "style": style_to_dict(
-                resolve_lit_appearance(resolve_volume_appearance(style))
+                resolve_lit_appearance(
+                    resolve_volume_appearance(
+                        style, auto_basis=signal_auto_basis(style)
+                    ),
+                    auto_basis=signal_auto_basis(style),
+                )
             ),
             # 装饰粒子 sprite 轮廓常量表（Python 单一事实源，native 不内置副本）。
             "fx_sprites": dict(FX_SPRITES),
@@ -318,6 +332,9 @@ def build_style_patch_ir(
         style_with_output_scanline(style, height), height
     )
     with layout_pass():
+        # 推导基准同 build_render_ir：差分载荷与全量 configure 必须物化出
+        # 同一组数值（含行布局的信号消费）。
+        set_signal_auto_basis(style, track)
         fx_table = FxPayloadTable()
         layout_table = LineLayoutTable() if include_placement else None
         primary_style = style_for_track(style, track)
@@ -362,6 +379,8 @@ def build_style_patch_ir(
                         layout_table=layout_table,
                     )
                 )
+        # 推导基准同 build_render_ir：主轨最高频角色方案（pass 顶部登记），
+        # 差分载荷与全量 configure 物化出同一组数值。
         return {
             "schema": RENDER_IR_SCHEMA,
             "screen": {
@@ -371,7 +390,12 @@ def build_style_patch_ir(
                 "dpr": max(float(dpr or 1.0), 0.01),
             },
             "style": style_to_dict(
-                resolve_lit_appearance(resolve_volume_appearance(style))
+                resolve_lit_appearance(
+                    resolve_volume_appearance(
+                        style, auto_basis=signal_auto_basis(style)
+                    ),
+                    auto_basis=signal_auto_basis(style),
+                )
             ),
             "titles": titles_to_ir(track, style, duration_ms=duration_ms),
             "fx_sprites": dict(FX_SPRITES),

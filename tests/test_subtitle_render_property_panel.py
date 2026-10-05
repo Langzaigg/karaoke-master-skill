@@ -2684,6 +2684,46 @@ def test_volume_auto_appearance_disables_and_displays_derived_controls(qapp):
     assert panel._volume_column_width_spin.value() == 5
 
 
+def test_auto_appearance_echo_follows_dominant_role_scheme(qapp):
+    # 「跟随字体」auto 档回显与渲染同源：宿主推送主轨后，尺寸推导基准切到
+    # 最高频角色方案（字号 200 → 灯/柱 100），不再是全局主样式（100 → 50）。
+    panel = PropertyPanel()
+    panel.set_style(
+        Style(
+            volume_enabled=True,
+            volume_appearance_mode="auto",
+            lit_enabled=True,
+            lit_style="circle",
+            lit_appearance_mode="auto",
+            font_size_px=100,
+            stroke_width_px=0,
+            custom_style_schemes={
+                "主": SubtitleStyleScheme(font_size_px=200),
+                "副": SubtitleStyleScheme(font_size_px=40),
+            },
+        )
+    )
+    # 未推送轨道：旧口径（全局主样式 100 → 50）。
+    assert panel._volume_size_spin.value() == 50
+    assert panel._lit_size_spin.value() == 50
+
+    track = TimingTrack(
+        lines=[
+            TimingLine(
+                chars=[
+                    TimingChar(text="あ", start_ms=1000, role_label="主"),
+                    TimingChar(text="い", start_ms=1100, role_label="主"),
+                    TimingChar(text="う", start_ms=1200, role_label="副"),
+                ],
+                end_ms=2000,
+            )
+        ]
+    )
+    panel.set_auto_appearance_track(track)
+    assert panel._volume_size_spin.value() == 100
+    assert panel._lit_size_spin.value() == 100
+
+
 def test_volume_auto_appearance_mode_roundtrips_through_payload():
     style = Style(
         volume_enabled=True,

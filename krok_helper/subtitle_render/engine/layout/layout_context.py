@@ -34,6 +34,8 @@ def layout_pass():
         _LAYOUT_PASS.ink_rects = {}
         _LAYOUT_PASS.sayatoo_layouts = {}
         _LAYOUT_PASS.signal_heads = {}
+        _LAYOUT_PASS.signal_auto_basis = {}
+        _LAYOUT_PASS.signal_auto_basis_refs = []
         _LAYOUT_PASS.section_edges = {}
         _LAYOUT_PASS.tracks = []
         _LAYOUT_PASS.styles = []
@@ -61,6 +63,10 @@ def layout_pass():
             _LAYOUT_PASS.ink_rects = None
             _LAYOUT_PASS.sayatoo_layouts = None
             _LAYOUT_PASS.signal_heads = None
+            # signal_auto_basis 的键含 id(style)：与 signatures 一样存住
+            # 入参防止回收后地址复用（值是 dict 强引用，无需另存）。
+            _LAYOUT_PASS.signal_auto_basis = None
+            _LAYOUT_PASS.signal_auto_basis_refs = []
             _LAYOUT_PASS.section_edges = None
             _LAYOUT_PASS.tracks = []
             _LAYOUT_PASS.styles = []

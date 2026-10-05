@@ -1721,7 +1721,9 @@ def style_for_track(style: Style, track: object) -> Style:
     return style.with_timing(**overrides)
 
 
-def volume_auto_values(style: "Style") -> dict[str, object]:
+def volume_auto_values(
+    style: "Style", *, basis: "Style | None" = None
+) -> dict[str, object]:
     """Derive auto-mode volume metrics/colors from the main lyric font.
 
     比例链默认与 N3 默认值（整体 48 : 柱宽 12，字号 100）一致：整体高度 =
@@ -1731,70 +1733,85 @@ def volume_auto_values(style: "Style") -> dict[str, object]:
     文字描边宽 × 高度比、上限半个柱宽，颜色取自文字配色矩阵），见
     ``signal._draw_volume_lit_group``。取整统一半向上（与面板浮点回显
     口径相同），避免 banker's rounding 抖动。
+
+    ``basis`` 是推导源样式：「跟随字体」要配合**画面实际主字号**，角色
+    工程里它是主轨最高频角色方案叠加后的样式（见
+    ``style_semantics.auto_appearance_basis``）；缺省用全局主样式（旧口径）。
     """
-    font_size = max(int(style.font_size_px), 1)
+    source = basis if basis is not None else style
+    font_size = max(int(source.font_size_px), 1)
     size_ratio = max(
-        int(getattr(style, "volume_auto_size_ratio_pct", 50) or 0), 1
+        int(getattr(source, "volume_auto_size_ratio_pct", 50) or 0), 1
     )
     column_ratio = max(
-        int(getattr(style, "volume_auto_column_ratio_pct", 25) or 0), 1
+        int(getattr(source, "volume_auto_column_ratio_pct", 25) or 0), 1
     )
     size = max(4, int(font_size * size_ratio / 100.0 + 0.5))
     column_width = max(1, int(size * column_ratio / 100.0 + 0.5))
     stroke_width = min(
-        max(int(int(style.stroke_width_px or 0) * size / font_size + 0.5), 0),
+        max(int(int(source.stroke_width_px or 0) * size / font_size + 0.5), 0),
         column_width // 2,
     )
     return {
         "volume_size": size,
         "volume_column_width": column_width,
         "volume_stroke_width": stroke_width,
-        "volume_fill_color": style.base_color,
-        "volume_stroke_color": style.stroke_color,
-        "volume_overlay_fill_color": style.fill_color,
-        "volume_overlay_stroke_color": style.stroke_color,
+        "volume_fill_color": source.base_color,
+        "volume_stroke_color": source.stroke_color,
+        "volume_overlay_fill_color": source.fill_color,
+        "volume_overlay_stroke_color": source.stroke_color,
     }
 
 
-def resolve_volume_appearance(style: "Style") -> "Style":
+def resolve_volume_appearance(
+    style: "Style", *, auto_basis: "Style | None" = None
+) -> "Style":
     """Return the style with auto-mode volume values materialized.
 
     仅在独立音量柱模块开启且模式为 ``auto`` / ``role`` 时替换字段（role 档
     大小推导同 auto，装饰配色由绘制端按 ``volume_role_name`` 另行解析）；
     其余情况原样返回。Python 绘制/布局（``signal.volume_style``）与 native
     IR 序列化（``render_ir``）都必须经过本函数，两条后端才会拿到同一组数值。
+    ``auto_basis`` 是推导源样式（见 ``volume_auto_values``）：painter 与
+    render_ir 两侧必须传同一份基准，两条后端才会推出同一组数值。
     """
     if not style.volume_enabled or style.volume_appearance_mode == "custom":
         return style
-    return replace(style, **volume_auto_values(style))
+    return replace(style, **volume_auto_values(style, basis=auto_basis))
 
 
-def lit_auto_values(style: "Style") -> dict[str, object]:
+def lit_auto_values(
+    style: "Style", *, basis: "Style | None" = None
+) -> dict[str, object]:
     """Derive auto-mode lamp metrics/colors from the main lyric font.
 
     灯边长 = 字号 × ``lit_auto_size_ratio_pct``（默认 50%），描边宽 =
     文字描边宽 × 灯尺寸/字号（上限半个灯宽）。auto 档的矢量灯绘制走文字
     装饰管线（全程取走字后配色），这里的物化值只服务布局度量、native IR
     与面板回显。取整统一半向上（与 ``volume_auto_values`` 口径相同）。
+    ``basis`` 语义同 ``volume_auto_values``。
     """
-    font_size = max(int(style.font_size_px), 1)
+    source = basis if basis is not None else style
+    font_size = max(int(source.font_size_px), 1)
     size_ratio = max(
-        int(getattr(style, "lit_auto_size_ratio_pct", 50) or 0), 1
+        int(getattr(source, "lit_auto_size_ratio_pct", 50) or 0), 1
     )
     size = max(4, int(font_size * size_ratio / 100.0 + 0.5))
     stroke_width = min(
-        max(int(int(style.stroke_width_px or 0) * size / font_size + 0.5), 0),
+        max(int(int(source.stroke_width_px or 0) * size / font_size + 0.5), 0),
         size // 2,
     )
     return {
         "lit_size": size,
         "lit_stroke_width": stroke_width,
-        "lit_fill_color": style.fill_color,
-        "lit_stroke_color": style.stroke_color,
+        "lit_fill_color": source.fill_color,
+        "lit_stroke_color": source.stroke_color,
     }
 
 
-def resolve_lit_appearance(style: "Style") -> "Style":
+def resolve_lit_appearance(
+    style: "Style", *, auto_basis: "Style | None" = None
+) -> "Style":
     """Return the style with auto-mode lamp values materialized.
 
     仅在形状指示灯模块开启、模式为 ``auto`` / ``role`` 且不是 legacy volume
@@ -1802,6 +1819,7 @@ def resolve_lit_appearance(style: "Style") -> "Style":
     ``lit_role_name`` 另行解析）；其余情况原样返回。Python 布局
     （``painter`` 的信号度量）、绘制（``signal``）与 native IR 序列化
     （``render_ir``）都必须经过本函数，两条后端才会拿到同一组数值。
+    ``auto_basis`` 语义同 ``resolve_volume_appearance``。
     """
     if (
         not style.lit_enabled
@@ -1809,7 +1827,7 @@ def resolve_lit_appearance(style: "Style") -> "Style":
         or style.lit_appearance_mode == "custom"
     ):
         return style
-    return replace(style, **lit_auto_values(style))
+    return replace(style, **lit_auto_values(style, basis=auto_basis))
 
 
 def style_to_dict(style: Style) -> dict:

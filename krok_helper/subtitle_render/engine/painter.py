@@ -422,8 +422,10 @@ from krok_helper.subtitle_render.engine.render.elements.signal import (
     paint_signal_lits as _paint_signal_lits_with_ports,
     resolve_signal_layers as _resolve_signal_layers_with_ports,
     resolve_signal_lit_groups as _resolve_signal_lit_groups,
+    set_signal_auto_basis as _set_signal_auto_basis,
     shape_active_index_and_phase as _shape_active_index_and_phase,
     signal_layout_metrics as _signal_layout_metrics,
+    signal_auto_basis as _signal_auto_basis,
     signal_lit_x as _signal_lit_x,
     signal_lit_y as _signal_lit_y,
     signal_local_x as _signal_local_x,
@@ -891,6 +893,9 @@ def frame_content_intervals(
     # 替换），这里统一包一层 pass 并注册标记，保证与绘制同一套结果。
     with layout_pass():
         _register_section_edge_contexts(track, style, extra_tracks)
+        # 边界含信号层：灯/柱尺寸必须与绘制同基准（主轨最高频角色方案），
+        # 否则导出裁条按旧尺寸裁切会把 auto 档灯组裁掉一截。
+        _set_signal_auto_basis(style, track)
         return _analyze_frame_content_intervals(
             logical_w,
             logical_h,
@@ -922,6 +927,8 @@ def frame_vertical_bounds(
     """
     with layout_pass():
         _register_section_edge_contexts(track, style, extra_tracks)
+        # 同 frame_content_intervals：边界与绘制共用信号尺寸基准。
+        _set_signal_auto_basis(style, track)
         return _analyze_frame_vertical_bounds(
             logical_w,
             logical_h,
@@ -997,6 +1004,11 @@ def paint_frame_to_painter(
         style_with_output_scanline(style, logical_h), logical_h
     )
     with layout_pass():
+        # 「跟随字体」大小推导基准（主轨最高频角色方案）在区间顶部登记一次，
+        # 深处的信号布局/绘制物化点经 _signal_auto_basis 取同一份；主轨恒为
+        # 本函数的 track 参数——native IR 只物化一份基准值给全部字幕源，
+        # CPU 侧副轨也必须用主轨基准，两后端才会一致。
+        _set_signal_auto_basis(style, track)
         if track is not None:
             _paint_track_to_painter(
                 painter,
@@ -2156,10 +2168,12 @@ def _resolve_sayatoo_line_layouts(
     # 只有音量柱插入字幕行首并参与 union；形状灯悬浮，不改变文字布局。
     # 形状灯 auto 外观（灯大小跟随主文字字号）在这里物化：signal_y 的
     # y 锚点要拿推导后的灯尺寸（与 signal.resolve_signal_layers 同门）。
+    # 推导基准同入口登记的主轨最高频角色方案（无登记时回退全局主样式）。
+    _auto_basis = _signal_auto_basis(style)
     signal_layout_style = (
-        _volume_style(style)
+        _volume_style(style, auto_basis=_auto_basis)
         if style.volume_enabled
-        else resolve_lit_appearance(style)
+        else resolve_lit_appearance(style, auto_basis=_auto_basis)
     )
     signal_metrics = (
         _signal_layout_metrics(signal_layout_style)

@@ -2030,6 +2030,101 @@ def test_lit_auto_size_ratio_scales_geometry(qapp):
     assert tiny.lit_size == 5
 
 
+def test_auto_appearance_basis_counts_dominant_role():
+    # 「跟随字体」大小推导基准的计数口径：主轨非空白字符按角色归桶，
+    # 未命中方案表（含无标签）计入全局默认桶；最高频桶命中真实方案时
+    # 叠加该方案，否则原样返回全局样式（旧口径零开销路径）。
+    from krok_helper.subtitle_render.engine.style.style_semantics import (
+        auto_appearance_basis,
+    )
+
+    style = Style(
+        custom_style_schemes={
+            "主": SubtitleStyleScheme(font_size_px=200),
+            "副": SubtitleStyleScheme(font_size_px=40),
+        }
+    )
+
+    def track(*labels: str | None) -> TimingTrack:
+        return TimingTrack(
+            lines=[
+                TimingLine(
+                    chars=[
+                        TimingChar(text="あ", start_ms=1000, role_label=label)
+                        for label in labels
+                    ],
+                    end_ms=2000,
+                )
+            ]
+        )
+
+    dominant = auto_appearance_basis(style, track("主", "主", "副"))
+    assert dominant.font_size_px == 200
+    # 无标签占多数 → 全局默认桶胜出。
+    plain = auto_appearance_basis(style, track(None, "主"))
+    assert plain is style
+    # 未知标签（方案表悬空）与无标签同桶，不影响主导方案胜出。
+    unknown = auto_appearance_basis(style, track("幽灵", "幽灵", "主", "主", "主"))
+    assert unknown.font_size_px == 200
+    ghost_majority = auto_appearance_basis(style, track("幽灵", "幽灵", "主"))
+    assert ghost_majority is style
+    # 空白字符不计数：唯一非空白字符挂「副」。
+    spaced = TimingTrack(
+        lines=[
+            TimingLine(
+                chars=[
+                    TimingChar(text=" ", start_ms=1000, role_label="主"),
+                    TimingChar(text="あ", start_ms=1000, role_label="副"),
+                ],
+                end_ms=2000,
+            )
+        ]
+    )
+    assert auto_appearance_basis(style, spaced).font_size_px == 40
+
+
+def test_volume_auto_size_follows_dominant_role_scheme(qapp):
+    # 「跟随字体」物化走主轨最高频角色方案（不是全局主样式）：主导字号
+    # 更大 → 柱组更宽 → union 宽度更大、柱组左缘更靠左（居中行里柱体向
+    # 左扩、文字锚定不动）。paint_frame_to_painter 入口登记基准，这里走
+    # 同一登记 + 布局通道验证。
+    from krok_helper.subtitle_render.engine.layout.layout_context import layout_pass
+    from krok_helper.subtitle_render.engine.render.elements.signal import (
+        set_signal_auto_basis,
+    )
+
+    def layout_with(dominant_font: int):
+        track = TimingTrack(
+            lines=[
+                TimingLine(
+                    chars=[TimingChar(text="あ", start_ms=1000, role_label="主")],
+                    end_ms=2000,
+                )
+            ]
+        )
+        style = Style(
+            font_size_px=32,
+            volume_enabled=True,
+            volume_appearance_mode="auto",
+            volume_duration_ms=1000,
+            volume_waiting_time_ms=0,
+            volume_time_offset_ms=0,
+            custom_style_schemes={
+                "主": SubtitleStyleScheme(font_size_px=dominant_font)
+            },
+        )
+        with layout_pass():
+            set_signal_auto_basis(style, track)
+            layout = _sayatoo_layout_for(track, style, 500)
+        assert layout.signal_x is not None
+        return layout
+
+    big = layout_with(64)
+    small = layout_with(16)
+    assert big.total_w > small.total_w
+    assert big.signal_x < small.signal_x
+
+
 def _lit_auto_pixel_base(**overrides) -> dict:
     base = dict(
         font_size_px=32,
