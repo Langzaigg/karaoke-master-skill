@@ -1027,8 +1027,13 @@ def _run_with_diagnostics(args, run_func, *run_args, **run_kwargs):
     return code
 
 
-def _cleanup_workbench_temp_workdir(work_dir) -> None:
-    """Preserve parts handed off by the main app while cleaning other stale files."""
+def _cleanup_workbench_temp_workdir(work_dir, keep_parts_version: str = "") -> None:
+    """Preserve parts handed off by the main app while cleaning other stale files.
+
+    ``keep_parts_version``（SUG 2026-10 起在 run() 启动期清理传入）透传给原始
+    清理函数；被 handoff 保住的 parts/ 不按版本删，_download_part 复用前仍会
+    校验内容哈希，过期版本缓存会在校验失败时被删除。
+    """
     global _blocked_lock
     _blocked_lock = None  # run() 开头会调用本函数，顺带复位上一次运行的占用记录
 
@@ -1048,7 +1053,7 @@ def _cleanup_workbench_temp_workdir(work_dir) -> None:
             return
 
     try:
-        _original_cleanup_temp_workdir(work_dir)
+        _original_cleanup_temp_workdir(work_dir, keep_parts_version=keep_parts_version)
     finally:
         if preserved and handoff_dir.exists():
             try:

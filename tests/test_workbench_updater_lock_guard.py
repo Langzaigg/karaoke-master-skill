@@ -552,6 +552,16 @@ def test_cleanup_workbench_temp_workdir_resets_blocked_lock(tmp_path: Path) -> N
     assert workbench_updater._blocked_lock is None
 
 
+def test_cleanup_workbench_temp_workdir_accepts_keep_parts_version(
+    tmp_path: Path,
+) -> None:
+    # SUG run() 自 2026-10 起在启动期清理传入 keep_parts_version，包装函数
+    # 不接受该参数会直接 TypeError（更新器未处理异常，rc=99）。
+    workbench_updater._cleanup_workbench_temp_workdir(
+        tmp_path, keep_parts_version="4.3.5"
+    )
+
+
 def test_classify_lock_entries_uses_image_name_and_protects_critical(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
