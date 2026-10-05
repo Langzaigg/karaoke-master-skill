@@ -1767,9 +1767,10 @@ def test_n3_import_with_missing_lyrics_rebuilds_sug_end_to_end(
     assert win._subtitle_path == sug
     track = win._timing_track
     assert track is not None
-    assert [line.is_blank for line in track.lines] == [False, True, False]
+    # Kind2 不产生空行（N3 实测 LRC 0 空行），分页语义走 break payload
+    assert [line.is_blank for line in track.lines] == [False, False]
     # 行级数据按 N3 记录恢复：分页 / 布局 / 逐字配色 / 逐字起点
-    assert track.lines[2].break_before == "page"
+    assert track.lines[1].break_before == "page"
     assert track.lines[0].layout_index == 1
     assert [char.role_label for char in track.lines[0].chars] == [
         "標準配色",

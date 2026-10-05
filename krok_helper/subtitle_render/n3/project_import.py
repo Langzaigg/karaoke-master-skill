@@ -32,9 +32,12 @@
 字幕源自适应（2026-10）：字幕文件丢失、解析失败或行数与 N3 记录不一致时，
 以 n3proj 内嵌的 ``LineInfos``（逐字文本 + 逐字时间）为准，物化成
 ``<原文件名>_从N3重建.sug`` 落在 n3proj 同目录并让工程字幕源改指它——
-后续保存/重载走 SUG 高保真路径，不再经历 LRC 有损往返（ruby 除外，见
-:func:`_sug_project_from_n3`）。原字幕文件一律不改动。重建不可行时退回
-按行文本 LCS 对齐的兜底路径（能对上的行照常导入行级数据）。
+后续保存/重载走 SUG 高保真路径，不再经历 LRC 有损往返。原字幕文件一律不
+改动。重建管线：N3 行数据 → 合成 Nicokara LRC 文本（共享块/停顿/行末/标签
+段按 N3 实际导出约定，见 :func:`_n3_lrc_body_line`；``AtTagsForSave`` 尾部
+原样接回，含 ``@RubyN``）→ SUG 官方 ``NicokaraParser`` → Project → 落盘，
+ruby/演唱者/mora 与「SUG 导出 LRC 再导入」同构。重建不可行时退回按行文本
+LCS 对齐的兜底路径（能对上的行照常导入行级数据）。
 """
 
 from __future__ import annotations
@@ -72,14 +75,17 @@ from krok_helper.subtitle_render.engine.export.render_job import (
     OUTPUT_FORMAT_PNG_TRANSPARENT,
 )
 from krok_helper.subtitle_render.sources.subtitles import load_nicokara_lrc
-from krok_helper.subtitle_render.sources.sug import timing_track_from_sug_project
+from krok_helper.subtitle_render.sources.sug import load_sug_timing_track
 from krok_helper.subtitle_render.serialization.timing import (
     guide_symbol_to_dict,
     line_animation_override_to_dict,
 )
-from strange_uta_game.backend.domain.entities import Sentence, Singer
-from strange_uta_game.backend.domain.models import Character
-from strange_uta_game.backend.domain.project import Project
+from strange_uta_game.backend.domain.entities import Singer
+from strange_uta_game.backend.domain.project import Project, ProjectMetadata
+from strange_uta_game.backend.infrastructure.parsers.lyric_parser import (
+    NicokaraParser,
+    nicokara_result_to_sentences,
+)
 from strange_uta_game.backend.infrastructure.persistence.sug_io import SugProjectParser
 
 N3_PROJECT_FILE_SUFFIX = ".n3proj"
@@ -384,6 +390,8 @@ def load_n3proj(path: str | Path) -> N3ImportResult:
                 base_dir,
                 warnings,
                 f"字幕源「{name}」",
+                # 同名防撞：副源重建文件名带上源名（主源保持纯 <原名>_从N3重建）
+                name_suffix=f"_{_safe_file_name(name)}",
             )
             extra_payload: dict[str, Any] = {"name": name, "path": str(extra_path)}
             if extra_track is not None:
@@ -594,11 +602,8 @@ def _resolve_media(
 
 
 def _emoji_tag_lines(info: dict, track: Optional[TimingTrack]) -> list[str]:
-    lines: list[str] = []
-    for item in _list(info.get("AtTagsForSave")):
-        text = str(item).strip()
-        if text:
-            lines.append(text)
+    # AtTagsForSave 实测有「整段压平成单字符数组」与「按行」两种形态，统一归一。
+    lines: list[str] = list(_n3_at_tag_lines(info))
     if track is not None:
         lines.extend(
             str(item).strip() for item in track.meta.custom if str(item).strip()
@@ -893,91 +898,277 @@ def _n3_lyric_line_count(info: dict) -> int:
     return count
 
 
-def _sug_project_from_n3(info: dict) -> tuple[Optional[Project], bool, list[str]]:
-    """把 N3 字幕源的 ``LineInfos`` 物化为 SUG :class:`Project`。
+def _n3_at_tag_lines(info: dict) -> list[str]:
+    """归一化 N3 的 ``AtTagsForSave``（@ 标签区）为文本行列表。
 
-    每个非 ruby、非 ``【…】`` 标签的 N3 字符直落一个 SUG Character：
-    ``BeginTime`` → 唯一时间戳（缺失时沿用前一字符起点，保证逐字 1:1，
-    不触发 SUG 加载端的行尾丢弃/匀分规则）；末字符 ``EndTime`` →
-    ``sentence_end_ts``（行末结束时刻）；行内 ``EndTime`` 严格早于下一
-    字符起点时视为演唱停顿。Kind 0/2（空行/分页）落成空 Sentence 保留
-    源文件的空行结构；Kind 3（段落分隔是 N3 运行时插入的）不落盘，分页
-    语义由 ``line_breaks_before`` payload 承载。
-
-    N3 ruby 是内嵌在字符流里的注音字，n3proj 里没有可靠的「注音↔基底字」
-    关联字段，无法无损转成 SUG Ruby——跳过并在调用方提示，避免错挂。
+    实测 10.74 样例（035/036）：**整段 @ 标签文本直接存成一个字符串**（含换
+    行）；也有压平成单字符数组、或按行存整行的变体。三种形态统一归一为行
+    列表——内容就是 Nicokara LRC 尾部（``@RubyN`` / ``@Emoji`` / ``@Title``
+    …）的权威副本。
     """
-    default_singer = Singer(
-        name="未命名",
-        color="#FF6B6B",
-        is_default=True,
-        is_placeholder=True,
-        backend_number=1,
+    value = info.get("AtTagsForSave")
+    if isinstance(value, str):
+        lines = value.splitlines()
+    else:
+        items = [str(item) for item in _list(value)]
+        if not items:
+            return []
+        blob = "".join(items)
+        # 按行存储的项本身是完整行、不含换行，无分隔拼接后不会出现换行；
+        # 压平形态（字符数组）反之。
+        lines = blob.splitlines() if ("\n" in blob or "\r" in blob) else items
+    return [line.strip() for line in lines if line.strip()]
+
+
+def _ms_to_nicokara_ts(ms: int) -> str:
+    """毫秒 → ``[MM:SS:CC]`` 厘秒时间戳（向下取整，与 N3 导出口径一致）。"""
+    total_cs = max(int(ms), 0) // 10
+    minutes, rest = divmod(total_cs, 6000)
+    seconds, cs = divmod(rest, 100)
+    return f"[{minutes:02d}:{seconds:02d}:{cs:02d}]"
+
+
+def _safe_file_name(value: str) -> str:
+    """把源名压成可进文件名的安全形式。"""
+    cleaned = re.sub(r'[\\/:*?"<>|\s]+', "_", str(value or "").strip())
+    return cleaned[:32].strip("_") or "源"
+
+
+def _n3_lrc_body_line(line: dict, synthetic_begin_ms: int = 0) -> Optional[str]:
+    """一条 N3 Kind==1 行 → Nicokara LRC 正文行（共享块形式）。
+
+    按 N3 实际导出约定（对拍 035/037 样例真实 LRC 校准）：
+
+    - ``BeginTime <= 0`` 是「无独立时间」哨兵：该字符并入前一个共享块
+      （如 ``O``(219ms) + ``NE``(0) → ``[00:02:19]ONE``）。误当成独立起点
+      会造成秒级时间错位（曾致重建轨道与 LRC 往返最大 1982ms 偏差）。
+    - ``【…】`` 标签段照抄为纯文本（不打时间戳），SUG 解析器将其识别为
+      演唱者切换。
+    - 块尾时间戳只在两种情况下打：行内停顿（块末 ``EndTime`` 严格早于下一
+      锚点起点）或行末结束（末块 ``EndTime`` 有效）。EndTime 缺失的行末不
+      打——加载端按「下一行首锚点」借用，与 LRC 解析路径同语义。
+    - **全行无锚点**（装饰性信息行，标题/词曲作者等）：N3 自己导出时合成
+      锚点 ``[00:00:00]`` 且连续无锚行按 2 秒步进（037 样例实测 0/2000/
+      4000ms）。``synthetic_begin_ms`` 由调用方按此规则传入；不锚点的话
+      SUG 加载端会把整行当空行丢掉。
+    """
+    raw_chars = [
+        char
+        for char in _list(line.get("LyricsCharInfos"))
+        if not _dict(char).get("IsRuby") and str(_dict(char).get("Char") or "")
+    ]
+    if not raw_chars:
+        return None
+    chars = [_dict(char) for char in raw_chars]
+    text = "".join(str(char.get("Char") or "") for char in chars)
+    keep = [True] * len(text)
+    for match in _BRACKET_LABEL_RE.finditer(text):
+        for position in range(match.start(), match.end()):
+            keep[position] = False
+    entries: list[tuple[str, int, int, bool]] = []
+    position = 0
+    for char in chars:
+        char_text = str(char.get("Char") or "")
+        length = len(char_text)
+        is_label = not any(keep[position : position + length])
+        entries.append(
+            (
+                char_text,
+                _int(char.get("BeginTime"), -1),
+                _int(char.get("EndTime"), -1),
+                is_label,
+            )
+        )
+        position += length
+    if all(is_label for _t, _b, _e, is_label in entries):
+        return None
+
+    def next_anchor_begin(index: int) -> Optional[int]:
+        for t, b, _e, is_label in entries[index:]:
+            if not is_label and b > 0:
+                return b
+        return None
+
+    has_real_anchor = any(
+        not is_label and b > 0 for _t, b, _e, is_label in entries
     )
-    sentences: list[Sentence] = []
-    has_ruby = False
-    has_lyrics = False
+    pieces: list[str] = []
+    if not has_real_anchor:
+        # 全行无锚：N3 导出约定合成锚点（连续无锚行 2 秒步进），否则
+        # SUG 加载端会把整行当空行丢掉。
+        pieces.append(_ms_to_nicokara_ts(synthetic_begin_ms))
+        pieces.append("".join(item[0] for item in entries))
+        last_end = entries[-1][2]
+        if last_end > 0:
+            pieces.append(_ms_to_nicokara_ts(last_end))
+        return "".join(pieces)
+    index = 0
+    total = len(entries)
+    while index < total:
+        char_text, begin, _end, is_label = entries[index]
+        if is_label or begin <= 0:
+            # 行首无独立时间的字符：纯文本先行，解析端按「前一区间尾部」处理。
+            pieces.append(char_text)
+            index += 1
+            continue
+        block_end_index = index
+        while block_end_index + 1 < total:
+            next_text, next_begin, _next_end, next_is_label = entries[
+                block_end_index + 1
+            ]
+            if next_is_label or (next_begin > 0 and next_begin != begin):
+                break
+            block_end_index += 1
+        pieces.append(_ms_to_nicokara_ts(begin))
+        pieces.append(
+            "".join(item[0] for item in entries[index : block_end_index + 1])
+        )
+        block_end = entries[block_end_index][2]
+        is_last_block = all(
+            is_label or b <= 0
+            for _t, b, _e, is_label in entries[block_end_index + 1 :]
+        )
+        if block_end > 0:
+            anchor = next_anchor_begin(block_end_index + 1)
+            if is_last_block or (anchor is not None and block_end < anchor):
+                pieces.append(_ms_to_nicokara_ts(block_end))
+        index = block_end_index + 1
+    return "".join(pieces)
+
+
+def _n3_lrc_text(info: dict) -> tuple[str, bool]:
+    """N3 字幕源 → 完整 Nicokara LRC 文本（正文 + AtTagsForSave 尾部）。
+
+    Kind 0/2/3（空行/分页/段落）不产生 LRC 行——实测 N3 自己导出的 LRC 就
+    没有空行（035 样例 0 空行 / 74 行正文），分页语义由本导入的
+    ``line_breaks_before`` payload 承载，与 LRC 路径完全一致。
+    """
+    body: list[str] = []
+    has_inline_ruby = False
+    unanchored_count = 0
     for line in _list(info.get("LineInfos")):
         line = _dict(line)
         kind = _int(line.get("Kind"), -1)
-        if kind in (0, 2):
-            sentences.append(Sentence(singer_id=default_singer.id))
-            continue
         if kind != 1:
             continue
-        has_ruby = has_ruby or any(
-            _dict(char).get("IsRuby") for char in _list(line.get("LyricsCharInfos"))
+        has_inline_ruby = has_inline_ruby or any(
+            _dict(char).get("IsRuby")
+            for char in _list(line.get("LyricsCharInfos"))
         )
-        entries = [
-            (
-                str(char.get("Char") or ""),
-                _int(char.get("BeginTime"), -1),
-                _int(char.get("EndTime"), -1),
-            )
-            for char in _stripped_n3_chars(line)
-        ]
-        entries = [entry for entry in entries if entry[0]]
-        if not entries:
-            continue
-        has_lyrics = True
-        begins: list[int] = []
-        for _text, begin, _end in entries:
-            begins.append(begin if begin >= 0 else (begins[-1] if begins else 0))
-        sug_chars: list[Character] = []
-        for index, (text, _begin, end) in enumerate(entries):
-            last = index == len(entries) - 1
-            release: Optional[int] = None
-            if end >= begins[index]:
-                if last:
-                    release = end
-                elif begins[index + 1] > end:
-                    release = end
-            sug_chars.append(
-                Character(
-                    char=text,
-                    check_count=1,
-                    timestamps=[begins[index]],
-                    sentence_end_ts=release,
-                    is_line_end=last,
-                    is_sentence_end=release is not None,
-                    singer_id=default_singer.id,
-                )
-            )
-        sentences.append(
-            Sentence(singer_id=default_singer.id, characters=sug_chars)
+        no_anchor = _n3_line_has_no_real_anchor(line)
+        body_line = _n3_lrc_body_line(
+            line, synthetic_begin_ms=2000 * unanchored_count
         )
-    tag_lines = [
-        text
-        for text in (str(item).strip() for item in _list(info.get("AtTagsForSave")))
-        if text
-    ]
-    if not has_lyrics:
-        return None, has_ruby, tag_lines
-    return (
-        Project(singers=[default_singer], sentences=sentences),
-        has_ruby,
-        tag_lines,
+        unanchored_count = unanchored_count + 1 if no_anchor else 0
+        if body_line is not None:
+            body.append(body_line)
+    return "\n".join(body + _n3_at_tag_lines(info)) + "\n", has_inline_ruby
+
+
+def _n3_line_has_no_real_anchor(line: dict) -> bool:
+    """该 Kind==1 行是否没有任何 ``BeginTime > 0`` 的非标签字符。"""
+    return not any(
+        _int(char.get("BeginTime"), -1) > 0
+        for char in _stripped_n3_chars(line)
     )
+
+
+_N3_META_TAG_KEYS = {
+    "title": "title",
+    "artist": "artist",
+    "album": "album",
+    "taggingby": "tagging_by",
+    "silencemsec": "silence_ms",
+    "headoffset": "head_offset",
+}
+
+
+def _sug_project_from_n3(
+    info: dict,
+) -> tuple[Optional[Project], Optional[dict[str, object]], bool]:
+    """N3 字幕源 → SUG :class:`Project`（走 SUG 官方 Nicokara 导入管线）。
+
+    把 ``LineInfos`` 合成 Nicokara LRC 文本后交给 SUG 自己的
+    ``NicokaraParser`` + ``nicokara_result_to_sentences``：ruby（``@RubyN``
+    标签，含 mora 时间与位置窗）、演唱者（``【…】`` 标签 / ``@Emoji`` 定义）、
+    共享块均分、句中停顿、行末释放全部按 SUG 原生约定落地——与「SUG 导出
+    LRC → SUG 再导入」的既有工作流同构，不自造第二套映射。
+
+    返回 ``(project, nicokara_tags, has_inline_ruby)``；N3 行数据里没有歌词
+    行时 project 为 None。``has_inline_ruby`` 指字符流里出现的 ``IsRuby``
+    内嵌注音字（实测样例均为 0，ruby 实际以 ``@RubyN`` 标签承载——该形态
+    无法无损关联基底字，调用方负责提示）。
+    """
+    lrc_text, has_inline_ruby = _n3_lrc_text(info)
+    result = NicokaraParser().parse(lrc_text)
+    if not any(line.text for line in result.lines):
+        return None, None, has_inline_ruby
+
+    singer_keys: set[str] = set(result.singer_definitions)
+    for line in result.lines:
+        if line.line_singer_key:
+            singer_keys.add(line.line_singer_key)
+        for _index, key in line.char_singer_map.items():
+            singer_keys.add(key)
+
+    singer_colors = [
+        "#FF6B6B", "#4ECDC4", "#45B7D1", "#FFA07A", "#98D8C8",
+        "#C9B1FF", "#F7DC6F", "#82E0AA", "#F1948A", "#85C1E9",
+    ]
+    singers: list[Singer] = []
+    singer_key_to_id: dict[str, str] = {}
+    for index, key in enumerate(sorted(singer_keys)):
+        singer = Singer(
+            name=result.singer_definitions.get(key, key) or key,
+            color=singer_colors[index % len(singer_colors)],
+            is_default=index == 0,
+        )
+        singer_key_to_id[key] = singer.id
+        singers.append(singer)
+    if not singers:
+        # 工作台把「未命名」占位歌手视为无角色标签（与 LRC 路径的裸行一致）。
+        placeholder = Singer(
+            name="未命名",
+            color="#FF6B6B",
+            is_default=True,
+            is_placeholder=True,
+            backend_number=1,
+        )
+        singers.append(placeholder)
+    default_singer_id = singers[0].id
+
+    sentences = nicokara_result_to_sentences(
+        result, singer_key_to_id, default_singer_id
+    )
+    metadata = {
+        key.lower(): value for key, value in (result.metadata or {}).items()
+    }
+    project = Project(
+        singers=singers,
+        sentences=sentences,
+        metadata=ProjectMetadata(
+            title=str(metadata.get("title") or ""),
+            artist=str(metadata.get("artist") or ""),
+        ),
+    )
+
+    # .sug 的 nicokara_tags：结构化键（@HeadOffset 会在 .sug 加载端烘焙进行
+    # 首时间戳，与 LRC 路径同语义）+ @Emoji 等原文行（加载端按其重插头像）。
+    # @RubyN 不进 custom——注音已物化到字符上，避免重复表示。
+    tags: dict[str, object] = {}
+    for source_key, tag_key in _N3_META_TAG_KEYS.items():
+        value = metadata.get(source_key)
+        if value not in (None, ""):
+            tags[tag_key] = value
+    custom = [
+        line
+        for line in _n3_at_tag_lines(info)
+        if not line.upper().startswith("@RUBY")
+        and line.split("=", 1)[0].strip("@").lower() not in _N3_META_TAG_KEYS
+    ]
+    if custom:
+        tags["custom"] = custom
+    return project, (tags or None), has_inline_ruby
 
 
 def _rebuild_sug_source(
@@ -985,28 +1176,34 @@ def _rebuild_sug_source(
     base_dir: Path,
     warnings: list[str],
     label: str,
+    *,
+    name_suffix: str = "",
 ) -> Optional[tuple[Path, TimingTrack]]:
-    """按 N3 内嵌数据在 n3proj 同目录落盘新 ``.sug``，并返回其解析轨道。"""
-    project, has_ruby, tag_lines = _sug_project_from_n3(info)
+    """按 N3 内嵌数据在 n3proj 同目录落盘新 ``.sug``，并返回其解析轨道。
+
+    ``name_suffix`` 用于多字幕源同名防撞：副源传入 ``_<SettingsName>``。
+    """
+    project, tags, has_inline_ruby = _sug_project_from_n3(info)
     if project is None:
         return None
     relative_text = str(info.get("SourceLyricsRelativePath") or "").strip()
     absolute_text = str(info.get("SourceLyricsPath") or "").strip()
     source_name = Path(relative_text or absolute_text or "歌词")
     target_dir = base_dir / source_name.parent if relative_text else base_dir
-    target = target_dir / f"{source_name.stem}{_N3_REBUILT_SUFFIX}.sug"
-    tags = {"custom": tag_lines} if tag_lines else None
+    target = target_dir / (
+        f"{source_name.stem}{name_suffix}{_N3_REBUILT_SUFFIX}.sug"
+    )
     try:
         SugProjectParser.save(project, str(target), nicokara_tags=tags)
-        track = timing_track_from_sug_project(
-            project, nicokara_tags=tags, base_dir=target_dir
-        )
+        # 回读落盘文件（而非内存对象），保证行级 payload 对齐的就是应用后续
+        # 加载的同一条轨道。
+        track = load_sug_timing_track(target)
     except Exception as exc:  # noqa: BLE001 — 重建任何一步失败都退回原行为
         warnings.append(f"{label}无法按 N3 数据重建 .sug 字幕源（{exc}）")
         return None
-    if has_ruby:
+    if has_inline_ruby:
         warnings.append(
-            f"从 N3 重建的{label}不含注音（ルビ）数据，如需注音请恢复原字幕文件"
+            f"{label}字符流内嵌注音（IsRuby）无法无损关联基底字，已跳过该部分注音"
         )
     return target, track
 
@@ -1018,6 +1215,8 @@ def _ensure_usable_subtitle_source(
     base_dir: Path,
     warnings: list[str],
     label: str,
+    *,
+    name_suffix: str = "",
 ) -> tuple[Optional[Path], Optional[TimingTrack]]:
     """字幕文件缺失或行数与 N3 记录不一致时，以 N3 数据为准重建 ``.sug``。
 
@@ -1035,7 +1234,9 @@ def _ensure_usable_subtitle_source(
         sum(1 for line in track.lines if not line.is_blank) == n3_count
     ):
         return path, track
-    rebuilt = _rebuild_sug_source(info, base_dir, warnings, label)
+    rebuilt = _rebuild_sug_source(
+        info, base_dir, warnings, label, name_suffix=name_suffix
+    )
     if rebuilt is None:
         return path, track
     sug_path, sug_track = rebuilt

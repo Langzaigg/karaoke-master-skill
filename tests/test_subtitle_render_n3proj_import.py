@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import shutil
 import zipfile
 from pathlib import Path
 
@@ -1096,15 +1097,16 @@ def test_missing_subtitle_file_rebuilds_sug(tmp_path):
     assert any("不存在" in warning and "重建" in warning for warning in result.warnings)
 
     data = result.project_data
-    # Kind2 分页仍落在第二歌词行前（中间空行来自空 Sentence 占位）
-    assert data["line_breaks_before"] == ["none", "none", "page"]
-    assert data["line_layout_indices"] == [1, 0, 0]
+    # Kind2 不产生空行（实测 N3 自己导出的 LRC 就没有空行）；
+    # 分页语义由 line_breaks_before payload 落在第二歌词行前
+    assert data["line_breaks_before"] == ["none", "page"]
+    assert data["line_layout_indices"] == [1, 0]
     assert data["char_role_labels"][0] == ["標準配色", "青配色"]
 
     # 重建的 .sug 能按 SUG 路径读回：文本、逐字起点、行末时刻与 N3 一致
     track = load_sug_timing_track(sug)
-    assert [line.is_blank for line in track.lines] == [False, True, False]
-    first, _blank, second = track.lines
+    assert [line.is_blank for line in track.lines] == [False, False]
+    first, second = track.lines
     assert [char.text for char in first.chars] == ["あ", "い"]
     assert [char.start_ms for char in first.chars] == [1000, 2000]
     assert first.end_ms == 3000
@@ -1166,8 +1168,8 @@ def test_rebuilt_sug_keeps_inline_pause_release(tmp_path):
     assert not any("ルビ" in warning for warning in result.warnings)
 
 
-def test_rebuilt_sug_skips_ruby_with_warning(tmp_path):
-    """N3 内嵌 ruby 无法无损关联基底字：跳过并在 warning 里明示。"""
+def test_rebuilt_sug_skips_inline_ruby_with_warning(tmp_path):
+    """字符流内嵌 IsRuby 注音无关联信息：跳过并明示（ruby 正道是 @RubyN 标签）。"""
     payload = _project_payload(tmp_path)
     (tmp_path / "demo.lrc").unlink()
     payload["SourceLyricsInfos"][0]["LineInfos"] = [
@@ -1182,9 +1184,99 @@ def test_rebuilt_sug_skips_ruby_with_warning(tmp_path):
 
     track = load_sug_timing_track(tmp_path / "demo_从N3重建.sug")
     assert [char.text for char in track.lines[0].chars] == ["漢", "字"]
-    assert any("ルビ" in warning for warning in result.warnings)
+    assert any("IsRuby" in warning for warning in result.warnings)
     # ruby 字不进入逐字配色对位
     assert result.project_data["char_role_labels"][0] == ["標準配色", "標準配色"]
+
+
+def test_at_tags_save_supports_all_three_storage_forms():
+    """AtTagsForSave 实测有整串文本/压平字符数组/按行三种形态，统一归一。"""
+    from krok_helper.subtitle_render.n3.project_import import _n3_at_tag_lines
+
+    expected = ["@Ruby1=恋,こ[00:00:28]い", "@Emoji=♪,icon.png,,NoDecor"]
+    for form in (
+        "\r\n".join(expected) + "\r\n",          # 实测 10.74：整段文本
+        list("\n".join(expected) + "\n"),        # 压平字符数组
+        expected,                                # 按行
+    ):
+        assert _n3_at_tag_lines({"AtTagsForSave": form}) == expected
+    assert _n3_at_tag_lines({"AtTagsForSave": None}) == []
+    assert _n3_at_tag_lines({}) == []
+
+
+def test_rebuild_materializes_ruby_from_at_tags(tmp_path):
+    """@RubyN 标签（含 mora 时间）经 SUG 官方管线物化为 .sug 内的 Ruby。"""
+    payload = _project_payload(tmp_path)
+    (tmp_path / "demo.lrc").unlink()
+    payload["SourceLyricsInfos"][0]["AtTagsForSave"] = [
+        "@Ruby1=恋,こ[00:00:28]い",
+        "@Ruby2=一人,ひ[00:00:21]と[00:00:52]り",
+    ]
+    payload["SourceLyricsInfos"][0]["LineInfos"] = [
+        _line_info([_char("恋", 1000, 3000), _char("こ", 3000, 5000)]),
+        {"Kind": 2, "LyricsCharInfos": [], "LayoutIndex": -1, "Raw": ""},
+        # 多字 ruby 基底同块共享起点（真实数据形态）
+        _line_info([_char("一", 6000, 8000), _char("人", 0, 10000)]),
+    ]
+    result = load_n3proj(_write_n3proj(tmp_path, payload))
+
+    sug = tmp_path / "demo_从N3重建.sug"
+    assert sug.is_file()
+    assert not any("ルビ" in warning or "IsRuby" in warning for warning in result.warnings)
+    track = load_sug_timing_track(sug)
+    by_kanji = {r.kanji: r for r in track.rubies}
+    koi = by_kanji["恋"]
+    assert (koi.target_line_index, koi.target_char_start, koi.target_char_end) == (0, 0, 1)
+    assert koi.reading == "こい"
+    assert koi.reading_part_ms == [280]
+    hito = by_kanji["一人"]
+    assert (hito.target_line_index, hito.target_char_start, hito.target_char_end) == (1, 0, 2)
+    assert hito.reading == "ひとり"
+    assert "".join(hito.reading_parts) == "ひとり"
+    # @RubyN 不进 nicokara_tags.custom（已物化，避免导出重复）
+    saved = json.loads(sug.read_text(encoding="utf-8-sig"))
+    custom = (saved.get("nicokara_tags") or {}).get("custom") or []
+    assert not any(str(line).upper().startswith("@RUBY") for line in custom)
+
+
+def test_rebuild_merges_sentinel_zero_begin_into_shared_block(tmp_path):
+    """BeginTime<=0 是「无独立时间」哨兵：并入共享块，不产生独立起点。"""
+    payload = _project_payload(tmp_path)
+    (tmp_path / "demo.lrc").unlink()
+    payload["SourceLyricsInfos"][0]["LineInfos"] = [
+        _line_info([
+            _char("O", 2000, 3000),
+            _char("NE", 0, 0),
+            _char(" ", 4000, 5000),
+            _char("TWO", 0, 0),
+        ]),
+    ]
+    load_n3proj(_write_n3proj(tmp_path, payload))
+
+    track = load_sug_timing_track(tmp_path / "demo_从N3重建.sug")
+    line = track.lines[0]
+    assert "".join(char.text for char in line.chars) == "ONE TWO"
+    starts = [char.start_ms for char in line.chars]
+    # O 锚定 2000；NE/空格间隔并入块内由加载端均分；空格 4000 是独立锚；
+    # TWO 并入空格块
+    assert starts[0] == 2000
+    assert starts[3] == 4000
+    assert all(starts[0] < v < starts[3] for v in starts[1:3])
+
+
+def test_rebuild_applies_head_offset_tag(tmp_path):
+    """AtTagsForSave 里的 @Headoffset 在 .sug 加载端烘焙进行首（与 LRC 同语义）。"""
+    payload = _project_payload(tmp_path)
+    (tmp_path / "demo.lrc").unlink()
+    payload["SourceLyricsInfos"][0]["AtTagsForSave"] = ["@Title=デモ", "@Headoffset=-100"]
+    result = load_n3proj(_write_n3proj(tmp_path, payload))
+
+    track = load_sug_timing_track(tmp_path / "demo_从N3重建.sug")
+    assert track.meta.title == "デモ"
+    assert track.meta.head_offset_ms == -100
+    # 行首时间戳被烘焙：1000 → 900，5000 → 4900
+    assert track.lines[0].chars[0].start_ms == 900
+    assert track.lines[1].chars[0].start_ms == 4900
 
 
 def test_extra_source_missing_file_rebuilds_sug(tmp_path):
@@ -1211,7 +1303,8 @@ def test_extra_source_missing_file_rebuilds_sug(tmp_path):
 
     extra_sources = result.project_data["extra_subtitle_sources"]
     assert len(extra_sources) == 1
-    sug = tmp_path / "chorus_从N3重建.sug"
+    # 副源重建文件名带源名（同名防撞）
+    sug = tmp_path / "chorus_コーラス_从N3重建.sug"
     assert sug.is_file()
     assert extra_sources[0]["path"] == str(sug)
     track = load_sug_timing_track(sug)
@@ -1293,10 +1386,203 @@ def test_sequence_and_solid_background_are_imported(tmp_path):
     assert solid_result.project_data["background"]["color"] == "#123456"
 
 
-REAL_N3PROJ = Path(r"D:\カラオケ\songs\Marginality\1.n3proj")
-TACTIC_N3PROJ = Path(r"D:\カラオケ\songs\TACTIC\1.n3proj")
-DARK_SPIRAL_N3PROJ = Path(r"D:\カラオケ\songs\Dark spiral journey\1.n3proj")
-ISEKAI_GIRLS_N3PROJ = Path(r"D:\カラオケ\songs\異世界ガールズ♡トーク\1.n3proj")
+# ---------------------------------------------------------------------------
+# 本机真实样例（可选回归）
+#
+# 通过环境变量 ``KARAOKE_STUDIO_N3_SAMPLES`` 指向本地 N3 工程收藏根目录，
+# 测试按目录/文件名关键词发现样例；未设置或找不到即整组跳过。固化用例
+# 不硬编码任何工作机路径，换环境 / 上 CI 不会失效。
+# ---------------------------------------------------------------------------
+
+import os
+
+
+def _discover_n3_sample(keyword: str) -> Path:
+    """在 ``KARAOKE_STUDIO_N3_SAMPLES`` 下按路径关键词找一个 .n3proj 样例。"""
+    root = os.environ.get("KARAOKE_STUDIO_N3_SAMPLES", "").strip()
+    if not root:
+        return Path("__n3_samples_env_not_set__.n3proj")
+    base = Path(root)
+    if not base.is_dir():
+        return Path("__n3_samples_env_not_set__.n3proj")
+    for candidate in sorted(base.rglob("*.n3proj")):
+        if keyword.lower() in str(candidate).lower():
+            return candidate
+    return Path(f"__n3_sample_{keyword}_not_found__.n3proj")
+
+
+def _all_n3_samples(limit: int = 48) -> list[Path]:
+    root = os.environ.get("KARAOKE_STUDIO_N3_SAMPLES", "").strip()
+    if not root:
+        return []
+    base = Path(root)
+    if not base.is_dir():
+        return []
+    return [p for p in sorted(base.rglob("*.n3proj")) if p.is_file()][:limit]
+
+
+REAL_N3PROJ = _discover_n3_sample("marginality")
+TACTIC_N3PROJ = _discover_n3_sample("tactic")
+DARK_SPIRAL_N3PROJ = _discover_n3_sample("dark spiral")
+ISEKAI_GIRLS_N3PROJ = _discover_n3_sample("異世界ガールズ")
+ATTCHI_N3PROJ = _discover_n3_sample("035")
+UNIVERSE_PAGE_N3PROJ = _discover_n3_sample("036")
+
+
+def _forced_missing_copy(sample: Path, tmp_path: Path) -> Path:
+    """把样例工程复制到 tmp 并让每个字幕源指向各自不存在的文件，强制走重建分支。
+
+    同时把样例目录的图片资产带过去——``@Emoji`` 头像按 .sug 所在目录解析，
+    生产环境重建 .sug 与图片同在 n3proj 目录，缺图会把标签退化为可见文本。
+    """
+    with zipfile.ZipFile(sample) as z:
+        payload = json.loads(z.read("0").decode("utf-8-sig"))
+    payload = json.loads(json.dumps(payload))
+    for index, info in enumerate(payload.get("SourceLyricsInfos") or []):
+        # 每个源独立的缺失名：多源工程不能共用一个名字（重建目标同名会互撞）
+        info["SourceLyricsPath"] = str(tmp_path / f"missing{index}.lrc")
+        info["SourceLyricsRelativePath"] = f"missing{index}.lrc"
+    for image in sample.parent.glob("*"):
+        if image.suffix.lower() in {".png", ".jpg", ".jpeg", ".bmp", ".gif"}:
+            try:
+                if image.stat().st_size <= 2 * 1024 * 1024:
+                    shutil.copyfile(image, tmp_path / image.name)
+            except OSError:
+                pass
+    target = tmp_path / "forced.n3proj"
+    with zipfile.ZipFile(target, "w") as z:
+        z.writestr("0", "\ufeff" + json.dumps(payload, ensure_ascii=False))
+    return target
+
+
+@pytest.mark.skipif(not ATTCHI_N3PROJ.is_file(), reason="035 あっちでこっちで样例不存在")
+def test_import_real_ruby_project_rebuild_matches_lrc_round_trip(tmp_path):
+    """035 样例（AtTagsForSave 整串文本 + 53 条 @RubyN）：重建 .sug 的 ruby
+    与 N3 自己的 LRC 往返逐条一致（行/字符区间/漢字/读音）。"""
+    from krok_helper.subtitle_render.n3.project_import import _rebuild_sug_source
+
+    with zipfile.ZipFile(ATTCHI_N3PROJ) as z:
+        info = json.loads(z.read("0").decode("utf-8-sig"))["SourceLyricsInfos"][0]
+    lrc_track = load_nicokara_lrc(Path(info["SourceLyricsPath"]))
+
+    result = _rebuild_sug_source(info, tmp_path, [], "字幕源")
+    assert result is not None
+    _sug, rebuilt_track = result
+
+    assert [
+        "".join(c.text for c in line.chars)
+        for line in rebuilt_track.lines
+        if not line.is_blank
+    ] == [
+        "".join(c.text for c in line.chars)
+        for line in lrc_track.lines
+        if not line.is_blank
+    ]
+    assert {(r.kanji, r.reading) for r in rebuilt_track.rubies} == {
+        (r.kanji, r.reading) for r in lrc_track.rubies
+    }
+    for ruby in lrc_track.rubies:
+        if ruby.target_line_index is None:
+            continue
+        match = [
+            r
+            for r in rebuilt_track.rubies
+            if r.kanji == ruby.kanji
+            and r.reading == ruby.reading
+            and r.target_line_index == ruby.target_line_index
+        ]
+        assert match, (ruby.kanji, ruby.reading, ruby.target_line_index)
+        assert any(
+            r.target_char_start == ruby.target_char_start
+            and r.target_char_end == ruby.target_char_end
+            for r in match
+        )
+
+
+@pytest.mark.skipif(
+    not UNIVERSE_PAGE_N3PROJ.is_file(), reason="036 ユニバーページ样例不存在"
+)
+def test_import_real_missing_lrc_project_rebuilds_with_ruby(tmp_path):
+    """036 样例（90 条 @RubyN）：把工程复制到无 LRC 的目录强制走缺失重建。"""
+    forced = _forced_missing_copy(UNIVERSE_PAGE_N3PROJ, tmp_path)
+
+    result = load_n3proj(forced)
+
+    sug = tmp_path / "missing0_从N3重建.sug"
+    assert sug.is_file()
+    assert result.project_data["subtitle_path"] == str(sug)
+    track = load_sug_timing_track(sug)
+    assert sum(1 for line in track.lines if not line.is_blank) == 42
+    assert track.rubies
+    assert track.meta.title == "ユニバーページ"
+    # @Headoffset=-50 烘焙进行首
+    assert track.meta.head_offset_ms == -50
+    # 每条 ruby 的基底文本与其目标字符区间严格一致
+    for ruby in track.rubies:
+        if ruby.target_line_index is None:
+            continue
+        line = track.lines[ruby.target_line_index]
+        span = "".join(
+            c.text
+            for c in line.chars[ruby.target_char_start : ruby.target_char_end]
+        )
+        assert span == ruby.kanji, (ruby.kanji, span)
+
+
+@pytest.mark.parametrize(
+    "sample",
+    _all_n3_samples(),
+    ids=lambda p: p.stem[:40],
+)
+def test_real_sample_forced_rebuild_matches_embedded_n3_data(sample, tmp_path):
+    """通用回归：目录下每个样例强制缺失重建后，行文本与 N3 内嵌数据逐字一致。
+
+    重建契约是「以 n3project 内数据为准」——n3proj 的 ``LineInfos`` 是权威副
+    本，部分样例的 LRC 与嵌入副本存在真实漂移（AtTagsForSave 空串丢 ruby、
+    标签大小写 / 尾随空格差），因此不与 LRC 对拍；LRC 全量对拍由 035 专属用
+    例（实测零漂移样例）锁定。SUG 导入器与 N3 渲染器在同词多音 + 重复行上
+    的选条语义差异（039 样例 128 条中 1 条）同样不作为断言。
+    """
+    from krok_helper.subtitle_render.n3.project_import import (
+        _is_synthetic_emoji_tag_char,
+        _n3_line_key_text,
+    )
+
+    with zipfile.ZipFile(sample) as z:
+        payload = json.loads(z.read("0").decode("utf-8-sig"))
+    expected_texts = [
+        text
+        for text in (
+            _n3_line_key_text(line)
+            for line in payload["SourceLyricsInfos"][0].get("LineInfos") or []
+            if line.get("Kind") == 1
+        )
+        if text
+    ]
+
+    rebuilt = load_n3proj(_forced_missing_copy(sample, tmp_path))
+    sug_path = Path(rebuilt.project_data["subtitle_path"] or "")
+    assert sug_path.is_file()
+    track = load_sug_timing_track(sug_path)
+
+    # 比较口径：.sug 加载端按 SUG 生态约定丢弃行尾无时间戳的尾随空白，
+    # @Emoji 插入的合成标签字符不算可见正文——两侧 rstrip 并剔除合成字符。
+    assert [
+        "".join(c.text for c in line.chars if not _is_synthetic_emoji_tag_char(c.text)).rstrip()
+        for line in track.lines
+        if not line.is_blank
+    ] == [text.rstrip() for text in expected_texts]
+    # ruby 自洽：基底文本与目标字符区间严格一致
+    for ruby in track.rubies:
+        if ruby.target_line_index is None:
+            continue
+        assert 0 <= ruby.target_line_index < len(track.lines)
+        line = track.lines[ruby.target_line_index]
+        span = "".join(
+            c.text
+            for c in line.chars[ruby.target_char_start : ruby.target_char_end]
+        )
+        assert span == ruby.kanji, (ruby.kanji, span)
 
 
 @pytest.mark.skipif(not REAL_N3PROJ.is_file(), reason="本机样例工程不存在")
