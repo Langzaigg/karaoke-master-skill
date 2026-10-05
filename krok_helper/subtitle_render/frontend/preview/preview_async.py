@@ -35,6 +35,7 @@ from krok_helper.subtitle_render.native.backend import (
     NativeRendererProcess,
     NativeRendererProcessOwner,
     SharedFrameRingReader,
+    StaleSharedFrameSlotError,
 )
 from krok_helper.subtitle_render.native.protocol import (
     gpu_unsupported_feature_labels,
@@ -875,6 +876,7 @@ class GpuAsyncSubtitleRenderer(QObject):
             "frames_emitted": 0,
             "future_frames_cached": 0,
             "stale_frames_dropped": 0,
+            "stale_frame_slots_skipped": 0,
             "frame_error_retries": 0,
             "queue_full_backpressure": 0,
             "fallback_frames_emitted": 0,
@@ -1765,7 +1767,14 @@ class GpuAsyncSubtitleRenderer(QObject):
                         if self._reader is not None:
                             self._reader.close()
                         self._reader = SharedFrameRingReader.from_event(event)
-                    image = self._reader.read_qimage(event)
+                    try:
+                        image = self._reader.read_qimage(event)
+                    except StaleSharedFrameSlotError:
+                        # 槽位已被更新的帧复用（在途窗口 > 槽数）：本事件
+                        # 对应的帧已不存在，丢弃继续——后续帧事件紧随其后。
+                        # 绝不据此杀 sidecar（曾是预热负载下的无谓重启源）。
+                        self._note("stale_frame_slots_skipped")
+                        continue
                     image.setDevicePixelRatio(dpr)
                     if speculative:
                         self._cache_speculative(image, t_ms, generation)
@@ -2016,7 +2025,11 @@ class GpuAsyncSubtitleRenderer(QObject):
                 if self._reader is not None:
                     self._reader.close()
                 self._reader = SharedFrameRingReader.from_event(event)
-            image = self._reader.read_qimage(event)
+            try:
+                image = self._reader.read_qimage(event)
+            except StaleSharedFrameSlotError:
+                self._note("stale_frame_slots_skipped")
+                continue
             image.setDevicePixelRatio(dpr)
             if is_speculative:
                 self._cache_speculative(image, request_t, generation)
@@ -2511,7 +2524,13 @@ class GpuAsyncSubtitleRenderer(QObject):
             if self._reader is not None:
                 self._reader.close()
             self._reader = SharedFrameRingReader.from_event(event)
-        image = self._reader.read_qimage(event)
+        try:
+            image = self._reader.read_qimage(event)
+        except StaleSharedFrameSlotError:
+            # 槽位已被更新的帧复用（在途窗口 > 槽数）：事件过时，丢弃本
+            # 次吸收即可——填缝调度器继续推进，绝不据此杀 sidecar。
+            self._note("stale_frame_slots_skipped")
+            return
         image.setDevicePixelRatio(dpr)
         self._cache_speculative(image, fill_t, generation)
 

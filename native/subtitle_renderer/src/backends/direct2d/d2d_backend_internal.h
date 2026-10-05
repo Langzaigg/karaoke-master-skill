@@ -75,6 +75,11 @@ struct Direct2DGpuBackend::Impl {
         Microsoft::WRL::ComPtr<ID2D1Geometry> protectedStrokeGeometry;
         Microsoft::WRL::ComPtr<ID2D1Geometry> strokeGeometry;
         Microsoft::WRL::ComPtr<ID2D1Geometry> stroke2Geometry;
+        // 矢量字形（导唱符）的 Clipper2 预展开描边轮廓：静态 realization
+        // 按填充语义烘焙它，动画帧也直接填充它（替代对密集原路径的逐帧
+        // DrawGeometry）。挂字形资源缓存（按宽度惰性建，毫秒级）。
+        Microsoft::WRL::ComPtr<ID2D1Geometry> strokeOutline;
+        Microsoft::WRL::ComPtr<ID2D1Geometry> stroke2Outline;
         // Realizations use the shared, unpositioned glyph geometry. Each
         // character keeps only the matrix that places that shared mesh.
         Microsoft::WRL::ComPtr<ID2D1Geometry> realizationGeometry;
@@ -212,6 +217,12 @@ struct Direct2DGpuBackend::Impl {
         std::map<float, Microsoft::WRL::ComPtr<ID2D1Geometry>> strokeGeometries;
         std::map<float, Microsoft::WRL::ComPtr<ID2D1Geometry>> stroke2Geometries;
         std::map<float, Microsoft::WRL::ComPtr<ID2D1Geometry>> protectedGeometries;
+        // Clipper2 预展开描边轮廓（按宽度惰性缓存）：描边 realization 与
+        // 动画帧共用同一份，创建毫秒级（见 d2d_stroke_outline.h）。
+        std::map<float, Microsoft::WRL::ComPtr<ID2D1Geometry>> preexpandedStrokes;
+        // 路径段数（GetSegmentCount 一次性记入）：任务成本估计与自适应
+        // 预热调度的排序键。0 = 未知（按保守成本处理）。
+        std::uint32_t segmentCount = 0;
         std::uint64_t lastUse = 0;
     };
 
@@ -254,6 +265,12 @@ struct Direct2DGpuBackend::Impl {
         Microsoft::WRL::ComPtr<ID2D1Geometry> keyGeometry;
         RealizationCacheKey cacheKey{};
         float strokeWidth = 0.0f;
+        // 矢量字形的描边任务按填充语义烘焙预展开轮廓（创建走
+        // CreateFilledGeometryRealization，毫秒级）。strokeWidth 仍进
+        // 缓存键做宽度去重。
+        bool fillOutline = false;
+        // 预估创建成本（ms）：自适应预热调度用它排序与限流。
+        float estCostMs = 0.0f;
     };
 
     struct CachedRealization {
@@ -365,6 +382,12 @@ struct Direct2DGpuBackend::Impl {
     std::atomic<bool> renderActive{false};
     std::atomic<bool> firstFrameCompleted{false};
     std::atomic<std::int64_t> lastRenderCompletedMs{0};
+    // 自适应预热调度的反馈信号（render 线程写、预热线程读）：
+    // frameRenderMsEma = 最近帧渲染耗时指数均值（ms，α=0.2）；
+    // lastRenderedTimeMs = 最近渲染的项目时间（判可见行，压力状态下
+    // 可见行的任务优先烘烤）。见 runRealizationPrewarm 的调度注释。
+    std::atomic<float> frameRenderMsEma{0.0f};
+    std::atomic<std::int64_t> lastRenderedTimeMs{0};
     mutable std::mutex realizationMutex;
     BackendDiagnostics diagnostics;
     bool configured = false;

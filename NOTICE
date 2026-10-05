@@ -47,3 +47,16 @@ aria2c 以官方 release 的未修改二进制形式分发，许可全文
 
 构建时由 `scripts/fetch_aria2.py` 从官方 release 拉取并按
 固定 SHA-256 校验，校验不通过则中断构建。
+
+源码内嵌的第三方库
+==================
+
+native/subtitle_renderer/thirdparty/clipper2/ 内嵌 Clipper2
+（多边形裁剪/偏置库），用于 GPU 字幕渲染的矢量导唱符描边预
+展开（2026-10：D2D 对「密集路径×宽描边」的描边展开是平方级
+CPU 爆炸，多边形圆角偏置是线性算法）。
+
+  Clipper2（github.com/AngusJohnson/Clipper2）
+  Copyright (c) 2012-2025 Angus Johnson
+  协议：Boost Software License 1.0（与 GPLv3 兼容）
+  许可全文随附于 thirdparty/clipper2/LICENSE。

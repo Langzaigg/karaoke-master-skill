@@ -5,6 +5,7 @@
 #include "d2d_geometry_resources.h"
 #include "d2d_paint_resources.h"
 #include "d2d_runtime_support.h"
+#include "d2d_stroke_outline.h"
 // 本 TU 原本 Qt-free，局部变量名 slots 与 Qt 的关键字宏冲突——在本
 // TU 内禁用 signals/slots/emit 宏后再引入协议头（仅心跳上报用）。
 #define QT_NO_KEYWORDS
@@ -621,6 +622,12 @@ void Direct2DGpuBackend::configure(const RenderScene &scene) {
         }
         realization.path = path;
         realization.hasBounds = hasBounds;
+        if (path) {
+            UINT32 segments = 0;
+            if (SUCCEEDED(path->GetSegmentCount(&segments))) {
+                realization.segmentCount = segments;
+            }
+        }
         impl_->diagnostics.vectorGlyphBuildMs += elapsedMs(buildStart);
         return vectorGlyphRealizations
             .emplace(key, std::move(realization))
@@ -1288,7 +1295,65 @@ void Direct2DGpuBackend::configure(const RenderScene &scene) {
                             ? std::max(charStyle.strokeWidth, 0.0f)
                                 + charStyle.stroke2Width
                             : 0.0f;
-                    if (!impl_->dynamicDirectStrokeEnabled) {
+                    if (vectorGlyph) {
+                        // 矢量字形（导唱符）：描边一律走 Clipper2 预展开
+                        // 轮廓（同输入毫秒级，对密集位图描摹 SVG 免疫——
+                        // D2D Widen / CreateStrokedGeometryRealization 对
+                        // 「密集路径×宽描边」是平方级，实测 3847 段 ≈ 49s）。
+                        // 轮廓按 (字形资源, 宽度) 惰性缓存：静态 realization
+                        // 按填充语义烘焙它，动画帧直接填充它。与原生描边
+                        // 的差异为亚像素级（0.17-0.30 源px/侧，8 符号实测）。
+                        const auto outlineFor = [&](
+                            float width
+                        ) -> Microsoft::WRL::ComPtr<ID2D1Geometry> {
+                            if (width <= 0.0f) {
+                                return {};
+                            }
+                            auto &cache = glyphResource->preexpandedStrokes;
+                            const auto entry = cache.find(width);
+                            if (entry != cache.end()) {
+                                return Microsoft::WRL::ComPtr<ID2D1Geometry>{
+                                    entry->second
+                                };
+                            }
+                            auto outline = direct2d::strokeOutlineGeometry(
+                                device_, path.Get(), width
+                            );
+                            auto stored = cache
+                                .emplace(width, std::move(outline))
+                                .first;
+                            return Microsoft::WRL::ComPtr<ID2D1Geometry>{
+                                stored->second
+                            };
+                        };
+                        cached.chars.back().strokeOutline = outlineFor(
+                            std::max(charStyle.strokeWidth, 0.0f)
+                        );
+                        cached.chars.back().stroke2Outline = outlineFor(
+                            stroke2Width
+                        );
+                        // 动画帧描边：填充预展开轮廓（亚毫秒/帧），替代对
+                        // 密集原路径的逐帧 DrawGeometry（~4ms/帧/符号）；
+                        // direct-stroke 关闭时也走它而非 D2D Widen（平方级）。
+                        if (cached.chars.back().strokeOutline) {
+                            cached.chars.back().strokeGeometry =
+                                translatedGeometry(
+                                    cached.chars.back().strokeOutline.Get(),
+                                    strokeDx,
+                                    0.0f,
+                                    "ID2D1Factory::CreateTransformedGeometry(vector preexpanded stroke)"
+                                );
+                        }
+                        if (cached.chars.back().stroke2Outline) {
+                            cached.chars.back().stroke2Geometry =
+                                translatedGeometry(
+                                    cached.chars.back().stroke2Outline.Get(),
+                                    strokeDx,
+                                    0.0f,
+                                    "ID2D1Factory::CreateTransformedGeometry(vector preexpanded stroke2)"
+                                );
+                        }
+                    } else if (!impl_->dynamicDirectStrokeEnabled) {
                         cached.chars.back().strokeGeometry = cachedWidenedStroke(
                             glyphResource->strokeGeometries,
                             path.Get(),
@@ -2702,6 +2767,11 @@ void Direct2DGpuBackend::configure(const RenderScene &scene) {
                 D2D1::Matrix3x2F::Identity();
             float strokeWidth = 0.0f;
             bool stroked = false;
+            // 矢量字形描边任务按填充语义烘焙预展开轮廓（创建毫秒级）。
+            bool fillOutline = false;
+            // 预估创建成本（ms）：自适应预热调度的排序键（粗估即可，
+            // 只需保序：段数越多、描边越宽越贵；预展开任务恒廉价）。
+            float estCostMs = 1.0f;
         };
         std::vector<RealizationCandidate> candidates;
         const std::size_t realizationCapacity = static_cast<std::size_t>(
@@ -2719,7 +2789,9 @@ void Direct2DGpuBackend::configure(const RenderScene &scene) {
             ID2D1Geometry *sharedGeometry,
             ID2D1Geometry *positionedGeometry,
             const D2D1_MATRIX_3X2_F &instanceTransform,
-            float strokeWidth
+            float strokeWidth,
+            bool fillOutline = false,
+            float estCostMs = 1.0f
         ) {
             const bool isStroke = kind == Impl::RealizationKind::Stroke
                 || kind == Impl::RealizationKind::Stroke2;
@@ -2735,6 +2807,10 @@ void Direct2DGpuBackend::configure(const RenderScene &scene) {
                 strokeWidth,
                 isStroke,
             });
+            if (fillOutline) {
+                candidates.back().fillOutline = true;
+            }
+            candidates.back().estCostMs = estCostMs;
         };
         const auto appendCharTasks = [&] (
             std::size_t lineIndex,
@@ -2745,9 +2821,20 @@ void Direct2DGpuBackend::configure(const RenderScene &scene) {
             float stroke2Width
         ) {
             const float mainWidth = std::max(strokeWidth, 0.0f);
-            if (mainWidth < Impl::realizationStrokeThreshold) {
-                return;
-            }
+            // 8px 硬门限已废除（2026-10 用户拍板）：它拿输入形状当帧成
+            // 本的代理——小窗宽描边被白白预热、大窗/导出细描边该预热被
+            // 挡。描边任务只剩 0.5px 发丝卫生阀（防任务洪泛）；何时/何
+            // 序创建由预热线程按实测帧耗时自适应决定（见预热线程）。
+            // 填充 realization 与描边宽度无关，不再被连坐。
+            const float strokeTaskWidth = mainWidth >= 0.5f ? mainWidth : 0.0f;
+            // 矢量字形（有预展开轮廓）的描边任务：几何换成轮廓、按填充
+            // 语义烘焙（毫秒级）；文本字形保持原生描边 realization。
+            const bool vectorChar = ch.strokeOutline != nullptr;
+            // 成本粗估（保序即可）：文本描边 ≈ 段数 × (1+宽/8)；矢量/
+            // 填充恒按 1ms。
+            const auto textStrokeCost = [](float width) -> float {
+                return 1.0f + (1.0f + width / 8.0f) * 2.0f;
+            };
             appendCandidate(
                 lineIndex, rubyIndex, charIndex,
                 Impl::RealizationKind::Fill,
@@ -2761,19 +2848,37 @@ void Direct2DGpuBackend::configure(const RenderScene &scene) {
                 ch.protectedStrokeGeometry.Get(),
                 ch.realizationTransform, 0.0f
             );
-            appendCandidate(
-                lineIndex, rubyIndex, charIndex,
-                Impl::RealizationKind::Stroke,
-                ch.realizationGeometry.Get(), ch.geometry.Get(),
-                ch.realizationTransform, mainWidth
-            );
-            appendCandidate(
-                lineIndex, rubyIndex, charIndex,
-                Impl::RealizationKind::Stroke2,
-                ch.realizationGeometry.Get(), ch.geometry.Get(),
-                ch.realizationTransform,
-                stroke2Width > 0.0f ? mainWidth + stroke2Width : 0.0f
-            );
+            if (strokeTaskWidth > 0.0f) {
+                appendCandidate(
+                    lineIndex, rubyIndex, charIndex,
+                    Impl::RealizationKind::Stroke,
+                    vectorChar ? ch.strokeOutline.Get()
+                               : ch.realizationGeometry.Get(),
+                    vectorChar ? ch.strokeGeometry.Get()
+                               : ch.geometry.Get(),
+                    ch.realizationTransform, strokeTaskWidth,
+                    vectorChar,
+                    vectorChar ? 1.0f : textStrokeCost(strokeTaskWidth)
+                );
+            }
+            const float combinedStroke2 =
+                stroke2Width > 0.0f && strokeTaskWidth > 0.0f
+                    ? strokeTaskWidth + std::max(stroke2Width, 0.0f)
+                    : 0.0f;
+            if (combinedStroke2 > 0.0f) {
+                const bool vectorStroke2 = ch.stroke2Outline != nullptr;
+                appendCandidate(
+                    lineIndex, rubyIndex, charIndex,
+                    Impl::RealizationKind::Stroke2,
+                    vectorStroke2 ? ch.stroke2Outline.Get()
+                                  : ch.realizationGeometry.Get(),
+                    vectorStroke2 ? ch.stroke2Geometry.Get()
+                                  : ch.geometry.Get(),
+                    ch.realizationTransform, combinedStroke2,
+                    vectorStroke2,
+                    vectorStroke2 ? 1.0f : textStrokeCost(combinedStroke2)
+                );
+            }
         };
         for (std::size_t lineIndex : lineOrder) {
             const Impl::CachedLine &line = impl_->lines[lineIndex];
@@ -2846,6 +2951,8 @@ void Direct2DGpuBackend::configure(const RenderScene &scene) {
                     candidate.strokeWidth, false, candidate.instanceTransform
                 );
                 task.strokeWidth = candidate.strokeWidth;
+                task.fillOutline = candidate.fillOutline;
+                task.estCostMs = candidate.estCostMs;
                 tasks.push_back(std::move(task));
             }
         } else {
@@ -2886,6 +2993,8 @@ void Direct2DGpuBackend::configure(const RenderScene &scene) {
                     D2D1::Matrix3x2F::Identity()
                 );
                 task.strokeWidth = candidate.strokeWidth;
+                task.fillOutline = candidate.fillOutline;
+                task.estCostMs = candidate.estCostMs;
                 tasks.push_back(std::move(task));
                 taskByResource.emplace(key, tasks.size() - 1);
             }
@@ -3132,19 +3241,94 @@ void Direct2DGpuBackend::configure(const RenderScene &scene) {
                     sliceStart = Clock::now();
                 }
             };
-            // 看门狗心跳：逐任务上报。单个任务可能合法耗时数十秒（密集
-            // 矢量路径 × 宽描边的 CPU 细分），任务间的心跳保证「忙碌但在
-            // 推进」期间 GUI 的等待租期持续续期，不被墙钟超时误杀。
-            std::size_t taskIndex = 0;
-            for (const Impl::RealizationTask &task : tasks) {
+            // 自适应预热调度（2026-10 用户拍板）：8px 硬门限已废除——任务
+            // 全量入表，何时/何序创建按实测帧成本动态决定：
+            // - 富余（EMA 远低于帧预算）：全速烘烤，贵任务优先（最坏情形
+            //   最早暴露并完成）；稳定尺寸下最终全表完成，帧全部命中缓存。
+            // - 压力（EMA ≥ 帧预算，掉出 60fps）：可见行的任务豁免（命中
+            //   缓存直接消减 EMA），不可见的贵任务让路等待——空闲或压力
+            //   解除后自动继续；已完成任务即时入账，播放/暂停不重做。
+            // - 廉价任务（填充 / 预展开轮廓，≈1ms）任何状态都可跑。
+            constexpr float frameBudgetMs = 1000.0f / 60.0f;
+            const auto lineVisible = [&](std::size_t lineIndex) {
+                if (lineIndex >= impl_->lines.size()) {
+                    return false;
+                }
+                const Impl::CachedLine &line = impl_->lines[lineIndex];
+                const std::int64_t now = impl_->lastRenderedTimeMs.load(
+                    std::memory_order_acquire
+                );
+                if (now >= line.startMs && now <= line.endMs) {
+                    return true;
+                }
+                for (const DisplayWindow &window : line.displayWindows) {
+                    if (now >= window.startMs && now <= window.endMs) {
+                        return true;
+                    }
+                }
+                return false;
+            };
+            const auto taskVisible = [&](const Impl::RealizationTask &task) {
+                for (const Impl::RealizationTarget &target : task.targets) {
+                    if (lineVisible(target.lineIndex)) {
+                        return true;
+                    }
+                }
+                return false;
+            };
+            std::vector<std::size_t> pending(tasks.size());
+            for (std::size_t index = 0; index < pending.size(); ++index) {
+                pending[index] = index;
+            }
+            std::size_t completed = 0;
+            while (!pending.empty()) {
+                if (!waitForFrameGap()) {
+                    pending.clear();
+                    break;
+                }
+                const float ema = impl_->frameRenderMsEma.load(
+                    std::memory_order_acquire
+                );
+                const bool stress = ema > frameBudgetMs;
+                // 选下一个合格任务：可见（压力态加权）+ 成本降序。
+                std::size_t pickSlot = pending.size();
+                float bestScore = -1.0f;
+                for (std::size_t slot = 0; slot < pending.size(); ++slot) {
+                    const Impl::RealizationTask &task = tasks[pending[slot]];
+                    const bool visible = stress && taskVisible(task);
+                    const bool cheap = task.fillOutline
+                        || task.strokeWidth <= 0.0f
+                        || task.estCostMs <= 2.0f;
+                    if (!cheap && stress && !visible) {
+                        continue;
+                    }
+                    const float score =
+                        (visible ? 1.0e6f : 0.0f) + task.estCostMs;
+                    if (score > bestScore) {
+                        bestScore = score;
+                        pickSlot = slot;
+                    }
+                }
+                if (pickSlot == pending.size()) {
+                    // 压力态下暂无合格任务：小睡后再评估（EMA 与可见性
+                    // 随播放变化），停止请求由 waitForFrameGap 处理。
+                    std::this_thread::sleep_for(
+                        std::chrono::milliseconds(50)
+                    );
+                    continue;
+                }
+                const Impl::RealizationTask &task = tasks[pending[pickSlot]];
+                // 看门狗心跳：逐任务上报。单个任务可能合法耗时数十秒
+                // （密集矢量路径 × 宽描边的 CPU 细分），任务间的心跳保
+                // 证「忙碌但在推进」期间 GUI 的等待租期持续续期。
                 krok::subtitle::native::protocol::emitProgress(
                     QStringLiteral("realize"),
-                    taskIndex,
+                    completed,
                     tasks.size()
                 );
-                ++taskIndex;
                 const auto waitStart = Clock::now();
                 if (!waitForFrameGap()) {
+                    pending.clear();
                     break;
                 }
                 waitMs += elapsedMs(waitStart);
@@ -3156,8 +3340,15 @@ void Direct2DGpuBackend::configure(const RenderScene &scene) {
                 // 宽描边实测最坏 49s）：预热线程被它阻塞期间逐任务心跳
                 // 发不出。主线程此时通常空闲（空闲层心跳在喂），但用户
                 // 若恰好再触发 configure，等待期就只剩这里——按预算登记
-                // 代喂兜底（双保险）。
-                if (stroked) {
+                // 代喂兜底（双保险）。矢量字形的描边任务走 fillOutline
+                //（预展开轮廓 + 填充语义，毫秒级），不经过昂贵分支。
+                if (task.fillOutline) {
+                    result = workerContext->CreateFilledGeometryRealization(
+                        task.geometry.Get(),
+                        flatteningTolerance,
+                        created.ReleaseAndGetAddressOf()
+                    );
+                } else if (stroked) {
                     krok::subtitle::native::diagnostics::LongCallScope
                         realizeCall("d2d-realize", 240.0);
                     result = workerContext->CreateStrokedGeometryRealization(
@@ -3191,6 +3382,9 @@ void Direct2DGpuBackend::configure(const RenderScene &scene) {
                     ++failed;
                 }
                 yieldSlice();
+                pending[pickSlot] = pending.back();
+                pending.pop_back();
+                ++completed;
             }
             finish();
             });

@@ -111,6 +111,17 @@ class NativeQueueFullError(NativeRendererError):
         self.response = response
 
 
+class StaleSharedFrameSlotError(NativeRendererError):
+    """共享环槽位已被更新的帧复用，事件所指向的帧已不存在。
+
+    槽位 = frame_index % slot_count：GUI 在途窗口超过槽位数时，事件(N)
+    被消费前帧 N+slot_count 可能已覆写同槽。这是「丢一帧」的良性条件
+    （后续帧的事件就在队列后面），调用方应跳过该事件继续，绝不能据此
+    杀 sidecar 重启（2026-10 预热负载升高后实测触发，曾被当渲染器故
+    障引发无谓重启循环）。
+    """
+
+
 @dataclass(frozen=True)
 class SharedFrameSlot:
     """A copied RGBA frame read from one native shared-memory ring slot."""
@@ -595,6 +606,13 @@ class SharedFrameRingReader:
         }
         for key, actual in expected.items():
             if _event_int(frame_ready_event, key) != actual:
+                if key in {"frame_index", "t_ms"}:
+                    # 槽位被更新的帧覆写（事件过时）：丢帧级良性条件，
+                    # 见 StaleSharedFrameSlotError。结构性字段（generation/
+                    # 尺寸/步长）不匹配仍按硬错误处理。
+                    raise StaleSharedFrameSlotError(
+                        f"shared frame slot no longer matches event field {key}"
+                    )
                 raise NativeRendererError(f"shared frame slot no longer matches event field {key}")
         event_format = str(frame_ready_event.get("pixel_format") or "")
         if event_format and event_format != pixel_format:

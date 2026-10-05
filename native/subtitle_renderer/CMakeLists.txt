@@ -143,10 +143,19 @@ add_executable(krok_subtitle_renderer
     src/backends/direct2d/d2d_paint_resources.h
     src/backends/direct2d/d2d_runtime_support.cpp
     src/backends/direct2d/d2d_runtime_support.h
+    src/backends/direct2d/d2d_stroke_outline.cpp
+    src/backends/direct2d/d2d_stroke_outline.h
     src/backends/direct2d/d2d_device.cpp
     src/backends/direct2d/d2d_device.h
     src/backends/direct2d/native_preview_surface.cpp
     src/backends/direct2d/native_preview_surface.h
+    thirdparty/clipper2/src/clipper.engine.cpp
+    thirdparty/clipper2/src/clipper.offset.cpp
+)
+
+target_include_directories(krok_subtitle_renderer
+    PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/thirdparty/clipper2/include
 )
 
 target_link_libraries(krok_subtitle_renderer
