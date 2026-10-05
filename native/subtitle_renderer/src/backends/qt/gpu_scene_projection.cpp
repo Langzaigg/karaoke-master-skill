@@ -711,6 +711,17 @@ krok::subtitle::native::RenderScene gpuSceneFromConfig(const RenderConfig &confi
                     burst.stroke2Width = static_cast<float>(
                         source.stroke2WidthPx * scale
                     );
+                    // 取色层级「全有」的阴影层：偏移随 scale 同比缩放。
+                    burst.hasShadow = source.hasShadow;
+                    if (source.hasShadow) {
+                        burst.shadow = gpuPaint(source.shadow, source.color);
+                        burst.shadowOffsetX = static_cast<float>(
+                            source.shadowOffsetX * scale
+                        );
+                        burst.shadowOffsetY = static_cast<float>(
+                            source.shadowOffsetY * scale
+                        );
+                    }
                 }
                 line.bursts.push_back(std::move(burst));
             }

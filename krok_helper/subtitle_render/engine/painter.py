@@ -3887,6 +3887,14 @@ def _paint_line_fx_particles(
             stroke2_em = (
                 float(spec["stroke2_width_px"]) / max(burst_size, 1.0) * 1000.0
             )
+            # 阴影层（取色层级=全有）：行空间常量偏移的整剪影。
+            shadow_fill = (
+                _paint_fill_from_dict(spec["shadow"])
+                if spec.get("shadow") is not None
+                else None
+            )
+            shadow_dx = float(spec.get("shadow_offset_x_px", 0.0) or 0.0)
+            shadow_dy = float(spec.get("shadow_offset_y_px", 0.0) or 0.0)
             # 涟漪 + 非横向渐变（纵向渐变/拼色）→ 径向映射：渐变轴映射到
             # 半径方向，每颗环按自己的扩散进度在渐变轴上采样一个实心色
             #（内圈新环=起点色，外圈老环=终点色；环是发丝线，跨环带的
@@ -3936,6 +3944,9 @@ def _paint_line_fx_particles(
             hgrad_box = None
             sprite_image = None
             sprite_extent = 512.0
+            shadow_fill = None
+            shadow_dx = 0.0
+            shadow_dy = 0.0
             color_key = str(burst["color"])
             fill_brush = brushes.get(color_key)
             if fill_brush is None:
@@ -3966,6 +3977,40 @@ def _paint_line_fx_particles(
             painter.save()
             try:
                 painter.setOpacity(painter.opacity() * state.alpha)
+                if shadow_fill is not None:
+                    # 阴影剪影层（取色层级=全有）：整剪影（外层轮廓笔宽 =
+                    # 描边+二重描边，与文字 paint_shadow_silhouette 同口径）
+                    # 以阴影填充色画在行空间常量偏移处——先于旋转/缩放平移
+                    # 到 (x+dx, y+dy)，保证偏移方向不随粒子自转。
+                    painter.save()
+                    try:
+                        painter.translate(
+                            state.x + shadow_dx, state.y + shadow_dy
+                        )
+                        painter.rotate(state.rotation_deg)
+                        scale = state.size_px / 1000.0
+                        painter.scale(scale, scale)
+                        painter.setRenderHint(
+                            QPainter.RenderHint.Antialiasing, True
+                        )
+                        shadow_brush = _fx_particle_brush(shadow_fill)
+                        outer_em = stroke_em + stroke2_em
+                        if outer_em >= 1.0:
+                            pen_shadow = QPen(shadow_brush, outer_em)
+                            pen_shadow.setJoinStyle(
+                                Qt.PenJoinStyle.RoundJoin
+                            )
+                            pen_shadow.setCapStyle(
+                                Qt.PenCapStyle.RoundCap
+                            )
+                            painter.setPen(pen_shadow)
+                            painter.setBrush(Qt.BrushStyle.NoBrush)
+                            painter.drawPath(sprite)
+                        painter.setPen(Qt.PenStyle.NoPen)
+                        painter.setBrush(shadow_brush)
+                        painter.drawPath(sprite)
+                    finally:
+                        painter.restore()
                 painter.translate(state.x, state.y)
                 painter.rotate(state.rotation_deg)
                 scale = state.size_px / 1000.0

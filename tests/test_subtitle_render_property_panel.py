@@ -6407,22 +6407,29 @@ def test_property_panel_particle_color_mode_controls(qapp):
         panel._fx_particle_mode_combo.itemText(index)
         for index in range(panel._fx_particle_mode_combo.count())
     ] == [
-        "默认颜色", "单独颜色", "跟随字体·前后实色",
+        "默认颜色", "单独颜色", "跟随字体·前后各一",
         "跟随字体·走字前", "跟随字体·走字后", "复用配色方案",
     ]
+    assert [
+        panel._fx_particle_layers_combo.itemText(index)
+        for index in range(panel._fx_particle_layers_combo.count())
+    ] == ["仅实色", "+描边", "+装饰", "全有"]
+    # 取色层级仅对来源配色四档启用：默认单独颜色灰显。
+    assert not panel._fx_particle_layers_combo.isEnabled()
     # 默认单独颜色：显示双色槽（两颗颜色按钮）、隐藏来源下拉；
     # 「仅唱字」默认勾选。
     assert not panel._fx_color_slot.isHidden()
     assert not panel._fx_color_btn2.isHidden()
     assert panel._fx_particle_role_combo.isHidden()
     assert panel._fx_apply_check.isChecked()
-    # 跟随字体档：双色槽与来源都隐藏（粒子无亮度参数）。
+    # 跟随字体档：双色槽与来源都隐藏（粒子无亮度参数）；取色层级启用。
     panel._fx_particle_mode_combo.setCurrentIndex(
         panel._fx_particle_mode_combo.findData("follow_before")
     )
     assert emitted[-1].fx_particle_color_mode == "follow_before"
     assert panel._fx_color_slot.isHidden()
     assert panel._fx_particle_role_combo.isHidden()
+    assert panel._fx_particle_layers_combo.isEnabled()
     # 复用配色方案：第三列换来源下拉；无引用时切入自动补第一个角色。
     panel.set_roles(["主唱", "和声"])
     panel._fx_particle_mode_combo.setCurrentIndex(

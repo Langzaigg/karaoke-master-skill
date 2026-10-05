@@ -77,6 +77,17 @@ SIGNAL_MODULE_STYLE_FIELDS: frozenset[str] = frozenset(
 何音量柱/指示灯关闭的旧工程，习惯立刻被冲回出厂。按字段前缀动态推导，
 将来 SignalsLits 加新字段自动归队。
 """
+PARTICLE_MODULE_STYLE_FIELDS: frozenset[str] = frozenset(
+    {"fx_particle_color_layers"}
+)
+"""粒子装饰模块的「改一次一直沿用」习惯字段（2026-10 用户口径）。
+
+粒子「取色层级」（仅实色 / +描边 / +装饰 / 全有）是跨工程的口味偏好，
+与指示灯/音量柱同口径：只经 ``_remember_style_preferences`` 的编辑差分
+写进应用默认样式，不随随手打开的工程经
+:func:`merge_common_style_preferences` 覆盖。其余 ``fx_particle_*``
+（颜色模式/双色槽/角色来源）仍逐工程随行样式走，不进本集合。
+"""
 APP_STYLE_EXPLICIT_DEFAULT_FIELDS = (
     BUILTIN_SCHEME_STYLE_FIELDS
     | LAYOUT_DEFAULT_STYLE_FIELDS
@@ -86,6 +97,7 @@ APP_STYLE_EXPLICIT_DEFAULT_FIELDS = (
     # 不能被随手打开的工程经 merge_common_style_preferences 覆盖。
     | frozenset({"default_layout_by_row_count"})
     | SIGNAL_MODULE_STYLE_FIELDS
+    | PARTICLE_MODULE_STYLE_FIELDS
 )
 APP_LOCAL_ONLY_OUTPUT_FIELDS = frozenset(
     {

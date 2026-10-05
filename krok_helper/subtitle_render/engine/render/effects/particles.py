@@ -10,7 +10,7 @@
 - sprite 轮廓是本模块定义的常量（M/L/C/Q/Z，1000 单位 em 空间、以 (0,0) 为
   中心），随场景 IR 下发（``fx_sprites``），C++ 不内置副本——单一事实源。
 - 粒子颜色模式（默认颜色·樱花粉双色 / 单独颜色·双色槽 / 跟随字体·
-  前后实色 / 跟随字体·走字前后 / 复用配色方案）在规划期解析成每 burst
+  前后各一 / 跟随字体·走字前后 / 复用配色方案）在规划期解析成每 burst
   的实色（#RRGGBB）下发，两条后端按 burst 颜色实心绘制、天然同色；
   双色档由规划器拆成两条同轨迹、不同种子/半数量的 burst 实现「每颗粒
   子随机取一色」，渲染端无特殊分支；单色跟随档（走字前/后、role）另带
@@ -208,25 +208,35 @@ def particle_solid_color(style: Style, char_style: Style | None = None) -> str:
     return fill_to_solid_color(state.text, fallback)
 
 
+# 取色层级（fx_particle_color_layers）：从来源配色态裁剪装饰层。
+# solid=仅实色 / stroke=+描边 / decor=+装饰（二重描边）/ all=全有（+阴影）。
+PARTICLE_COLOR_LAYERS = ("solid", "stroke", "decor", "all")
+
+
 def _state_paint_spec(
     source: Style,
     state: KaraokeColorState,
     size_px: float,
     *,
+    layers: str,
     include_strokes: bool,
     fallback: str,
-) -> dict[str, object]:
-    """把一个配色态折成 burst 级**完整装饰规格**（IR dict，随 burst 下发）。
+) -> dict[str, object] | None:
+    """把一个配色态按**取色层级**折成 burst 级装饰规格（IR dict）。
 
-    角色装饰比单色丰富——「跟随字体 / 复用配色方案」时不再折实色，而是
-    把配色态的三层填充（主文字/描边/二重描边）原样下发，两条后端按
-    PaintFill 完整绘制（渐变/拼色直接复用；涟漪的非横向渐变由各端做径
-    向映射——每环按扩散进度取实心色）。描边宽度按 粒子尺寸/该来源字号
-    同比缩放（上限半个粒子边长，指示灯装饰管线同款映射）。
-    ``include_strokes=False``（涟漪光环）描边/二重描边宽恒 0——环体是
-    发丝线，叠描边会显著变粗（2026-10 用户口径）。图片填充暂折为单独
-    颜色（实色回退，两端一致）。
+    ``layers``（``fx_particle_color_layers``）决定从该态取哪些层：
+    ``solid`` 仅实色（返回 ``None``——调用方退纯色剪影）；``stroke``
+    叠加描边层；``decor`` 再叠加二重描边层；``all`` 全有——再叠加阴影层
+    （``shadow`` 填充 + 已按粒子尺寸同比缩放的 ``shadow_offset_*_px``，
+    行空间常量偏移的剪影，与文字 ``paint_shadow_silhouette`` 同口径）。
+    描边宽度按 粒子尺寸/该来源字号 同比缩放（上限半个粒子边长，指示灯
+    装饰管线同款映射）。``include_strokes=False``（涟漪光环）描边/二重
+    描边/阴影全部不取——环体是发丝线，叠装饰会显著变粗（2026-10 用户
+    口径）。图片填充暂折为单独颜色（实色回退，两端一致）。
     """
+
+    if layers not in PARTICLE_COLOR_LAYERS or layers == "solid":
+        return None
 
     def _layer_fill(fill: PaintFill) -> dict[str, object]:
         if fill.mode == "image":
@@ -245,10 +255,18 @@ def _state_paint_spec(
             return paint_fill_to_dict(solid)
         return paint_fill_to_dict(fill)
 
+    want_stroke = include_strokes and layers in {"stroke", "decor", "all"}
+    want_stroke2 = include_strokes and layers in {"decor", "all"}
+    want_shadow = include_strokes and layers == "all"
     scale = float(size_px) / max(float(source.font_size_px or 0.0), 1.0)
     half = max(float(size_px) / 2.0, 1.0)
-    if include_strokes:
-        stroke_width = min(max(int(source.stroke_width_px or 0) * scale, 0.0), half)
+    if want_stroke:
+        stroke_width = min(
+            max(float(source.stroke_width_px or 0) * scale, 0.0), half
+        )
+    else:
+        stroke_width = 0.0
+    if want_stroke2:
         stroke2_raw = (
             max(int(source.stroke2_width_px or 0), 0)
             if source.stroke2_enabled
@@ -256,15 +274,23 @@ def _state_paint_spec(
         )
         stroke2_width = min(max(stroke2_raw * scale, 0.0), half)
     else:
-        stroke_width = 0.0
         stroke2_width = 0.0
-    return {
+    spec: dict[str, object] = {
         "fill": _layer_fill(state.text),
         "stroke": _layer_fill(state.stroke),
         "stroke2": _layer_fill(state.stroke2),
         "stroke_width_px": round(stroke_width, 3),
         "stroke2_width_px": round(stroke2_width, 3),
     }
+    if want_shadow:
+        spec["shadow"] = _layer_fill(state.shadow)
+        spec["shadow_offset_x_px"] = round(
+            float(source.shadow_offset_x or 0) * scale, 3
+        )
+        spec["shadow_offset_y_px"] = round(
+            float(source.shadow_offset_y or 0) * scale, 3
+        )
+    return spec
 
 
 def particle_paint_spec(
@@ -274,13 +300,19 @@ def particle_paint_spec(
     *,
     include_strokes: bool = True,
 ) -> dict[str, object] | None:
-    """按颜色模式解析成 burst 级完整装饰规格（单态档：跟随前/后·复用方案）。
+    """按颜色模式 + 取色层级解析**单态档**装饰规格（跟随前/后·复用方案）。
 
-    ``color`` 档与悬空引用返回 ``None``——burst 只带实色 ``color``，走旧的
-    实心路径（旧 sidecar 兼容）。双色档（前后随机）的规格见
-    :func:`particle_variant_paints`。
+    ``color`` / ``sakura`` 档（无来源配色态）、悬空引用，以及
+    ``fx_particle_color_layers == "solid"``（默认仅实色，2026-10 用户口径）
+    返回 ``None``——burst 只带实色 ``color``，走纯色剪影路径。双态档
+    （前后各一 / 花瓣复用）的规格见 :func:`particle_variant_paints`。
     """
 
+    layers = str(
+        getattr(style, "fx_particle_color_layers", "solid") or "solid"
+    )
+    if layers == "solid":
+        return None
     mode = str(getattr(style, "fx_particle_color_mode", "color") or "color")
     resolved = _particle_color_state(style, char_style, mode)
     if resolved is None:
@@ -288,7 +320,12 @@ def particle_paint_spec(
     source, state = resolved
     fallback = str(getattr(style, "fx_particle_color", "") or "#FFFFFF")
     return _state_paint_spec(
-        source, state, size_px, include_strokes=include_strokes, fallback=fallback
+        source,
+        state,
+        size_px,
+        layers=layers,
+        include_strokes=include_strokes,
+        fallback=fallback,
     )
 
 
@@ -300,23 +337,21 @@ def particle_variant_paints(
     petal: bool = False,
     include_strokes: bool = True,
 ) -> list[dict[str, object]] | None:
-    """双色随机模式的**变体实色列表**（2026-10 花瓣特效口径）：
+    """双色随机模式的**变体实色/规格列表**（2026-10 花瓣特效口径）：
 
     - ``color`` 单独颜色——颜色一/颜色二双色槽随机混发（颜色二默认白色，
       白色即颜色本身——2026-10 用户口径：必须设置双色，无「未设置」态）；
     - ``sakura`` 默认颜色——两种樱花粉实色变体；
-    - ``follow_mix`` 跟随字体·前后实色——当前字符角色方案（缺省回落行
-      样式）配色的走字前/后「主文字」**实色**（渐变/拼色取停止色平均）
-      作为双色（2026-10 用户口径：前后实色，不携带装饰规格）；
-    - ``role`` 复用配色方案——**仅花瓣粒子**取指定来源方案走字前/后实色
-      双色（其余粒子 kind 的 ``role`` 保持单色「走字后」+ 完整装饰规格
-      旧口径，不改既有观感）。
+    - ``follow_mix`` 跟随字体·前后各一——当前字符角色方案（缺省回落行
+      样式）配色的走字前/后两个变体；装饰层按 ``fx_particle_color_layers``
+      取色层级裁剪（默认仅实色，见 :func:`_state_paint_spec`）；
+    - ``role`` 复用配色方案——**仅花瓣粒子**取指定来源方案走字前/后两个
+      变体（其余粒子 kind 的 ``role`` 保持单态「走字后」路径）。
 
     其余模式（follow_before / follow_after / 悬空 role）返回 ``None``
-    （调用方走单色 + 完整 paint 规格路径，与音符同源）。「随机混发」由
+    （调用方走单态 + 取色层级路径）。「随机混发」由
     :func:`plan_line_bursts` 拆成两条同轨迹、不同种子/半数量的 burst 实现
     ——每颗粒子属且属一条变体，与逐粒子取色分布等价，渲染端零改动。
-    ``size_px`` / ``include_strokes`` 仅为缓存键兼容保留，实色对不消费。
     """
 
     fallback = str(getattr(style, "fx_particle_color", "") or "#FFFFFF")
@@ -332,23 +367,40 @@ def particle_variant_paints(
     if mode == "sakura":
         return [{"color": SAKURA_PINK_A}, {"color": SAKURA_PINK_B}]
 
-    def _state_solids(source: Style) -> list[dict[str, object]]:
+    layers = str(
+        getattr(style, "fx_particle_color_layers", "solid") or "solid"
+    )
+
+    def _state_variants(source: Style) -> list[dict[str, object]]:
         colors = effective_karaoke_colors(source)
-        return [
-            {"color": fill_to_solid_color(state.text, fallback)}
-            for state in (colors.before, colors.after)
-        ]
+        out: list[dict[str, object]] = []
+        for state in (colors.before, colors.after):
+            entry: dict[str, object] = {
+                "color": fill_to_solid_color(state.text, fallback)
+            }
+            spec = _state_paint_spec(
+                source,
+                state,
+                size_px,
+                layers=layers,
+                include_strokes=include_strokes,
+                fallback=fallback,
+            )
+            if spec is not None:
+                entry["paint"] = spec
+            out.append(entry)
+        return out
 
     if mode == "follow_mix":
         source = char_style if char_style is not None else style
-        return _state_solids(source)
+        return _state_variants(source)
     if mode == "role" and petal:
         resolved = appearance_role_source(
             style, getattr(style, "fx_particle_role_name", None)
         )
         if resolved is None:
             return None
-        return _state_solids(resolved)
+        return _state_variants(resolved)
     return None
 
 
@@ -632,7 +684,7 @@ def plan_line_bursts(
     ``color`` 时另附 ``paint`` 完整装饰规格（填充/描边/二重描边 PaintFill
     + 已按粒子尺寸缩放的描边宽，见 :func:`particle_paint_spec`），两条
     后端优先按 ``paint`` 绘制；双色档（单独颜色双槽 / ``sakura`` /
-    ``follow_mix`` 前后实色 / ``role``+花瓣）改拆两条实色变体 burst
+    ``follow_mix`` 前后各一 / ``role``+花瓣）改拆两条实色变体 burst
     （数量对半、种子错开）。入退场动画粒子默认固定樱花粉双色档，开启
     ``fx_apply_to_entry_exit`` 后改吃粒子旋钮的颜色与尺寸（数量恒固定）。
     ``line_index`` 参与种子，保证同曲目每行轨迹不同且重开可复现。
@@ -680,21 +732,22 @@ def plan_line_bursts(
         line_anchor: bool = False,
         petal: bool = False,
     ) -> list[dict[str, object]]:
-        """burst 的颜色规格**列表**：固定樱花粉档 / 实色回退 (+ 非单色模式的
-        paint 规格) / 双色档的变体规格列表（见 :func:`particle_variant_paints`）。
+        """burst 的颜色规格**列表**：固定樱花粉档 / 实色回退 (+ 取色层级
+        的装饰规格) / 双色档的变体规格列表（见 :func:`particle_variant_paints`）。
 
         规格按「样式 × 角色方案 × 尺寸 × 是否涟漪」缓存——同一组合全帧
         复用一份（见 :func:`_cached_particle_paint`）。涟漪光环不带描边
         （``include_strokes=False``）：环体是发丝线，叠描边显著变粗。
-        双色档（单独颜色双槽 / sakura / follow_mix 前后实色 / role+花瓣）
-        拆两条实色变体（见 :func:`particle_variant_paints`，2026-10 用户
-        口径：双色系一律实色，不携带装饰规格）。
+        取色层级（``fx_particle_color_layers``，仅来源配色四档生效）：默认
+        仅实色 = 纯色剪影；+描边 / +装饰 / 全有逐级叠加来源态的描边 /
+        二重描边 / 阴影层（见 :func:`_state_paint_spec`）。
 
         ``line_anchor``（入退场星光）：跟随模式下附 ``char_colors`` 逐字
         颜色表——动画仍是整行一条 burst（扫过轨迹不变），绘制端按每颗粒
         子落点所在字符取该字角色的颜色（2026-10 用户口径：颜色逐字、动
-        画不动）。此时不带 paint 规格（逐粒子换色无法烘焙/静态笔刷），
-        ``color`` 回退取首字符颜色（旧 sidecar 兼容）。
+        画不动）。此时不带 paint 规格（逐粒子换色无法烘焙/静态笔刷，
+        取色层级装饰在逐字取色档不适用），``color`` 回退取首字符颜色
+        （旧 sidecar 兼容）。
         """
 
         if anim and not apply_to_anim:

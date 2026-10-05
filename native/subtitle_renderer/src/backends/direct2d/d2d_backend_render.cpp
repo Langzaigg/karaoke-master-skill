@@ -5835,6 +5835,50 @@ ProbeResult Direct2DGpuBackend::renderFrameInternal(
                     const float alpha = std::clamp(
                         particle.alpha * globalOpacity, 0.0f, 1.0f
                     );
+                    if (burst.hasShadow) {
+                        // 阴影剪影层（取色层级「全有」，镜像 painter 的阴影
+                        // 通道与 paint_shadow_silhouette）：整剪影（外层轮廓
+                        // 笔宽 = 描边+二重描边）统一用阴影填充色，行空间常量
+                        // 偏移——先于旋转/缩放平移，偏移方向不随粒子自转。
+                        const auto shadowTransform = [&](float dx, float dy) {
+                            return D2D1::Matrix3x2F::Scale(
+                                particle.sizePx / 1000.0f,
+                                particle.sizePx / 1000.0f
+                            )
+                                * D2D1::Matrix3x2F::Rotation(
+                                    particle.rotationDeg
+                                )
+                                * D2D1::Matrix3x2F::Translation(dx, dy)
+                                * previousTransform;
+                        };
+                        context->SetTransform(shadowTransform(
+                            particle.x + burst.shadowOffsetX,
+                            particle.y + burst.shadowOffsetY
+                        ));
+                        const auto shadowBrush = layerBrush(burst.shadow);
+                        if (shadowBrush) {
+                            shadowBrush->SetOpacity(alpha);
+                            const float outerEm = burst.sizePx > 0.0f
+                                ? (burst.strokeWidth + burst.stroke2Width)
+                                    / burst.sizePx * 1000.0f
+                                : 0.0f;
+                            if (outerEm >= 1.0f && roundStyle) {
+                                context->DrawGeometry(
+                                    spriteIt->second.Get(),
+                                    shadowBrush.Get(),
+                                    outerEm,
+                                    roundStyle.Get()
+                                );
+                            }
+                            context->FillGeometry(
+                                spriteIt->second.Get(), shadowBrush.Get()
+                            );
+                        }
+                        // 阴影只借一次变换：恢复主绘制变换。
+                        context->SetTransform(shadowTransform(
+                            particle.x, particle.y
+                        ));
+                    }
                     if (hasCharColors) {
                         // 行锚点星光逐字取色：落点 → 最近字符（中点划分，
                         // 越界钳首末），取该字角色颜色；动画/扫过轨迹不变。

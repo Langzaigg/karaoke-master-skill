@@ -349,6 +349,7 @@ from krok_helper.subtitle_render.settings.preferences import (
     DISCARDED_BACKUP_RETENTION_DAYS,
     LAYOUT_DEFAULT_STYLE_FIELDS as _LAYOUT_DEFAULT_STYLE_FIELDS,
     LAYOUT_DEFAULT_VALUE_FIELDS as _LAYOUT_DEFAULT_VALUE_FIELDS,
+    PARTICLE_MODULE_STYLE_FIELDS as _PARTICLE_MODULE_STYLE_FIELDS,
     SIGNAL_MODULE_STYLE_FIELDS as _SIGNAL_MODULE_STYLE_FIELDS,
     load_app_preferences,
     prepare_app_preferences,
@@ -621,6 +622,7 @@ _RENDER_ONLY_ANIM_STYLE_FIELDS: frozenset[str] = frozenset({
     "fx_particle_count",
     "fx_particle_color",
     "fx_particle_color2",
+    "fx_particle_color_layers",
     "entry_fx",
     "exit_fx",
     "sing_fx",
@@ -8287,6 +8289,18 @@ class SubtitleRenderWindow(QWidget):
         if signal_changes:
             self._app_default_style = replace(
                 self._app_default_style, **signal_changes
+            )
+
+        # 粒子「取色层级」同口径（2026-10 用户口径：偏好记忆）：跨工程
+        # 沿用口味，打开旧工程不回退。
+        particle_changes = {
+            name: getattr(current, name)
+            for name in _PARTICLE_MODULE_STYLE_FIELDS
+            if getattr(previous, name) != getattr(current, name)
+        }
+        if particle_changes:
+            self._app_default_style = replace(
+                self._app_default_style, **particle_changes
             )
 
         layout_changed = any(

@@ -195,3 +195,52 @@ def test_merge_common_style_preferences_skips_signal_fields() -> None:
     assert merged.volume_enabled is True
     assert merged.volume_column_count == 6
     assert merged.lit_size == 64
+
+
+# ---------------------------------------------------------------------------
+# 粒子「取色层级」偏好（PARTICLE_MODULE_STYLE_FIELDS，与信号模块同机制）
+# ---------------------------------------------------------------------------
+
+
+def test_particle_color_layers_is_remembered(make_window) -> None:
+    """取色层级改一次一直沿用（写进应用默认样式）。"""
+    window = make_window()
+
+    _edit_style(window, fx_particle_color_layers="all")
+
+    assert window._app_default_style.fx_particle_color_layers == "all"
+
+
+def test_opening_another_project_does_not_reset_particle_layers(
+    make_window, settings
+) -> None:
+    """打开旧工程（取色层级还是默认仅实色）后落盘，习惯保持记忆。"""
+    window = make_window()
+    _edit_style(window, fx_particle_color_layers="decor")
+    window._save_persisted_state()
+
+    window._style = replace(window._style, fx_particle_color_layers="solid")
+    window._save_persisted_state()
+
+    assert settings.data["style"]["fx_particle_color_layers"] == "decor"
+    # 未编辑过的粒子字段（颜色模式等）仍随工程走，不进本集合。
+    assert (
+        window._app_default_style.fx_particle_color_layers == "decor"
+    )
+
+
+def test_merge_common_style_preferences_skips_particle_layers() -> None:
+    """纯函数口径：工程侧的取色层级不进应用默认样式（其余粒子字段照进）。"""
+    app_default = Style(fx_particle_color_layers="all")
+    project = Style(
+        fx_particle_color_layers="solid",
+        fx_particle_color_mode="follow_after",
+        fx_particle_count=20,
+    )
+
+    merged = merge_common_style_preferences(app_default, project)
+
+    assert merged.fx_particle_color_layers == "all"
+    # 非习惯字段：跟随工程（merge 语义不变）。
+    assert merged.fx_particle_color_mode == "follow_after"
+    assert merged.fx_particle_count == 20

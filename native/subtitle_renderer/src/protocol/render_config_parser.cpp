@@ -1510,6 +1510,25 @@ static void applyLineStyleSection(
                         ).toDouble(0.0),
                         0.0
                     );
+                    // 取色层级「全有」的阴影层（2026-10）：偏移为粒子尺寸
+                    // 基准的物理 px（规划期已按 size/字号同比缩放）。
+                    if (paintObject.value(
+                            QStringLiteral("shadow")
+                        ).isObject()) {
+                        burst.hasShadow = true;
+                        burst.shadow = paintFillSpec(
+                            paintObject.value(
+                                QStringLiteral("shadow")
+                            ).toObject(),
+                            burst.color
+                        );
+                        burst.shadowOffsetX = paintObject.value(
+                            QStringLiteral("shadow_offset_x_px")
+                        ).toDouble(0.0);
+                        burst.shadowOffsetY = paintObject.value(
+                            QStringLiteral("shadow_offset_y_px")
+                        ).toDouble(0.0);
+                    }
                 }
                 QJsonArray charColorsArray;
                 if (burstObject.contains(QStringLiteral("char_color_ids"))) {

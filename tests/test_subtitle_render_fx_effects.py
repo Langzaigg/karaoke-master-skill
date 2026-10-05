@@ -355,13 +355,14 @@ def test_twinkle_classic_wireup_serialization_gpu_and_colors():
     style = Style(sing_fx="twinkle_classic", karaoke_anim="none")
     assert gpu_unsupported_features(track, style) == ()
     # 多颜色粒子设计接线：颜色模式与新版档同路——「跟随字体·走字后」
-    # 产出实色 + paint 完整装饰规格（渐变/描边随粒子下发）。
+    # 产出实色 + paint 装饰规格（取色层级 +装饰，渐变/描边随粒子下发）。
     wired = plan_line_bursts(
         Style(
             sing_fx="twinkle_classic",
             fx_particle_size_em=0.5,
             fx_particle_count=10,
             fx_particle_color_mode="follow_after",
+            fx_particle_color_layers="decor",
             font_size_px=100,
             karaoke_anim="none",
         ),
@@ -1116,6 +1117,15 @@ def test_particle_color_mode_serialization_roundtrip():
     )
     assert dual.fx_particle_color == "#40E0FF"
     assert dual.fx_particle_color2 == "#FF69B4"
+    # 取色层级往返 + 非法值回退（默认仅实色）。
+    assert Style().fx_particle_color_layers == "solid"
+    layered = style_from_dict(
+        style_to_dict(Style(fx_particle_color_layers="all"))
+    )
+    assert layered.fx_particle_color_layers == "all"
+    bogus = style_to_dict(Style())
+    bogus["fx_particle_color_layers"] = "bogus"
+    assert style_from_dict(bogus).fx_particle_color_layers == "solid"
     # 非法值回落默认；空串来源名归一 None。
     payload = style_to_dict(Style())
     payload["fx_particle_color_mode"] = "brighten"  # 粒子无此档
@@ -1277,6 +1287,7 @@ def test_particle_paint_spec_follows_each_chars_role():
         font_size_px=100,
         sing_fx="twinkle",
         fx_particle_color_mode="follow_after",
+        fx_particle_color_layers="decor",
         karaoke_anim="none",
         custom_style_schemes={"主唱": scheme_a, "和声": scheme_b},
         karaoke_colors=_karaoke_matrix("#111111", "#222222"),
@@ -1320,6 +1331,7 @@ def test_particle_paint_spec_stroke_widths_scale_with_source_font():
         sing_fx="twinkle",
         fx_particle_size_em=0.5,  # 粒子 50px
         fx_particle_color_mode="follow_after",
+        fx_particle_color_layers="decor",
         karaoke_anim="none",
         stroke_width_px=8,
         stroke2_enabled=True,
@@ -1336,6 +1348,7 @@ def test_particle_paint_spec_stroke_widths_scale_with_source_font():
         sing_fx="twinkle",
         fx_particle_size_em=0.5,  # 粒子 10px，半边长 5px
         fx_particle_color_mode="follow_after",
+        fx_particle_color_layers="decor",
         karaoke_anim="none",
         stroke_width_px=40,
         stroke2_enabled=False,
@@ -1353,6 +1366,7 @@ def test_particle_paint_spec_stroke_widths_scale_with_source_font():
         font_size_px=100,
         sing_fx="twinkle",
         fx_particle_color_mode="follow_after",
+        fx_particle_color_layers="decor",
         karaoke_anim="none",
         stroke_width_px=8,
         stroke2_enabled=False,
@@ -1380,6 +1394,7 @@ def test_particle_paint_spec_image_fill_falls_back_to_solid():
         sing_fx="twinkle",
         fx_particle_color="#ABCDEF",
         fx_particle_color_mode="follow_after",
+        fx_particle_color_layers="decor",
         karaoke_anim="none",
         karaoke_colors=KaraokeColors(
             after=KaraokeColorState(text=image_fill)
@@ -1419,6 +1434,7 @@ def test_painter_gradient_particle_and_radial_ring(qapp):
         fx_particle_size_em=0.8,
         fx_particle_count=16,
         fx_particle_color_mode="follow_after",
+        fx_particle_color_layers="decor",
         karaoke_colors=KaraokeColors(
             after=KaraokeColorState(text=grad_h)
         ),
@@ -1445,6 +1461,7 @@ def test_painter_gradient_particle_and_radial_ring(qapp):
         karaoke_anim="utopia",
         fx_particle_size_em=0.8,
         fx_particle_color_mode="follow_after",
+        fx_particle_color_layers="decor",
         karaoke_colors=KaraokeColors(after=KaraokeColorState(text=grad_v)),
     )
     img2 = QImage(800, 450, QImage.Format.Format_ARGB32_Premultiplied)
@@ -1504,6 +1521,7 @@ def test_ripple_bursts_carry_no_stroke_and_spec_cache_reuses():
         sing_fx="ripple",
         karaoke_anim="none",
         fx_particle_color_mode="follow_after",
+        fx_particle_color_layers="decor",
         stroke_width_px=8,
         stroke2_enabled=True,
         stroke2_width_px=4,
@@ -1522,6 +1540,7 @@ def test_ripple_bursts_carry_no_stroke_and_spec_cache_reuses():
         sing_fx="twinkle",
         karaoke_anim="none",
         fx_particle_color_mode="follow_after",
+        fx_particle_color_layers="decor",
         stroke_width_px=8,
         stroke2_enabled=True,
         stroke2_width_px=4,
@@ -2209,3 +2228,159 @@ def test_d2d_geo_transition_gates_cover_particle_anims():
     assert (ENTRY_PARTICLE_ANIMS | EXIT_PARTICLE_ANIMS) <= vertical_names, (
         sorted((ENTRY_PARTICLE_ANIMS | EXIT_PARTICLE_ANIMS) - vertical_names)
     )
+
+
+# ---------------------------------------------------------------------------
+# 2026-10 三期：取色层级（仅实色 / +描边 / +装饰 / 全有，偏好记忆）
+# ---------------------------------------------------------------------------
+
+
+def test_particle_color_layers_trim_source_decor():
+    """取色层级四档：solid（默认）/ stroke / decor / all 逐级裁层。"""
+    from krok_helper.subtitle_render.domain.paint import (
+        KaraokeColorState,
+        KaraokeColors,
+    )
+    from krok_helper.subtitle_render.engine.style.style_semantics import solid_fill
+
+    def _style(layers: str) -> Style:
+        return Style(
+            font_size_px=100,
+            sing_fx="twinkle",
+            fx_particle_size_em=0.5,  # 粒子 50px → 缩放 0.5
+            fx_particle_color_mode="follow_after",
+            fx_particle_color_layers=layers,
+            karaoke_anim="none",
+            stroke_width_px=8,
+            stroke2_enabled=True,
+            stroke2_width_px=4,
+            shadow_offset_x=6,
+            shadow_offset_y=4,
+            karaoke_colors=KaraokeColors(
+                after=KaraokeColorState(text=solid_fill("#FF5A6F"))
+            ),
+        )
+
+    def _burst(layers: str) -> dict:
+        bursts = plan_line_bursts(
+            _style(layers), 0, 0, 1000, 900, [(0, 400)]
+        )
+        return next(b for b in bursts if b["kind"] == "twinkle")
+
+    # 默认 = 仅实色：不携带 paint 规格（纯色剪影）。
+    assert Style().fx_particle_color_layers == "solid"
+    burst = _burst("solid")
+    assert "paint" not in burst
+    assert burst["color"] == "#FF5A6F"
+    # +描边：只有一层描边有宽；二重描边 0、无阴影键。
+    spec = _burst("stroke")["paint"]
+    assert spec["stroke_width_px"] == pytest.approx(4.0)  # 8 × 0.5
+    assert spec["stroke2_width_px"] == 0.0
+    assert "shadow" not in spec
+    # +装饰：描边 + 二重描边。
+    spec = _burst("decor")["paint"]
+    assert spec["stroke_width_px"] == pytest.approx(4.0)
+    assert spec["stroke2_width_px"] == pytest.approx(2.0)  # 4 × 0.5
+    assert "shadow" not in spec
+    # 全有：再叠加阴影（偏移按粒子尺寸同比缩放）。
+    spec = _burst("all")["paint"]
+    assert spec["shadow"]["mode"] == "solid"
+    assert spec["shadow_offset_x_px"] == pytest.approx(3.0)  # 6 × 0.5
+    assert spec["shadow_offset_y_px"] == pytest.approx(2.0)  # 4 × 0.5
+
+
+def test_particle_color_layers_apply_to_dual_variants():
+    """前后各一 / 花瓣复用：双变体各带该态的裁剪规格（层级统一生效）。"""
+    from krok_helper.subtitle_render.domain.models import SubtitleStyleScheme
+
+    mix = Style(
+        font_size_px=100,
+        sing_fx="petal",
+        fx_particle_color_mode="follow_mix",
+        fx_particle_color_layers="decor",
+        karaoke_anim="none",
+        stroke_width_px=8,
+        stroke2_enabled=True,
+        stroke2_width_px=4,
+        karaoke_colors=_karaoke_matrix("#123456", "#ABCDEF"),
+    )
+    petals = [
+        b
+        for b in plan_line_bursts(mix, 0, 0, 3000, 2900, [(100, 400)])
+        if b["kind"] == "petal"
+    ]
+    assert len(petals) == 2
+    assert all("paint" in b for b in petals)
+    assert {b["paint"]["fill"]["color"] for b in petals} == {
+        "#123456", "#ABCDEF",
+    }
+    assert all(b["paint"]["stroke_width_px"] > 0.0 for b in petals)
+    # 默认仅实色档：同一配置不带规格（旧观感）。
+    plain = Style(
+        font_size_px=100,
+        sing_fx="petal",
+        fx_particle_color_mode="follow_mix",
+        karaoke_anim="none",
+        karaoke_colors=_karaoke_matrix("#123456", "#ABCDEF"),
+    )
+    plain_petals = [
+        b
+        for b in plan_line_bursts(plain, 0, 0, 3000, 2900, [(100, 400)])
+        if b["kind"] == "petal"
+    ]
+    assert all("paint" not in b for b in plain_petals)
+    # 花瓣复用（role）同口径：来源态双变体带完整层级规格。
+    scheme = SubtitleStyleScheme(
+        karaoke_colors=_karaoke_matrix("#000000", "#EE7700")
+    )
+    role_style = Style(
+        font_size_px=100,
+        sing_fx="petal",
+        fx_particle_color_mode="role",
+        fx_particle_role_name="主唱",
+        fx_particle_color_layers="all",
+        custom_style_schemes={"主唱": scheme},
+        karaoke_anim="none",
+        stroke_width_px=8,
+    )
+    role_petals = [
+        b
+        for b in plan_line_bursts(role_style, 0, 0, 3000, 2900, [(100, 400)])
+        if b["kind"] == "petal"
+    ]
+    assert all("paint" in b for b in role_petals)
+    assert all("shadow" in b["paint"] for b in role_petals)
+
+
+def test_painter_particle_shadow_layer_smoke(qapp):
+    """CPU painter：全有档的阴影剪影层绘制不抛异常（含常量偏移）。"""
+    from PyQt6.QtGui import QImage
+
+    from krok_helper.subtitle_render.domain.timing import TimingChar, TimingTrack
+    from krok_helper.subtitle_render.engine.painter import paint_frame
+
+    track = TimingTrack(
+        lines=[
+            TimingLine(
+                chars=[TimingChar(text="あ", start_ms=1000)],
+                end_ms=1600,
+            )
+        ]
+    )
+    style = Style(
+        sing_fx="twinkle",
+        karaoke_anim="utopia",
+        fx_particle_size_em=0.8,
+        fx_particle_count=16,
+        fx_particle_color_mode="follow_after",
+        fx_particle_color_layers="all",
+        stroke_width_px=6,
+        stroke2_enabled=True,
+        stroke2_width_px=3,
+        shadow_offset_x=6,
+        shadow_offset_y=6,
+        karaoke_colors=_karaoke_matrix("#40E0FF", "#FF5A6F"),
+    )
+    img = QImage(800, 450, QImage.Format.Format_ARGB32_Premultiplied)
+    img.fill(0xFF101010)
+    paint_frame(img, track, 1300, style)

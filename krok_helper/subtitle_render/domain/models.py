@@ -1211,7 +1211,7 @@ class Style:
     """粒子颜色模式（仿扫字线）：``color`` 单独颜色——颜色一/颜色二双色
     随机混发（两色相同折叠为单色）；
     ``sakura`` 默认颜色——两种樱花粉随机混发（规划器拆双 burst，每颗粒子
-    各取一色）；``follow_mix`` 跟随字体·前后实色——所在行实际配色的
+    各取一色）；``follow_mix`` 跟随字体·前后各一——所在行实际配色的
     走字前/后「主文字」**实色**双色随机混发（渐变/拼色取停止色平均）；
     ``follow_before`` / ``follow_after`` 跟随字体——
     用**所在行**实际配色的走字前 / 走字后「主文字」完整装饰规格（渐变/
@@ -1229,6 +1229,15 @@ class Style:
     ``remap_particle_role_reference``）；仅 ``fx_particle_color_mode ==
     "role"`` 时生效。渲染时名字查不到则回退 ``color`` 模式的
     ``fx_particle_color``。"""
+
+    fx_particle_color_layers: str = "solid"
+    """取色层级（仅对从配色方案取色的四档生效：跟随字体·走字前 / 走字后 /
+    前后各一 / 复用配色方案）：``solid`` 仅实色——只取该态「主文字」色，
+    粒子呈纯色剪影（默认，2026-10 用户口径）；``stroke`` +描边——叠加该态
+    描边层；``decor`` +装饰——再叠加二重描边层；``all`` 全有——再叠加阴影
+    层（阴影为按粒子尺寸同比缩放、行空间常量偏移的剪影，与文字阴影
+    ``paint_shadow_silhouette`` 同口径）。偏好记忆：改一次一直沿用
+    （应用级习惯，不随打开工程回退，见 ``PARTICLE_MODULE_STYLE_FIELDS``）。"""
 
     fx_apply_to_entry_exit: bool = False
     """粒子参数联动入退场动画：开启后粒子的**颜色与尺寸**也应用于入场/
@@ -2278,6 +2287,12 @@ def style_from_dict(payload: object) -> Style:
         elif key == "fx_particle_role_name":
             parsed_role_name = str(value).strip() if value else ""
             changes[key] = parsed_role_name or None
+        elif key == "fx_particle_color_layers":
+            changes[key] = (
+                value
+                if value in {"solid", "stroke", "decor", "all"}
+                else defaults.fx_particle_color_layers
+            )
         elif key == "fx_apply_to_entry_exit":
             changes[key] = bool(value)
         elif key == "karaoke_stroke_flash":

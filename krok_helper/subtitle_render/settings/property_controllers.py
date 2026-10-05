@@ -344,6 +344,10 @@ def normalize_style_changes(changes: dict[str, object]) -> dict[str, object]:
         normalized["fx_particle_color_mode"] = normalize_particle_color_mode(
             normalized["fx_particle_color_mode"]
         )
+    if "fx_particle_color_layers" in normalized:
+        normalized["fx_particle_color_layers"] = normalize_particle_color_layers(
+            normalized["fx_particle_color_layers"]
+        )
     if "fx_apply_to_entry_exit" in normalized:
         normalized["fx_apply_to_entry_exit"] = bool(
             normalized["fx_apply_to_entry_exit"]
@@ -501,6 +505,12 @@ def normalize_particle_color_mode(value: object) -> str:
     }:
         return str(value)
     return "color"
+
+
+def normalize_particle_color_layers(value: object) -> str:
+    if value in {"solid", "stroke", "decor", "all"}:
+        return str(value)
+    return "solid"
 
 
 def normalize_lit_style(value: object):

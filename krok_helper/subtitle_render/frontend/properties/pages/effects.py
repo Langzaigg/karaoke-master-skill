@@ -79,10 +79,17 @@ FX_SING_OPTIONS = (
 FX_PARTICLE_COLOR_MODE_OPTIONS = (
     ("默认颜色", "sakura"),
     ("单独颜色", "color"),
-    ("跟随字体·前后实色", "follow_mix"),
+    ("跟随字体·前后各一", "follow_mix"),
     ("跟随字体·走字前", "follow_before"),
     ("跟随字体·走字后", "follow_after"),
     ("复用配色方案", "role"),
+)
+
+FX_PARTICLE_LAYER_OPTIONS = (
+    ("仅实色", "solid"),
+    ("+描边", "stroke"),
+    ("+装饰", "decor"),
+    ("全有", "all"),
 )
 
 
@@ -636,10 +643,10 @@ class EffectsPropertyPageBuilder:
         host._fx_particle_mode_combo.setToolTip(
             "粒子颜色模式：默认颜色=两种樱花粉随机混发（花瓣特效的默认观感）；"
             "单独颜色=颜色一/颜色二双色槽随机混发（两色相同为单色）；"
-            "跟随字体·前后实色=所在行实际配色的走字前/后主文字实色双色随机混发"
+            "跟随字体·前后各一=所在行实际配色的走字前/后主文字实色双色随机混发"
             "（渐变/拼色取平均色）；"
-            "跟随字体·走字前/后=取所在行实际配色的走字前/后主文字"
-            "完整装饰（渐变/描边原样下发，渐变/拼色取平均色仅作回退）；"
+            "跟随字体·走字前/后=取所在行实际配色的走字前/走字后主文字"
+            "完整装饰（渐变/描边按取色层级下发，渐变/拼色取平均色仅作回退）；"
             "复用配色方案=用所选来源（全局默认/「标题」/角色方案）的配色，"
             "花瓣取该来源走字前/后实色双色随机、其余粒子取「走字后-主文字」"
             "填充折算成实色，与扫字线同口径"
@@ -661,8 +668,27 @@ class EffectsPropertyPageBuilder:
                 fx_particle_role_name=host._fx_particle_role_combo.currentData()
             )
         )
+        host._fx_particle_layers_combo = WheelFocusedComboBox(section)
+        compact_property_control(host._fx_particle_layers_combo)
+        for label, value in FX_PARTICLE_LAYER_OPTIONS:
+            host._fx_particle_layers_combo.addItem(label, value)
+        host._fx_particle_layers_combo.setToolTip(
+            "取色层级（仅对从配色方案取色的四档生效：跟随字体·走字前/"
+            "走字后/前后各一、复用配色方案）：仅实色=只取该态主文字色，"
+            "粒子呈纯色剪影（默认）；+描边=叠加该态描边层；+装饰=再叠加"
+            "二重描边层；全有=再叠加阴影层（阴影按粒子尺寸同比缩放、"
+            "偏移方向恒定，与文字阴影同口径）；改一次一直沿用"
+        )
+        host._fx_particle_layers_combo.currentIndexChanged.connect(
+            lambda _index: host._update_style(
+                fx_particle_color_layers=host._fx_particle_layers_combo.currentData()
+            )
+        )
         host._fx_particle_row = self._fx_param_row(
-            section, host._fx_sing_combo, host._fx_particle_mode_combo
+            section,
+            host._fx_sing_combo,
+            host._fx_particle_mode_combo,
+            host._fx_particle_layers_combo,
         )
         host._fx_size_spin = self._spin_factory(5, 200, suffix=" %")
         host._fx_size_spin.setToolTip(
@@ -784,14 +810,16 @@ class EffectsPropertyPageBuilder:
         parent: QWidget,
         sing_combo: Any,
         mode_combo: Any,
+        layers_combo: Any,
     ) -> QWidget:
-        """唱字装饰粒子单行：档位 + 颜色模式。"""
+        """唱字装饰粒子单行：档位 + 颜色模式 + 取色层级。"""
         row = QWidget(parent)
         row_layout = QHBoxLayout(row)
         row_layout.setContentsMargins(0, 0, 0, 0)
         row_layout.setSpacing(6)
         row_layout.addWidget(sing_combo, 3)
-        row_layout.addWidget(mode_combo, 2)
+        row_layout.addWidget(mode_combo, 3)
+        row_layout.addWidget(layers_combo, 2)
         return row
 
     @staticmethod

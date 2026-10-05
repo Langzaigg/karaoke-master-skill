@@ -1195,6 +1195,18 @@ class PropertyPanel(QWidget):
                     ),
                 )
             )
+            self._fx_particle_layers_combo.setCurrentIndex(
+                max(
+                    0,
+                    self._fx_particle_layers_combo.findData(
+                        self._style.fx_particle_color_layers
+                        if self._style.fx_particle_color_layers in {
+                            "solid", "stroke", "decor", "all",
+                        }
+                        else "solid"
+                    ),
+                )
+            )
             self._fx_size_spin.setValue(
                 min(
                     max(
@@ -1537,7 +1549,8 @@ class PropertyPanel(QWidget):
         """粒子参数按颜色模式互换第三列：单独颜色显示双色槽（颜色一/二），
         复用配色方案显示来源下拉，跟随字体档与默认颜色（樱花粉双色）隐藏
         颜色与来源（颜色自动解析，粒子无亮度参数可复用，与扫字线第三列
-        「按模式互换」同款约定）。"""
+        「按模式互换」同款约定）。取色层级下拉仅对从配色方案取色的四档
+        （走字前/走字后/前后各一/复用配色方案）启用，其余档灰显。"""
 
         mode = self._style.fx_particle_color_mode
         follow = mode in {"sakura", "follow_mix", "follow_before", "follow_after"}
@@ -1548,11 +1561,17 @@ class PropertyPanel(QWidget):
             self._fx_count_spin,
             self._fx_color_slot,
             self._fx_particle_role_combo,
+            self._fx_particle_layers_combo,
             self._fx_apply_check,
         ):
             control.setEnabled(True)
         self._fx_color_slot.setVisible(not follow and not role)
         self._fx_particle_role_combo.setVisible(role)
+        # 取色层级只对「从配色方案取色」的档位有意义（默认颜色/单独颜色
+        # 无来源态可裁层）。
+        self._fx_particle_layers_combo.setEnabled(
+            mode in {"follow_before", "follow_after", "follow_mix", "role"}
+        )
         if role:
             self._refresh_fx_particle_role_combo()
 
