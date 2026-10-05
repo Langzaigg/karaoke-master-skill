@@ -49,6 +49,8 @@ from krok_helper.subtitle_render.engine.style.title_semantics import (
     title_row_alignments,
 )
 from krok_helper.subtitle_render.engine.text import (
+    char_layout_width,
+    char_path_left_offset,
     n3_char_box_ascent,
     n3_char_box_descent,
 )
@@ -68,6 +70,26 @@ from krok_helper.subtitle_render.domain.timing import (
 )
 
 
+class _TitleInkMetricsStyle:
+    """把 TitleOverlay 适配成 ink-cell 度量所需的 Style 字段子集。
+
+    C++ 把标题投影进歌词管线（强制 n3_1074）后，公式输入的 edge 取每字
+    解析外观自己的描边宽、空格百分比与咬字许可继承全局 Style
+    （``resolvedStyleFromTitle`` 以 sourceStyle 为底）——本适配器按同一
+    取值来源供 :func:`char_layout_width` / :func:`char_path_left_offset`
+    鸭子类型读取，不构造完整 Style。
+    """
+
+    def __init__(self, glyph_title, global_style, space_percent: int) -> None:
+        self.font_size_px = max(int(glyph_title.font_size_px), 1)
+        self.stroke_width_px = max(int(glyph_title.stroke_width_px), 0)
+        self.latin_font_size_px = None
+        self.space_width_percent = int(space_percent)
+        self.allow_biting = bool(
+            global_style.allow_biting if global_style is not None else False
+        )
+
+
 @dataclass(frozen=True)
 class TitleGlyphLayout:
     text: str
@@ -81,6 +103,11 @@ class TitleGlyphLayout:
 
     矢量符号作为路径并入所在文字 run（共享同一套描边 / 填充 / 发光），
     位图符号恒取「走字前」一侧图片——标题永不走字，没有走字后态。"""
+    path_offset: float = 0.0
+    """字形绘制相对 ``x`` 的水平偏移（ink-cell 语义的 ``pathOffset``）。
+
+    与 D2D 侧 configure 的 ``(-inkLeft + geometryLeft + edge/2)`` 同式
+    （:func:`char_path_left_offset`）；导唱符与空格恒为 0。"""
 
 
 @dataclass(frozen=True)
@@ -387,17 +414,49 @@ def layout_title_overlay(
                 glyph_font_for(unit_text) if glyph_font_for is not None else glyph_jp_font
             )
             glyph_metrics = QFontMetrics(glyph_font)
+            glyph_latin_metrics = (
+                QFontMetrics(glyph_latin_font)
+                if glyph_font_for is not None
+                else glyph_metrics
+            )
             if unit_symbol is not None:
                 # vector_glyph_width 只读 font_size_px：标题的逐字解析外观与
                 # 歌词 Style 同名同义，直接复用同一套导唱符宽度契约。
                 advance = float(vector_glyph_width(unit_symbol, glyph_title))
+                path_offset = 0.0
             elif unit_text == " ":
                 space_unit = glyph_font.pixelSize()
                 if space_unit <= 0:
                     space_unit = max(int(glyph_title.font_size_px), 1)
                 advance = float(space_unit * title_space_percent // 100)
+                path_offset = 0.0
             else:
-                advance = float(glyph_metrics.horizontalAdvance(unit_text))
+                # 与 D2D 侧对齐（2026-10 用户拍板「对齐 GPU」）：sidecar 把
+                # 标题投影进歌词同一条 TextLine 管线（强制 n3_1074），逐字
+                # advance 走 ink-cell 公式（墨迹宽 × 轴承比 + 描边宽），而
+                # 不是 QFontMetrics 的裸 advance——裸 advance 会随字体在
+                # Qt/DWrite 的度量差逐字累积（实测 4K 标题行末端偏 ~90px）。
+                ink_style = _TitleInkMetricsStyle(
+                    glyph_title, style, title_space_percent
+                )
+                advance = float(
+                    char_layout_width(
+                        unit_text,
+                        glyph_jp_font,
+                        glyph_metrics,
+                        glyph_latin_metrics,
+                        glyph_font_for,
+                        ink_style,
+                    )
+                )
+                path_offset = char_path_left_offset(
+                    unit_text,
+                    glyph_jp_font,
+                    glyph_metrics,
+                    glyph_latin_metrics,
+                    glyph_font_for,
+                    ink_style,
+                )
             glyphs.append(
                 TitleGlyphLayout(
                     text=unit_text,
@@ -407,6 +466,7 @@ def layout_title_overlay(
                     metrics=glyph_metrics,
                     title=glyph_title,
                     guide_symbol=unit_symbol,
+                    path_offset=path_offset,
                 )
             )
             cursor += advance
@@ -764,12 +824,12 @@ def build_title_overlay_layer(
                             )
                         else:
                             path.addText(
-                                float(line_x + glyph.x),
+                                float(line_x + glyph.x + glyph.path_offset),
                                 baseline,
                                 glyph.font,
                                 glyph.text,
                             )
-                    left = float(line_x + run[0].x)
+                    left = float(line_x + run[0].x + run[0].path_offset)
                     right = float(line_x + run[-1].x + run[-1].advance)
                     ascent = max(glyph.metrics.ascent() for glyph in run)
                     descent = max(glyph.metrics.descent() for glyph in run)

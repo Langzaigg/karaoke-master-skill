@@ -10890,11 +10890,15 @@ def test_title_edge_anchor_keeps_stroke_inside_the_margin(qapp):
     assert plain_left.x0 == pytest.approx(40.0, abs=0.001)
     assert stroked_left.x0 == pytest.approx(45.0, abs=0.001)
 
-    # 右锚点向内缩同样的半描边，左右保持对称。
+    # 右锚点向内缩同样的半描边，左右保持对称。2026-10 标题 advance 对齐
+    # GPU（ink-cell：每字含整份描边宽），描边版行宽随之变宽，右锚点 x0
+    # 额外左移「行宽增量」——与 D2D 侧 configure 的口径一致。
     plain_right = _layout("top_right", 0)
     stroked_right = _layout("top_right", 10)
     assert plain_right.x0 - stroked_right.x0 == pytest.approx(
-        stroked_left.x0 - plain_left.x0, abs=0.001
+        (stroked_left.x0 - plain_left.x0)
+        + (stroked_right.widths[0] - plain_right.widths[0]),
+        abs=0.001,
     )
 
     # 竖向不重复补：那一半已经含在 N3 盒高里。
@@ -16527,11 +16531,8 @@ def test_title_overlay_space_uses_n3_space_width(qapp):
     assert len(spaces) == 1, [glyph.text for glyph in glyphs]
     assert spaces[0].advance == 48 * 20 // 100
 
-    # Every other glyph keeps its own advance, so the row width follows.
-    expected = sum(
-        float(48 * 20 // 100)
-        if glyph.text == " "
-        else float(glyph.metrics.horizontalAdvance(glyph.text))
-        for glyph in glyphs
+    # 2026-10 标题 advance 对齐 GPU：非空格字符走 ink-cell 公式（墨迹宽 ×
+    # 轴承比 + 描边宽），行宽恒等于逐字 advance 之和（字间距在末字后不补）。
+    assert layout.widths[0] == pytest.approx(
+        sum(glyph.advance for glyph in glyphs), abs=0.001
     )
-    assert layout.widths[0] == expected
