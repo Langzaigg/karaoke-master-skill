@@ -6634,6 +6634,20 @@ ProbeResult Direct2DGpuBackend::renderFrameInternal(
             // frame, which is dramatically slower than Direct2D's native
             // DrawGeometry stroke on long real-world lines.
             const bool animated = charTransformedAt(charIndex);
+            // 放大矩阵下的矢量字形描边回落原路径直描（2026-10 用户实测
+            // 锯齿）：utopia 过冲（1.15/1.3×）与逐字放大 zoom_pulse
+            // （1.25×）都经逐字动画矩阵放大——此时预展开轮廓的多边形
+            // 逼近被放大暴露，DrawGeometry 原路径直描按设备精度展开、
+            // 基线已证平滑。非放大态保留轮廓填充（亚毫秒）。行列式 =
+            // 面积缩放因子，统一覆盖旋转/非均匀缩放。
+            bool magnified = false;
+            if (animated) {
+                const D2D1_MATRIX_3X2_F &anim =
+                    characterAnimationAt(charIndex).matrix;
+                magnified = std::abs(
+                    anim._11 * anim._22 - anim._12 * anim._21
+                ) > 1.02f;
+            }
             // 8px 使用侧门随任务生成侧一并废除（2026-10）：烘好的
             // realization 恒优于直绘——存在即用，仅动画字走动态几何。
             const bool realizationEligible = !animated;
@@ -6642,9 +6656,10 @@ ProbeResult Direct2DGpuBackend::renderFrameInternal(
                     return;
                 }
                 ID2D1Geometry *animatedStroke2 = stroke2GeometryAt(charIndex);
-                // 有预展开轮廓（矢量字形）时优先填充（亚毫秒），没有才
-                // 对原路径逐帧 DrawGeometry（密集 SVG ~4ms/帧）。
-                if (animated && animatedStroke2 != nullptr) {
+                // 有预展开轮廓（矢量字形）且未放大时优先填充（亚毫秒），
+                // 没有或放大态才对原路径逐帧 DrawGeometry（密集 SVG
+                // ~4ms/帧；放大时是设备精度兜底，见 magnified 注释）。
+                if (animated && !magnified && animatedStroke2 != nullptr) {
                     fillCountedStroke(animatedStroke2, brush, true);
                 } else if (animated && impl_->dynamicDirectStrokeEnabled) {
                     drawCountedStroke(
@@ -6674,7 +6689,8 @@ ProbeResult Direct2DGpuBackend::renderFrameInternal(
                 );
                 ID2D1Geometry *protectedGeometry = protectedGeometryAt(charIndex);
                 ID2D1Geometry *animatedStroke = strokeGeometryAt(charIndex);
-                if (animated && !protect && animatedStroke != nullptr) {
+                if (animated && !protect && !magnified
+                    && animatedStroke != nullptr) {
                     fillCountedStroke(animatedStroke, brush, false);
                 } else if (animated && !protect
                     && impl_->dynamicDirectStrokeEnabled) {
