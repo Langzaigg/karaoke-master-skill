@@ -1,6 +1,6 @@
 """Focused contracts for role fill-editor pages."""
 
-from PyQt6.QtCore import QEvent, QPointF, Qt
+from PyQt6.QtCore import QEvent, QPointF, QRectF, QSize, Qt
 from PyQt6.QtGui import QMouseEvent
 from PyQt6.QtWidgets import QPushButton
 
@@ -456,3 +456,45 @@ def test_set_stops_keeps_selection_among_equal_position_stops(qapp) -> None:
     # equal-position neighbour must not steal the selection.
     editor.set_stops(stops)
     assert editor._stops[editor._selected][1] == "#333333"
+
+
+def test_vertical_bar_shrinks_before_pointer_lane_is_clipped(qapp) -> None:
+    from krok_helper.subtitle_render.frontend.properties.property_panel import (
+        GradientStopsEditor,
+    )
+
+    editor = GradientStopsEditor()
+    editor.set_orientation("gradient_vertical")
+
+    # Full width: preferred geometry unchanged (12 left + 48 bar + tag lane).
+    editor.resize(editor.sizeHint())
+    assert editor.width() == 91
+    assert editor._bar_rect() == QRectF(12, 15, 48, editor.height() - 30)
+
+    # Squeezed widths: the bar absorbs the shortage so the right-side tag
+    # lane plus its 4px margin always stays inside the widget. 44 is the last
+    # width where the bar still shrinks (1px); the floor matches the 1px
+    # floors of the horizontal bar's width and the vertical bar's height.
+    for width in (90, 75, 60, 51, 44):
+        editor.resize(width, editor.sizeHint().height())
+        bar = editor._bar_rect()
+        lane = editor._pointer_lane_rect()
+        assert bar.left() == 12
+        assert bar.width() == width - 43
+        assert lane.right() <= width - editor._BAR_RIGHT_MARGIN
+
+    # Extreme squeeze: the bar bottoms out at the 1px floor instead of vanishing.
+    assert editor._BAR_MIN_WIDTH == 1
+    editor.resize(20, editor.sizeHint().height())
+    assert editor._bar_rect().width() == 1
+
+
+def test_horizontal_bar_geometry_is_unaffected_by_vertical_adaptation(qapp) -> None:
+    from krok_helper.subtitle_render.frontend.properties.property_panel import (
+        GradientStopsEditor,
+    )
+
+    editor = GradientStopsEditor()
+    editor.resize(120, editor.sizeHint().height())
+    assert editor._bar_rect() == QRectF(15, 8, 90, 22)
+    assert editor.sizeHint() == QSize(220, 52)

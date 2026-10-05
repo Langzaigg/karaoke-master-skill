@@ -67,6 +67,10 @@ class GradientStopsEditor(QWidget):
     _POINTER_ARROW_LENGTH = 6
     _POINTER_BODY_LENGTH = 18
     _POINTER_HALF_THICKNESS = 5
+    _BAR_LEFT = 12
+    _BAR_WIDTH = 48
+    _BAR_MIN_WIDTH = 1
+    _BAR_RIGHT_MARGIN = 4
     # Drop-to-merge windows (percent of the bar): releasing within these
     # distances of another marker / of a bar end counts as dropping onto it,
     # because a mouse release can never land pixel-exact. The end windows are
@@ -94,16 +98,18 @@ class GradientStopsEditor(QWidget):
         if self._orientation == "vertical":
             # 12 left + 48 bar + 3 gap + 6 arrow + 18 tag + 4 right.
             # Every color bar uses the same external pointer geometry.
-            return QSize(
-                12
-                + 48
-                + self._POINTER_GAP
-                + self._POINTER_ARROW_LENGTH
-                + self._POINTER_BODY_LENGTH
-                + 4,
-                height,
-            )
+            return QSize(self._vertical_total_width(), height)
         return QSize(220, height)
+
+    def _vertical_total_width(self) -> int:
+        return (
+            self._BAR_LEFT
+            + self._BAR_WIDTH
+            + self._POINTER_GAP
+            + self._POINTER_ARROW_LENGTH
+            + self._POINTER_BODY_LENGTH
+            + self._BAR_RIGHT_MARGIN
+        )
 
     @property
     def selected_index(self) -> int:
@@ -308,7 +314,22 @@ class GradientStopsEditor(QWidget):
     def _bar_rect(self) -> QRectF:
         if self._orientation == "horizontal":
             return QRectF(15, 8, max(self.width() - 30, 1), 22)
-        return QRectF(12, 15, 48, max(self.height() - 30, 1))
+        return QRectF(
+            self._BAR_LEFT, 15, self._vertical_bar_width(), max(self.height() - 30, 1)
+        )
+
+    def _vertical_bar_width(self) -> float:
+        # Under horizontal squeeze the bar shrinks before the right-side
+        # pointer lane (tag) does. Floor of 1px matches the other adaptive
+        # spans (horizontal bar width / vertical bar height).
+        reserved = (
+            self._BAR_LEFT
+            + self._POINTER_GAP
+            + self._POINTER_ARROW_LENGTH
+            + self._POINTER_BODY_LENGTH
+            + self._BAR_RIGHT_MARGIN
+        )
+        return max(min(self._BAR_WIDTH, self.width() - reserved), self._BAR_MIN_WIDTH)
 
     def _pointer_lane_rect(self) -> QRectF:
         if self._orientation == "horizontal":
