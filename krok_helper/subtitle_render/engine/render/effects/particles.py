@@ -588,70 +588,273 @@ def _petal_commands() -> list[list[object]]:
     ]
 
 
-def _snow_commands() -> list[list[object]]:
-    """雪花剪影：雪未来/❄ 风格的**棒条式枝晶**（2026-10 用户口径，两版
-    星形均被否——画法参考 letsdrawthat 六臂枝晶教程）：六条细长主臂
-    （60° 间隔、半宽 48）+ 每臂两对自主臂中段以 60° 朝外伸出的侧枝
-    （V 形箭头枝：内侧枝长 170@r300、外侧枝长 120@r430）+ 臂端窄尖
-    封口（r 480）+ 中心六边形（r 150）。单轮廓一笔绕行（沿臂外缘上行、
-    逐侧枝绕出绕回、过臂尖、对称下行、六边形边过渡到下一臂），无自
-    交叠；约百个直线顶点，粒子小尺寸下读作经典雪花枝晶。"""
-    hex_r = 150.0      # 中心六边形半径
-    arm_w = 48.0       # 主臂半宽（细条）
-    tip_r = 480.0      # 臂尖半径
-    cap = 45.0         # 臂尖封口长度
-    # 侧枝（从臂缘伸出的 V 形箭头枝）：(根部距离, 枝长)。外枝受 ≤500
-    # 包络约束（430+0.5×100+…≈484）。
-    branches = ((300.0, 170.0), (430.0, 100.0))
+def _polygon_signed_area(points: list[tuple[float, float]]) -> float:
+    """鞋带公式：>0 为逆时针（CCW）。"""
+    total = 0.0
+    count = len(points)
+    for i in range(count):
+        x0, y0 = points[i]
+        x1, y1 = points[(i + 1) % count]
+        total += x0 * y1 - x1 * y0
+    return total * 0.5
 
-    def _point(theta: float, d: float, w: float) -> tuple[float, float]:
-        # 臀局部系：u=臂方向、n=左法向；d=沿臂距离、w=横向偏移。
-        cos_t = math.cos(theta)
-        sin_t = math.sin(theta)
-        return (
-            d * cos_t - w * sin_t,
-            d * sin_t + w * cos_t,
+
+def _point_inside_polygon(
+    point: tuple[float, float], polygon: list[tuple[float, float]]
+) -> bool:
+    """射线交叉计数：点是否在（可能凹的）简单多边形内部。"""
+    x, y = point
+    inside = False
+    count = len(polygon)
+    for i in range(count):
+        x0, y0 = polygon[i]
+        x1, y1 = polygon[(i + 1) % count]
+        if (y0 > y) != (y1 > y):
+            if x < x0 + (y - y0) * (x1 - x0) / (y1 - y0):
+                inside = not inside
+    return inside
+
+
+def _segment_crossing(
+    a: tuple[float, float],
+    b: tuple[float, float],
+    c: tuple[float, float],
+    d: tuple[float, float],
+) -> tuple[float, float] | None:
+    """线段 ab 与 cd 的交点参数 (t, u)（截断到 [0,1]）；平行/不相交为 None。"""
+    r_x, r_y = b[0] - a[0], b[1] - a[1]
+    s_x, s_y = d[0] - c[0], d[1] - c[1]
+    den = r_x * s_y - r_y * s_x
+    if abs(den) < 1e-12:
+        return None
+    q_x, q_y = c[0] - a[0], c[1] - a[1]
+    t = (q_x * s_y - q_y * s_x) / den
+    u = (q_x * r_y - q_y * r_x) / den
+    limit = 1e-9
+    if -limit <= t <= 1.0 + limit and -limit <= u <= 1.0 + limit:
+        return (min(max(t, 0.0), 1.0), min(max(u, 0.0), 1.0))
+    return None
+
+
+def _union_outline(
+    polygons: list[list[tuple[float, float]]],
+) -> list[list[tuple[float, float]]]:
+    """简单多边形并集的边界环（外环 + 洞环，全部保持 CCW 元素边的绕向）。
+
+    为什么不是「多个子路径直接画重叠元素」：Python painter 用 even-odd
+    填充、C++ D2D 后端用 winding 填充（painter.py / d2d_geometry_resources.cpp），
+    重叠或嵌套的同向子路径在两种规则下结果不同。改取精确并集轮廓后，
+    「外环 + 反向洞环」（ring sprite 同款约定）两规则渲染一致。
+    元素需自身简单、两两无共线重边、无三线共点（雪花元素按参数构造满足）；
+    串联不成环时直接抛错——坏 sprite 不允许静默进入产品。"""
+    normalized: list[list[tuple[float, float]]] = []
+    for polygon in polygons:
+        points = [(float(x), float(y)) for x, y in polygon]
+        if _polygon_signed_area(points) < 0.0:
+            points.reverse()
+        normalized.append(points)
+    edges: list[tuple[int, tuple[float, float], tuple[float, float]]] = []
+    for index, polygon in enumerate(normalized):
+        count = len(polygon)
+        for i in range(count):
+            edges.append((index, polygon[i], polygon[(i + 1) % count]))
+    cuts: list[list[float]] = [[0.0, 1.0] for _ in edges]
+    for i in range(len(edges)):
+        for j in range(i + 1, len(edges)):
+            if edges[i][0] == edges[j][0]:
+                continue  # 自身简单：同元素边不互切
+            crossing = _segment_crossing(
+                edges[i][1], edges[i][2], edges[j][1], edges[j][2]
+            )
+            if crossing is not None:
+                cuts[i].append(crossing[0])
+                cuts[j].append(crossing[1])
+    segments: list[tuple[tuple[float, float], tuple[float, float]]] = []
+    for i, (owner, start, end) in enumerate(edges):
+        # 参数不四舍五入：截断参数的重建误差会放大到 ~1e-7，跨过串联
+        # 端点键（round 6 位）的分档边界；零长段由下一行的阈值兜底。
+        stops = sorted(set(cuts[i]))
+        for t0, t1 in zip(stops, stops[1:]):
+            if t1 - t0 <= 1e-9:
+                continue
+            p0 = (start[0] + (end[0] - start[0]) * t0, start[1] + (end[1] - start[1]) * t0)
+            p1 = (start[0] + (end[0] - start[0]) * t1, start[1] + (end[1] - start[1]) * t1)
+            middle = ((p0[0] + p1[0]) * 0.5, (p0[1] + p1[1]) * 0.5)
+            for k, polygon in enumerate(normalized):
+                if k != owner and _point_inside_polygon(middle, polygon):
+                    break
+            else:
+                segments.append((p0, p1))
+
+    def _key(point: tuple[float, float]) -> tuple[float, float]:
+        return (round(point[0], 6), round(point[1], 6))
+
+    starting: dict[tuple[float, float], list[int]] = {}
+    for index, (start, _end) in enumerate(segments):
+        starting.setdefault(_key(start), []).append(index)
+    used = [False] * len(segments)
+    loops: list[list[tuple[float, float]]] = []
+    for first in range(len(segments)):
+        if used[first]:
+            continue
+        loop: list[tuple[float, float]] = []
+        current = first
+        start_key = _key(segments[first][0])
+        while True:
+            used[current] = True
+            loop.append(segments[current][0])
+            following = None
+            for candidate in starting.get(_key(segments[current][1]), ()):
+                if not used[candidate]:
+                    following = candidate
+                    break
+            if following is None or _key(segments[following][0]) == start_key:
+                break
+            current = following
+        if _key(segments[current][1]) != start_key or len(loop) < 3:
+            raise ValueError("多边形并集边界串联失败（元素几何退化）")
+        loops.append(loop)
+    return loops
+
+
+def _snow_element_polygons() -> list[list[tuple[float, float]]]:
+    """雪花元素多边形（教程结构）：中心六边形 + 六主臂 + 每臂两条内层触接枝
+    + 每臂两条外层自由枝。供 `_union_outline` 取并集轮廓（测试亦直接引用）。"""
+    tip_r = 470.0  # 臂尖半径（包络 ≤ 500）
+    arm_half = 30.0  # 臂半宽
+    arm_base = 96.0  # 臂基部半径（落在六边形环的环壁内）
+    hex_r = 119.0  # 中心六边形外沿顶点半径
+    hex_inner_r = 93.5  # 中心六边形内沿顶点半径（环壁厚 ≈ 22）
+    hex_overlap = 8.0  # 六边形环相邻块的沿边搭接量（避免共线重边）
+    anchor_d = 182.0  # 内层枝锚点沿臂距离（落在臂缘上）
+    branch_half = 13.0  # 枝半宽
+    outer_d = 330.0  # 外层枝锚点沿臂距离
+    sink = 30.0  # 枝基部没入臂内的长度
+    taper_ratio = math.sqrt(3.0)  # 60° 尖：沿轴收束长度 = 半宽 × √3
+
+    arm_taper = arm_half * taper_ratio
+    branch_taper = branch_half * taper_ratio
+    star_arm_r = anchor_d - arm_half / math.sqrt(3.0)  # 星环中线在臂轴上的交线半径
+    star_tip_r = star_arm_r * math.sqrt(3.0)  # 相邻两枝轴线交点半径（触接处）
+    branch_len = anchor_d - arm_half * taper_ratio  # 臂缘锚点 → 触接交点的轴线长
+
+    polygons: list[list[tuple[float, float]]] = []
+    # 中心六边形**环**（教程里六边形是空心轮廓；实心剪影下拆成六块沿边搭接
+    # 的平行四边形，中心自然留出六边形白洞）。
+    for k in range(6):
+        start_angle = k * math.pi / 3.0
+        end_angle = start_angle + math.pi / 3.0
+        edge_angle = start_angle + 2.0 * math.pi / 3.0  # 该边方向（外沿起点 → 终点）
+        ex, ey = math.cos(edge_angle), math.sin(edge_angle)
+        outer_start = (hex_r * math.cos(start_angle), hex_r * math.sin(start_angle))
+        outer_end = (hex_r * math.cos(end_angle), hex_r * math.sin(end_angle))
+        inner_start = (
+            hex_inner_r * math.cos(start_angle),
+            hex_inner_r * math.sin(start_angle),
         )
+        inner_end = (hex_inner_r * math.cos(end_angle), hex_inner_r * math.sin(end_angle))
+        polygons.append(
+            [
+                (outer_start[0] - hex_overlap * ex, outer_start[1] - hex_overlap * ey),
+                (outer_end[0] + hex_overlap * ex, outer_end[1] + hex_overlap * ey),
+                (inner_end[0] + hex_overlap * ex, inner_end[1] + hex_overlap * ey),
+                (inner_start[0] - hex_overlap * ex, inner_start[1] - hex_overlap * ey),
+            ]
+        )
+    # 主臂：60° 尖的细长五边形。
+    for k in range(6):
+        angle = k * math.pi / 3.0
+        ux, uy = math.cos(angle), math.sin(angle)
+        nx, ny = -uy, ux
+        polygons.append(
+            [
+                (arm_base * ux + arm_half * nx, arm_base * uy + arm_half * ny),
+                (
+                    (tip_r - arm_taper) * ux + arm_half * nx,
+                    (tip_r - arm_taper) * uy + arm_half * ny,
+                ),
+                (tip_r * ux, tip_r * uy),
+                (
+                    (tip_r - arm_taper) * ux - arm_half * nx,
+                    (tip_r - arm_taper) * uy - arm_half * ny,
+                ),
+                (arm_base * ux - arm_half * nx, arm_base * uy - arm_half * ny),
+            ]
+        )
+    # 细枝：side=+1 指向下一臂、side=-1 指向上一条臂（皆与主臂成 60°）。
+    # 外层枝自由 60° 尖；内层枝远端由臂间中线上的星尖 M 斜切封口，两名
+    # 相邻内层枝的外缘即在 M 相交成 60° 星尖（并集自动成 miter）。
+    for k in range(6):
+        angle = k * math.pi / 3.0
+        ux, uy = math.cos(angle), math.sin(angle)
+        nx, ny = -uy, ux
+        for side in (1.0, -1.0):
+            bisector = angle + side * math.pi / 6.0
+            for anchor_radius, cut_tip in ((anchor_d, True), (outer_d, False)):
+                start = (
+                    anchor_radius * ux + side * arm_half * nx,
+                    anchor_radius * uy + side * arm_half * ny,
+                )
+                direction = angle + side * math.pi / 3.0
+                dx, dy = math.cos(direction), math.sin(direction)
+                lx, ly = -dy, dx  # 枝局部左法向
+                outer = -side  # 外缘在“朝臂间中线”一侧
+                inner_base = (
+                    start[0] - sink * dx - outer * branch_half * lx,
+                    start[1] - sink * dy - outer * branch_half * ly,
+                )
+                outer_base = (
+                    start[0] - sink * dx + outer * branch_half * lx,
+                    start[1] - sink * dy + outer * branch_half * ly,
+                )
+                if cut_tip:
+                    tip_radius = star_tip_r + 2.0 * branch_half
+                    apex = (
+                        tip_radius * math.cos(bisector),
+                        tip_radius * math.sin(bisector),
+                    )
+                    inner_end = (
+                        start[0] + branch_len * dx - outer * branch_half * lx,
+                        start[1] + branch_len * dy - outer * branch_half * ly,
+                    )
+                    polygons.append([outer_base, apex, inner_end, inner_base])
+                else:
+                    apex = (start[0] + branch_len * dx, start[1] + branch_len * dy)
+                    shoulder = branch_len - branch_taper
+                    outer_shoulder = (
+                        start[0] + shoulder * dx + outer * branch_half * lx,
+                        start[1] + shoulder * dy + outer * branch_half * ly,
+                    )
+                    inner_shoulder = (
+                        start[0] + shoulder * dx - outer * branch_half * lx,
+                        start[1] + shoulder * dy - outer * branch_half * ly,
+                    )
+                    polygons.append(
+                        [outer_base, outer_shoulder, apex, inner_shoulder, inner_base]
+                    )
+    return polygons
 
-    def _branch_tip(
-        theta: float, root_d: float, side: float, length: float
-    ) -> tuple[float, float]:
-        # 侧枝尖：自臂缘 (root_d, side*arm_w) 沿「0.5u + side*0.866n」
-        # （与主臂成 60°、朝 side 侧外张）伸出 length。
-        cos_t = math.cos(theta)
-        sin_t = math.sin(theta)
-        base_x, base_y = _point(theta, root_d, side * arm_w)
-        dir_x = 0.5 * cos_t - side * 0.866 * sin_t
-        dir_y = 0.5 * sin_t + side * 0.866 * cos_t
-        return (base_x + dir_x * length, base_y + dir_y * length)
 
+def _snow_commands() -> list[list[object]]:
+    """雪花剪影：letsdrawthat 教程「六臂枝晶」画法（2026-10 用户口径，目标
+    为教程成图而非线条星形）：**空心中心六边形**（顶点朝向六臂）+ 六条 60°
+    尖锐主臂 + **内层 12 条细枝两两触接**（端点在臂间 30° 中线上汇成六角星）
+    + 外层每臂一对同形细枝（近尖端，仿箭羽）。比例按教程成图取样：六边形
+    外沿顶点半径 0.253R、星环交线半径臂上 0.35R（中线 0.607R）、臂宽 0.128R；
+    枝宽为粒子尺寸下的可读性略加粗（0.028R）。元素多边形取精确并集轮廓：
+    外环 + 六个「六边形与星环之间的窗洞」环 + 中心六边形洞环——even-odd /
+    winding 两填充规则渲染一致（见 `_union_outline`）。"""
+    loops = _union_outline(_snow_element_polygons())
+    if len(loops) != 8:
+        raise ValueError(
+            f"雪花并集轮廓环数异常：{len(loops)}（期望 1 外环 + 6 窗洞 + 1 中心洞）"
+        )
     commands: list[list[object]] = []
-
-    def _emit(x: float, y: float) -> None:
-        commands.append(["M" if not commands else "L", x, y])
-
-    for arm in range(6):
-        theta = -math.pi / 2.0 + arm * math.pi / 3.0
-        # 绕行方向统一逆时针（角度递增）：每臂块自「右缘」（极角小侧，
-        # w=-）上行 → 臂尖 → 「左缘」（w=+）下行 → 根左，再经六边形边
-        # 过渡到下一臂根右——块内块间角度都递增，过渡线不互穿。
-        _emit(*_point(theta, hex_r, -arm_w))
-        for root_d, length in branches:
-            _emit(*_point(theta, root_d, -arm_w))
-            _emit(*_branch_tip(theta, root_d, -1.0, length))
-            _emit(*_point(theta, root_d + 30.0, -arm_w))
-        _emit(*_point(theta, tip_r - cap, -arm_w))
-        # 臂端窄尖封口。
-        _emit(*_point(theta, tip_r, 0.0))
-        _emit(*_point(theta, tip_r - cap, arm_w))
-        # 左缘下行（w=+）：逐侧枝（对称）绕出/绕回 → 臂根左。
-        for root_d, length in reversed(branches):
-            _emit(*_point(theta, root_d + 30.0, arm_w))
-            _emit(*_branch_tip(theta, root_d, 1.0, length))
-            _emit(*_point(theta, root_d, arm_w))
-        _emit(*_point(theta, hex_r, arm_w))
-        # 六边形边过渡：本臂根左直线连到下一臂根右（下一臂的起点）。
-    commands.append(["Z"])
+    for loop in loops:
+        commands.append(["M", loop[0][0], loop[0][1]])
+        for x, y in loop[1:]:
+            commands.append(["L", x, y])
+        commands.append(["Z"])
     return commands
 
 

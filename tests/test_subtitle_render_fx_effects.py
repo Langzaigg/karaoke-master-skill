@@ -2546,57 +2546,167 @@ def test_snow_trajectory_windows_and_bounds():
             assert min(s.y for s in late) > -20.0
 
 
-def test_snow_sprite_contract():
-    """雪花 sprite：❄ 枝晶——六主臂 + 每臂两侧枝，24 顶点三档半径、
-    单轮廓闭合。"""
-    snow = FX_SPRITES["snow"]["path_commands"]
-    assert snow[0][0] == "M" and snow[-1][0] == "Z"
-    assert sum(1 for c in snow if c[0] == "M") == 1
-    lines = [c for c in snow if c[0] == "L"]
-    assert len(lines) == 101  # 棒条式枝晶：6 臂 × 17 顶点 - 1 个 M
-    points = [
-        (float(c[i]), float(c[i + 1]))
-        for c in snow
-        for i in range(1, len(c) - 1, 2)
-    ]
-    radii = [math.hypot(x, y) for x, y in points]
-    # 中心六边形（min r ≈ 157.5）+ 臂尖/外枝尖包络 ≤ 500。
-    assert 140.0 < min(radii) < 175.0
-    assert 470.0 < max(radii) <= 500.0
-    # 严格无自交叠（浮点容差，防将来调轮廓参数破坏绕行）。
-    def _cross(o, a, b):
+def _sprite_loops(commands):
+    """把 sprite path_commands 拆成闭合环（每个 M 起一环）。"""
+    loops = []
+    for command in commands:
+        if command[0] == "M":
+            loops.append([(float(command[1]), float(command[2]))])
+        elif command[0] == "L":
+            loops[-1].append((float(command[1]), float(command[2])))
+    return loops
+
+
+def _sprite_loop_area(points):
+    """鞋带公式（逆时针为正）。"""
+    total = 0.0
+    for i in range(len(points)):
+        x0, y0 = points[i]
+        x1, y1 = points[(i + 1) % len(points)]
+        total += x0 * y1 - x1 * y0
+    return total * 0.5
+
+
+def _sprite_loop_contains(point, polygon):
+    """射线交叉计数：点是否在（可能凹的）简单多边形内。"""
+    x, y = point
+    inside = False
+    for i in range(len(polygon)):
+        x0, y0 = polygon[i]
+        x1, y1 = polygon[(i + 1) % len(polygon)]
+        if (y0 > y) != (y1 > y) and x < x0 + (y - y0) * (x1 - x0) / (y1 - y0):
+            inside = not inside
+    return inside
+
+
+def _sprite_loop_intersections(loops):
+    """严格自交叠/环间交叠计数（1e-9 容差；共享端点与共线贴边不误报）。"""
+
+    def cross(o, a, b):
         return (a[0] - o[0]) * (b[1] - o[1]) - (a[1] - o[1]) * (b[0] - o[0])
 
-    def _sign(value):
+    def sign(value):
         return 0 if abs(value) < 1e-9 else (1 if value > 0 else -1)
 
-    def _segments():
-        return [
-            (points[i], points[(i + 1) % len(points)])
-            for i in range(len(points))
-        ]
+    segments = [
+        (loop[i], loop[(i + 1) % len(loop)])
+        for loop in loops
+        for i in range(len(loop))
+    ]
+    hits = 0
+    for i in range(len(segments)):
+        p1, p2 = segments[i]
+        for j in range(i + 1, len(segments)):
+            p3, p4 = segments[j]
+            if (
+                sign(cross(p3, p4, p1)) * sign(cross(p3, p4, p2)) < 0
+                and sign(cross(p1, p2, p3)) * sign(cross(p1, p2, p4)) < 0
+            ):
+                hits += 1
+    return hits
 
-    segs = _segments()
-    for i in range(len(segs)):
-        for j in range(i + 2, len(segs)):
-            if i == 0 and j == len(segs) - 1:
-                continue
-            p1, p2 = segs[i]
-            p3, p4 = segs[j]
-            s1 = _sign(_cross(p3, p4, p1))
-            s2 = _sign(_cross(p3, p4, p2))
-            s3 = _sign(_cross(p1, p2, p3))
-            s4 = _sign(_cross(p1, p2, p4))
-            assert not (s1 * s2 < 0 and s3 * s4 < 0), (i, j, segs[i], segs[j])
-    # 中心实心（雪花不是环）。
-    x, y = 0.0, 0.0
-    inside = False
-    for i in range(len(points)):
-        x1, y1 = points[i]
-        x2, y2 = points[(i + 1) % len(points)]
-        if (y1 > y) != (y2 > y) and x < (x2 - x1) * (y - y1) / (y2 - y1) + x1:
-            inside = not inside
-    assert inside
+
+def test_union_outline_overlapping_squares():
+    """并集例程：重叠方块 → 单环，L 形顶点、面积精确、无自交叠。"""
+    from krok_helper.subtitle_render.engine.render.effects.particles import (
+        _union_outline,
+    )
+
+    def square(x0, y0, x1, y1):
+        return [(x0, y0), (x1, y0), (x1, y1), (x0, y1)]
+
+    loops = _union_outline(
+        [square(0.0, 0.0, 10.0, 10.0), square(5.0, 5.0, 15.0, 15.0)]
+    )
+    assert len(loops) == 1
+    assert len(loops[0]) == 8  # 4+4 顶点，重叠角两交点
+    assert abs(_sprite_loop_area(loops[0]) - 175.0) < 1e-6
+    assert _sprite_loop_intersections(loops) == 0
+
+
+def test_union_outline_frame_gives_opposite_wound_hole():
+    """并集例程：四边条围成回字形 → 外环 CCW + 洞环 CW（even-odd 与 winding
+    都呈回字形，与 ring sprite 同款约定）。"""
+    from krok_helper.subtitle_render.engine.render.effects.particles import (
+        _union_outline,
+    )
+
+    loops = _union_outline(
+        [
+            [(-8.0, 6.0), (8.0, 6.0), (8.0, 10.0), (-8.0, 10.0)],
+            [(-8.0, -10.0), (8.0, -10.0), (8.0, -6.0), (-8.0, -6.0)],
+            [(-10.0, -8.0), (-6.0, -8.0), (-6.0, 8.0), (-10.0, 8.0)],
+            [(6.0, -8.0), (10.0, -8.0), (10.0, 8.0), (6.0, 8.0)],
+        ]
+    )
+    assert len(loops) == 2
+    areas = sorted(_sprite_loop_area(loop) for loop in loops)
+    # 洞 12×12；外环 20×20 减去四角 2×2 的阶梯缺口（刻意错位，避免共线重边）。
+    assert abs(areas[0] + 144.0) < 1e-6  # 洞环 CW
+    assert abs(areas[1] - 384.0) < 1e-6  # 外环 CCW
+    assert _sprite_loop_intersections(loops) == 0
+
+
+def test_snow_sprite_contract():
+    """雪花 sprite：letsdrawthat 教程画法——空心中心六边形 + 六条 60° 尖主臂
+    + 内层 12 枝两两触接成六角星 + 外层每臂一对箭羽枝。并集轮廓 = 1 外环
+    + 6 窗洞 + 1 中心洞，全直线段、无自交叠；even-odd 与 winding 两填充
+    规则结果一致（Python painter 与 C++ D2D 后端各用一种）。"""
+    snow = FX_SPRITES["snow"]["path_commands"]
+    assert snow[0][0] == "M" and snow[-1][0] == "Z"
+    for command in snow:
+        assert command[0] in {"M", "L", "Z"}
+    loops = _sprite_loops(snow)
+    assert len(loops) == 8
+    areas = [_sprite_loop_area(loop) for loop in loops]
+    assert sum(1 for area in areas if area > 0.0) == 1  # 外环 CCW
+    assert sum(1 for area in areas if area < 0.0) == 7  # 6 窗洞 + 1 中心洞 CW
+    outer_index = max(range(len(loops)), key=lambda i: abs(areas[i]))
+    outer = loops[outer_index]
+    holes = [loop for i, loop in enumerate(loops) if i != outer_index]
+    for hole in holes:
+        assert all(_sprite_loop_contains(point, outer) for point in hole)
+    assert _sprite_loop_intersections(loops) == 0
+
+    radii = [math.hypot(x, y) for loop in loops for x, y in loop]
+    assert max(radii) == pytest.approx(470.0, abs=1e-6)  # 臂尖（包络 ≤ 500）
+    assert sum(1 for r in radii if abs(r - 93.5) < 1e-6) == 6  # 中心洞六边形顶点
+    window_corners = [r for r in radii if 100.0 < r < 110.0]
+    assert len(window_corners) == 12  # 6 窗洞 × 2 内角（六边形外沿与臂缘交点）
+
+    # 六折对称：外环旋转 60° 后与原顶点集合重合。
+    cos60 = math.cos(math.pi / 3.0)
+    sin60 = math.sin(math.pi / 3.0)
+    for x, y in outer:
+        rotated = (x * cos60 - y * sin60, x * sin60 + y * cos60)
+        nearest = min(
+            math.hypot(rotated[0] - px, rotated[1] - py) for px, py in outer
+        )
+        assert nearest < 1e-6
+
+    # 双填充规则一致：even-odd 奇偶 vs winding 代数和，网格逐点同结果。
+    for gx in range(-36, 37, 3):
+        for gy in range(-36, 37, 3):
+            point = (gx * 13.0, gy * 13.0)
+            parity = sum(1 for loop in loops if _sprite_loop_contains(point, loop))
+            winding = sum(
+                (1 if _sprite_loop_area(loop) > 0.0 else -1)
+                for loop in loops
+                if _sprite_loop_contains(point, loop)
+            )
+            assert (parity % 2 == 1) == (winding != 0), point
+
+    # 代表性点：中心洞/窗洞/外部为空，臂、星环、外层枝、臂尖为实。
+    def filled(point):
+        return sum(1 for loop in loops if _sprite_loop_contains(point, loop)) % 2 == 1
+
+    assert not filled((0.0, 0.0))
+    assert not filled((110.0, 60.0))
+    assert not filled((0.0, 500.0))
+    assert filled((250.0, 0.0))
+    assert filled((450.0, 0.0))
+    assert filled((0.0, 290.0))
+    assert filled((380.0, 130.0))
     assert sprite_for_kind("snow") == "snow"
 
 
