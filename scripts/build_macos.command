@@ -407,6 +407,13 @@ if ! /usr/bin/codesign --force --sign - "$APP_DIST"; then
   exit 1
 fi
 
+echo "Validating packaged multiprocessing spawn..."
+if ! "$APP_DIST/Contents/MacOS/$APP_NAME" --package-spawn-smoke; then
+  echo "Packaged multiprocessing validation failed."
+  exit 1
+fi
+echo "Packaged multiprocessing spawn passed."
+
 echo
 echo "Build complete:"
 echo "$APP_DIST"
