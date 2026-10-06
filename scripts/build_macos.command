@@ -145,6 +145,7 @@ if ! command -v "$PYTHON_BIN" >/dev/null 2>&1; then
 fi
 
 ensure_pkg PyInstaller pyinstaller
+ensure_pkg PIL pillow
 ensure_pyqt6
 ensure_pkg fontTools fonttools
 ensure_pkg qfluentwidgets "PyQt6-Fluent-Widgets"
@@ -206,6 +207,7 @@ PYINSTALLER_ARGS=(
   --windowed
   --onedir
   --name "$APP_NAME"
+  --icon "$PROJECT_ROOT/krok_helper/assets/logo/logo.ico"
   --distpath "$DIST_PATH"
   --workpath "$WORK_PATH"
   --specpath "$SPEC_PATH"
