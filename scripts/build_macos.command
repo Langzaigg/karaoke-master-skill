@@ -6,6 +6,7 @@ cd "$PROJECT_ROOT"
 
 PYTHON_BIN="${PYTHON_BIN:-python3}"
 APP_NAME="Lin-K Lyrics"
+APP_BUNDLE_ID="io.github.karaoke-studio.lin-k-lyrics"
 DIST_PATH="$PROJECT_ROOT/dist/macos"
 WORK_PATH="$PROJECT_ROOT/build/pyinstaller-macos"
 SPEC_PATH="$PROJECT_ROOT/build/spec-macos"
@@ -14,6 +15,8 @@ SUG_SRC="$PROJECT_ROOT/krok_helper/lyrics_timing/src"
 SUG_PACKAGE="$SUG_SRC/strange_uta_game"
 SUG_VERSION_FILE="$SUG_PACKAGE/__version__.py"
 SUG_VERSION_BACKUP=""
+PYQT6_BINDING_VERSION="6.11.0"
+PYQT6_QT_VERSION="6.11.0"
 
 EXCLUDED_MODULES=(
   PySide6
@@ -79,14 +82,10 @@ KEEP_TRANSLATIONS=(
 REMOVE_PLUGIN_FILES=(
   "platforms/libqminimal.dylib"
   "platforms/libqoffscreen.dylib"
-  "imageformats/libqgif.dylib"
   "imageformats/libqicns.dylib"
   "imageformats/libqpdf.dylib"
   "imageformats/libqtga.dylib"
-  "imageformats/libqtiff.dylib"
   "imageformats/libqwbmp.dylib"
-  "imageformats/libqwebp.dylib"
-  "iconengines/libqsvgicon.dylib"
   "tls/libqcertonlybackend.dylib"
   "tls/libqopensslbackend.dylib"
   "generic/libqtuiotouchplugin.dylib"
@@ -106,6 +105,20 @@ REMOVE_QT_LIBS=(
   "QtQml.framework"
   "QtQuick.framework"
 )
+
+ensure_pyqt6() {
+  echo "Checking PyQt6 $PYQT6_BINDING_VERSION with Qt $PYQT6_QT_VERSION..."
+  if ! "$PYTHON_BIN" -c "from PyQt6.QtCore import PYQT_VERSION_STR, qVersion; raise SystemExit(0 if PYQT_VERSION_STR == '$PYQT6_BINDING_VERSION' and qVersion() == '$PYQT6_QT_VERSION' else 1)" >/dev/null 2>&1; then
+    echo "Installing PyQt6 $PYQT6_BINDING_VERSION with Qt $PYQT6_QT_VERSION..."
+    if ! "$PYTHON_BIN" -m pip install --upgrade "PyQt6==$PYQT6_BINDING_VERSION" "PyQt6-Qt6==$PYQT6_QT_VERSION"; then
+      echo "Failed to install PyQt6 $PYQT6_BINDING_VERSION with Qt $PYQT6_QT_VERSION."
+      if [ -z "${CI:-}" ]; then
+        read -r -p "Press Enter to close..."
+      fi
+      exit 1
+    fi
+  fi
+}
 
 ensure_pkg() {
   local module="$1"
@@ -133,7 +146,8 @@ if ! command -v "$PYTHON_BIN" >/dev/null 2>&1; then
 fi
 
 ensure_pkg PyInstaller pyinstaller
-ensure_pkg PyQt6 PyQt6
+ensure_pkg PIL pillow
+ensure_pyqt6
 ensure_pkg fontTools fonttools
 ensure_pkg qfluentwidgets "PyQt6-Fluent-Widgets"
 ensure_pkg yt_dlp yt-dlp
@@ -174,16 +188,21 @@ restore_sug_version() {
 }
 trap restore_sug_version EXIT
 
-echo "Setting SUG package variant to mac for this build..."
+echo "Setting SUG package variant for this build..."
 "$PYTHON_BIN" - <<PY
 from pathlib import Path
+import platform
 import re
+variant = {"arm64": "mac-arm64", "x86_64": "mac-intel"}.get(platform.machine())
+if variant is None:
+    raise SystemExit(f"Unsupported macOS build architecture: {platform.machine()}")
 path = Path(r"$SUG_VERSION_FILE")
 text = path.read_text(encoding="utf-8")
-patched = re.sub(r'^(VARIANT\s*=\s*)"[^"]*"', r'\1"mac"', text, flags=re.MULTILINE)
+patched = re.sub(r'^(VARIANT\s*=\s*)"[^"]*"', rf'\1"{variant}"', text, flags=re.MULTILINE)
 if patched == text:
     raise SystemExit("Could not patch VARIANT in strange_uta_game/__version__.py")
 path.write_text(patched, encoding="utf-8")
+print(f"  SUG variant: {variant}")
 PY
 
 mkdir -p "$DIST_PATH" "$WORK_PATH" "$SPEC_PATH"
@@ -194,6 +213,8 @@ PYINSTALLER_ARGS=(
   --windowed
   --onedir
   --name "$APP_NAME"
+  --icon "$PROJECT_ROOT/krok_helper/assets/logo/logo.ico"
+  --osx-bundle-identifier "$APP_BUNDLE_ID"
   --distpath "$DIST_PATH"
   --workpath "$WORK_PATH"
   --specpath "$SPEC_PATH"
@@ -270,7 +291,7 @@ else
     done < <(find "$TRANSLATIONS_DIR" -type f -print0)
   fi
 
-  PLUGINS_DIR="$(find "$PYQT_DIR" -type d -name plugins -print -quit || true)"
+  PLUGINS_DIR="$PYQT_DIR/Qt6/plugins"
   if [ -n "$PLUGINS_DIR" ] && [ -d "$PLUGINS_DIR" ]; then
     for rel in "${REMOVE_PLUGIN_FILES[@]}"; do
       target="$PLUGINS_DIR/$rel"
@@ -292,6 +313,13 @@ for rel in "${REMOVE_QT_LIBS[@]}"; do
   while IFS= read -r -d '' target; do
     rm -rf "$target"
   done < <(find "$APP_DIST" -name "$rel" -print0)
+  # PyInstaller also links framework binaries into both Contents directories.
+  for content_dir in Frameworks Resources; do
+    alias_path="$APP_DIST/Contents/$content_dir/${rel%.framework}"
+    if [ -L "$alias_path" ]; then
+      rm -f "$alias_path"
+    fi
+  done
 done
 
 # 嵌入的 AI 打轴 worker 以外部解释器子进程运行，runpy 引导要求 bundle
@@ -368,6 +396,23 @@ if [ -n "$warn_file" ]; then
   echo "PyInstaller warnings were written to: $warn_file"
 fi
 echo "Package content validation passed."
+
+echo "Updating macOS package version metadata..."
+"$PYTHON_BIN" "$PROJECT_ROOT/scripts/update_macos_version.py" "$APP_DIST/Contents/Info.plist"
+
+# Re-sign after all package contents and metadata have been finalized.
+echo "Re-signing the final macOS package..."
+if ! /usr/bin/codesign --force --sign - "$APP_DIST"; then
+  echo "Failed to re-sign the macOS package."
+  exit 1
+fi
+
+echo "Validating packaged multiprocessing spawn..."
+if ! "$APP_DIST/Contents/MacOS/$APP_NAME" --package-spawn-smoke; then
+  echo "Packaged multiprocessing validation failed."
+  exit 1
+fi
+echo "Packaged multiprocessing spawn passed."
 
 echo
 echo "Build complete:"
