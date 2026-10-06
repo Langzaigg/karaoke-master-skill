@@ -355,9 +355,9 @@ def _font_weight_combo_items(family: str) -> tuple[tuple[int, str], ...]:
     """字重下拉选项：标准预设 ∪ 该字体的真实字重，非原生档标注。
 
     标注口径与渲染端统一解析器（``engine.text.font_weight``）一致：
-    可变字体轴内=真实插值（不标）、轴外=「越界」（钳制到轴端点）、
-    静态单 face 缺失=「模拟」（合成粗体）、静态多 face 缺失=「就近」
-    （吸附到最近的真实 face）。真实字重额外带命名实例名（如 425 · R）。
+    可变字体轴内=真实插值（不标）、轴下限之下=「越界」（钳制到端
+    点）、凡比基 face 重的缺档=「模拟」（统一公式的轮廓膨胀放大）。
+    真实字重额外带命名实例名（如 425 · R）。
     """
     physical = _available_font_weights(family)
     style_names = dict(physical_weight_styles(family))

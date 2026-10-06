@@ -11,17 +11,16 @@ DirectWrite ``GetFirstMatchingFont``，两条管线对同一 (family, weight)
 unified weight resolution 逐条对应（改动任一侧必须同步另一侧）：
 
 1. **可变字体**（fvar 含 wght 轴）：按 ``clamp(W, axis.min, axis.max)``
-   渲染**真实轴值插值实例**，永不模拟——轴内任意值都是"真实字重"
-   （``QFont.setVariableAxis`` 优先级高于 setWeight/setStyleName，实测
-   越界值自动钳制到轴端点）。
+   渲染**真实轴值插值实例**（``QFont.setVariableAxis`` 优先级高于
+   setWeight/setStyleName）。轴上限之上的请求在轴端点之上继续**膨胀
+   放大**（见下）；轴下限之下钳制到端点并标「越界」。
 2. **静态字体**：``E = bucket_weight(W)``（标准整百桶化）；
-   a. E 命中真实 face 字重 → ``setStyleName`` 钉住该 face，不设 weight；
-   b. 族内仅一个 face 且 E ≥ 600 且 E > face 字重 → 钉住该 face +
-      ``setWeight(E)`` 触发合成粗体（唯一能确定性地模拟的场景：基 face
-      唯一，Qt 无其他 face 可被匹配器劫持）；
-   c. 其余缺失档 → 就近吸附到真实 face（平局取较轻）并钉扎，不模拟
-      （Qt 对多 face 族缺失字重的原生匹配跨族不可预测——Yu Gothic@600
-      给 Regular+假粗体、Yu Gothic UI@800 给真 Bold——必须钉扎绕开）。
+   a. E 命中真实 face 字重 → 钉住该 face；
+   b. E 比可用的基 face 重（2026-10-07 用户拍板：**凡能放大皆模拟
+      放大，取消"就近"语义**）→ 基 face 取 E 之下最重的真实 face，
+      Δ = E − 基 face 字重，两后端按统一公式（字号×Δ/3000 圆形
+      膨胀轮廓）自绘加粗，UI 标「模拟」；
+   c. E 比族内最轻 face 还轻 → 渲染最轻 face（放大无法变轻）。
 3. **拿不到 face 元数据**（字体缺失 / headless 枚举为空）：退回旧行为
    （仅按桶化值 setWeight），不钉扎。
 
@@ -100,6 +99,10 @@ class FontWeightPlan:
 
 
 _CANON_CACHE: dict[str, str] = {}
+# 模拟放大旁路表：apply_weight_plan 按 QFont 签名登记膨胀量，
+# embolden_glyph_path 据此取量（QFont 是值类型，签名相同的拷贝共享）。
+_EMBOLDEN_BY_SIGNATURE: dict[tuple, int] = {}
+_EMBOLDEN_SIGNATURE_MAX = 4096
 _AXIS_CACHE: dict[str, dict[bytes, WeightAxis] | None] = {}
 _FACE_CACHE: dict[str, tuple[tuple[int, str, bool], ...]] = {}
 _PLAN_CACHE: dict[tuple[str, int, bool], FontWeightPlan] = {}
@@ -110,6 +113,7 @@ def clear_font_weight_cache() -> None:
     """字体安装/卸载后清空进程级缓存（调用方：宿主字体库刷新）。"""
     with _LOCK:
         _CANON_CACHE.clear()
+        _EMBOLDEN_BY_SIGNATURE.clear()
         _AXIS_CACHE.clear()
         _FACE_CACHE.clear()
         _PLAN_CACHE.clear()
@@ -297,61 +301,6 @@ def _font_fingerprint(font: QFont) -> tuple:
     return tuple(signature)
 
 
-def _resolve_missing_static_weight(
-    family: str,
-    inventory: tuple[tuple[int, str, bool], ...],
-    bucket: int,
-    italic: bool,
-) -> tuple[int, str, bool] | None:
-    """实测 Qt 对桶化字重的实际渲染目标：``(face字重, styleName, 是否合成)``。
-
-    Qt 对静态族字重的选择（精确/就近吸附/某个基 face + 合成粗体）由其
-    内部匹配器打分决定，跨族结构不可预测也读不回来（QFontInfo/QRawFont
-    只回显请求）。CPU 渲染字体一律用 plain ``setWeight(桶)`` 构造（见
-    :func:`apply_weight_plan`），本函数对同一构造做实测：与每个候选
-    face 的「真实渲染 / 钉扎+加粗」构造做逐字 advance + 墨迹指纹比对，
-    匹配者即 Qt 的实际选择——因此 plan 与 CPU 渲染恒等。无匹配（字体
-    被替换 / 度量异常）返回 None，由调用方走就近吸附兜底。
-    """
-    family = canonical_family(family)
-    plain = QFont(family)
-    plain.setWeight(QFont.Weight(bucket))
-    if italic:
-        plain.setItalic(True)
-    if QFontInfo(plain).family().casefold() != family.casefold():
-        # 族名解析失败会静默替换默认字体，指纹毫无意义。
-        return None
-    target = _font_fingerprint(plain)
-
-    candidates = [
-        (weight, style) for weight, style, face_italic in inventory
-        if face_italic == italic
-    ] or [(weight, style) for weight, style, _face_italic in inventory]
-
-    synthetic_hits: list[tuple[int, str]] = []
-    real_hits: list[tuple[int, str]] = []
-    for weight, style in candidates:
-        font = QFont(family)
-        font.setStyleName(style)
-        if italic:
-            font.setItalic(True)
-        if _font_fingerprint(font) == target:
-            real_hits.append((weight, style))
-            continue
-        if weight < bucket:
-            font.setWeight(QFont.Weight(bucket))
-            if _font_fingerprint(font) == target:
-                synthetic_hits.append((weight, style))
-    if real_hits:
-        # 多个真实 face 指纹相同（理论上的同度量实例）：取字重最近者。
-        best = min(real_hits, key=lambda item: (abs(item[0] - bucket), item[0]))
-        return best[0], best[1], False
-    if synthetic_hits:
-        best = min(synthetic_hits, key=lambda item: (abs(item[0] - bucket), item[0]))
-        return best[0], best[1], True
-    return None
-
-
 def resolve_weight_plan(
     family: str, weight: int, italic: bool = False
 ) -> FontWeightPlan:
@@ -374,7 +323,14 @@ def _compute_weight_plan(
     axis = family_weight_axis(family)
     if axis is not None:
         value = min(max(float(requested), axis.minimum), axis.maximum)
-        mark = None if value == float(requested) else "越界"
+        embolden = 0
+        mark: str | None = None
+        if float(requested) > axis.maximum:
+            # 轴上限之上继续膨胀放大（凡能放大皆模拟放大）。
+            embolden = bucket_weight(requested) - int(round(axis.maximum))
+            mark = "模拟" if embolden > 0 else None
+        elif float(requested) < axis.minimum:
+            mark = "越界"
         return FontWeightPlan(
             family=family,
             requested_weight=requested,
@@ -382,6 +338,7 @@ def _compute_weight_plan(
             base_weight=int(round(value)),
             enum_weight=bucket_weight(requested),
             italic=bool(italic),
+            embolden_delta=embolden,
             mark=mark,
         )
 
@@ -400,46 +357,41 @@ def _compute_weight_plan(
             base_weight=bucket,
             enum_weight=bucket,
             italic=bool(italic),
-            mark="就近",
         )
 
     bucket = bucket_weight(requested)
     weights = [face_weight for face_weight, _name, _face_italic in selected]
 
-    # 一律以 plain setWeight(桶) 的实测结果为权威（精确命中也实测——
-    # 保证 plan 与 CPU 渲染字体恒等；含合成粗体=旧版模拟字重语义）。
-    resolved = _resolve_missing_static_weight(family, inventory, bucket, italic)
-    if resolved is not None:
-        base_weight, style_name, synthetic = resolved
-        mark: str | None
-        embolden = 0
-        if synthetic:
-            mark = "模拟"
-        elif base_weight == bucket:
-            mark = None
-        elif bucket > base_weight >= 600:
-            # 基 face 已是粗体（≥600）：Qt 的合成粗体只补齐"非粗→粗"，
-            # 不会粗上加粗（实测钉扎 Bold+setWeight(900) 恒定）；DWrite
-            # 虽可 SIMS_BOLD 但 CPU 无法跟进。改由两后端按同一公式对
-            # 字形轮廓做圆形膨胀（字号×Δ/3000）实现粗上加粗。
-            embolden = bucket - base_weight
-            mark = "模拟"
-        else:
-            mark = "就近"
+    # v6（2026-10-07 用户拍板）：取消"就近"——凡比基 face 重的缺档一律
+    # 模拟放大（基 face 取 E 之下最重的真实 face，Δ=E−基 face 字重，
+    # 两后端按统一公式膨胀轮廓）；不再指纹跟随 Qt 的 plain 选择。
+    if bucket in weights:
+        base_weight, style_name, _face_italic = selected[weights.index(bucket)]
         return FontWeightPlan(
             family=family,
             requested_weight=requested,
             style_name=style_name,
             base_weight=base_weight,
-            synthetic_bold=synthetic,
             enum_weight=bucket,
             italic=bool(italic),
-            embolden_delta=embolden,
-            mark=mark,
         )
-
-    # 指纹无匹配（被替换字体 / 度量异常）：就近吸附兜底（平局取较轻）。
-    base_weight = min(weights, key=lambda value: (abs(value - bucket), value))
+    floors = [value for value in weights if value < bucket]
+    if floors:
+        base_weight = max(floors)
+        base_weight, style_name, _face_italic = selected[weights.index(base_weight)]
+        return FontWeightPlan(
+            family=family,
+            requested_weight=requested,
+            style_name=style_name,
+            base_weight=base_weight,
+            enum_weight=bucket,
+            italic=bool(italic),
+            embolden_delta=bucket - base_weight,
+            mark="模拟",
+        )
+    # 比族内最轻 face 还轻：放大无法变轻，渲染最轻 face（不标「就近」，
+    # v6 起该概念取消）。
+    base_weight = min(weights)
     base_weight, style_name, _face_italic = selected[weights.index(base_weight)]
     return FontWeightPlan(
         family=family,
@@ -448,7 +400,6 @@ def _compute_weight_plan(
         base_weight=base_weight,
         enum_weight=bucket,
         italic=bool(italic),
-        mark="就近",
     )
 
 
@@ -460,14 +411,34 @@ def embolden_width_px(font_size_px: int, delta: int) -> float:
     return float(font_size_px) * float(delta) / 3000.0
 
 
-def embolden_delta_of_font(font: QFont) -> int:
-    """从构造好的 QFont 反查该字体的粗上加粗重量差。"""
-    plan = resolve_weight_plan(
-        font.family(), int(font.weight()), bool(font.italic())
+def font_signature(font: QFont) -> tuple:
+    """QFont 的解析签名（与 metrics._font_signature 同字段）。"""
+    axis_tag = QFont.Tag(b"wght")
+    axis_value = (
+        float(font.variableAxisValue(axis_tag))
+        if font.isVariableAxisSet(axis_tag)
+        else None
     )
-    if plan.axis_value is not None:
-        return 0
-    return int(plan.embolden_delta)
+    return (
+        font.family(),
+        font.pixelSize(),
+        int(font.weight()),
+        font.italic(),
+        font.stretch(),
+        font.styleName(),
+        axis_value,
+    )
+
+
+def embolden_delta_of_font(font: QFont) -> int:
+    """从构造好的 QFont 反查模拟放大的重量差（apply 时登记的旁路表）。
+
+    不能从 ``(family, font.weight())`` 重推：v6 模拟档钉基 face、
+    QFont.weight 停在基 face 字重上，与精确档无法区分——膨胀量只有在
+    apply_weight_plan 构造时才确定，经签名旁路表带过来。
+    """
+    with _LOCK:
+        return int(_EMBOLDEN_BY_SIGNATURE.get(font_signature(font), 0))
 
 
 def embolden_glyph_path(path: QPainterPath, font: QFont) -> QPainterPath:
@@ -491,20 +462,36 @@ def embolden_glyph_path(path: QPainterPath, font: QFont) -> QPainterPath:
 def apply_weight_plan(font: QFont, plan: FontWeightPlan) -> None:
     """把权威解析结果应用到 QFont（调用方已设 family/pixelSize）。
 
-    CPU 渲染字体一律用「plain setWeight(桶化值)」构造——这正是指纹实测
-    的参照构造（plan 就是从它测出来的），主 face 选择与最初的旧行为逐
-    一致；同时 QFont.weight 保留请求桶化值，**缺字 fallback 字体**（日
-    中字体互缺的假名/汉字走 Qt 内部回退）跟随请求字重——钉扎
-    setStyleName 会把 QFont.weight 冻结在 face 值上，fallback 字符的
-    粗细就不再随请求变化（2026-10-06 用户报「调字重宽度观感与最初不
-    一致」的根因）。可变字体在 plain 之上叠加 wght 轴值（优先级高于
-    setWeight，仅作用于轴字体本身，不影响 fallback 字重）。
-    ``plan.style_name`` 只用于 UI 展示与 GPU 显式下发，不再作用于 QFont。
+    v6 构造口径：
+
+    - **精确档 / 拿不到元数据**：plain ``setWeight(桶化值)``（与最初
+      旧行为一致，QFont.weight 保留请求值供缺字 fallback 字体跟随）。
+    - **模拟放大档**（embolden_delta>0）：``setStyleName`` 钉住基 face
+      + ``setWeight(基 face 字重)``——weight 与 face 自身字重相等，
+      匹配器无劫持压力、Qt 也不触发合成粗体（避免与我们的轮廓膨胀
+      叠加成双重加粗）；主 face 由钉扎保证，膨胀量经签名旁路表
+      ``_EMBOLDEN_BY_SIGNATURE`` 交给 embolden_glyph_path。
+    - **可变字体**：plain setWeight 之上叠加 wght 轴值（优先级高于
+      setWeight，仅作用于轴字体本身）；轴上限之上的请求轴值停在
+      上限、膨胀量同样走旁路表。
     """
     font.setItalic(bool(plan.italic))
-    font.setWeight(QFont.Weight(plan.enum_weight))
-    if plan.axis_value is not None:
-        font.setVariableAxis(QFont.Tag(_AXIS_TAG_WEIGHT), float(plan.axis_value))
+    if plan.embolden_delta > 0 and plan.style_name is not None:
+        font.setStyleName(plan.style_name)
+        font.setWeight(QFont.Weight(plan.base_weight))
+    else:
+        font.setWeight(QFont.Weight(plan.enum_weight))
+        if plan.axis_value is not None:
+            font.setVariableAxis(
+                QFont.Tag(_AXIS_TAG_WEIGHT), float(plan.axis_value)
+            )
+    if plan.embolden_delta > 0:
+        with _LOCK:
+            if len(_EMBOLDEN_BY_SIGNATURE) >= _EMBOLDEN_SIGNATURE_MAX:
+                _EMBOLDEN_BY_SIGNATURE.clear()
+            _EMBOLDEN_BY_SIGNATURE[font_signature(font)] = int(
+                plan.embolden_delta
+            )
 
 
 def build_weight_font(

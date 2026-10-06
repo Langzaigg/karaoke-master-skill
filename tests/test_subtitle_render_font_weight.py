@@ -13,6 +13,7 @@ from PyQt6.QtGui import QFont, QFontDatabase, QFontInfo, QFontMetrics
 
 from krok_helper.subtitle_render.engine.text.font_weight import (
     apply_weight_plan,
+    embolden_glyph_path,
     bucket_weight,
     build_weight_font,
     family_weight_axis,
@@ -94,61 +95,65 @@ def test_static_multiface_family_pins_exact_and_missing():
     assert exact.synthetic_bold is False
     assert exact.mark is None
 
-    # 缺档 600：以实测的 Qt 实际选择为权威（合成或就近随平台字体库而变，
-    # 由指纹实测；跨环境一致性由下方的「复现不变量」用例保证）。
+    # v6：凡比基 face 重的缺档一律模拟放大（基 face 取其下最重真实
+    # face，Δ=桶化值−基 face 字重），「就近」概念取消。face 集随注册
+    # 环境变化（YuGothR.ttc 在 offscreen 下只见部分 face），按运行时
+    # 清单推导期望值。
+    runtime_weights = [weight for weight, _name in physical_weight_styles(family)]
+    floors = [weight for weight in runtime_weights if weight < 600]
+    expected_base = max(floors)
     missing = resolve_weight_plan(family, 600)
-    assert missing.base_weight in weights
-    assert missing.mark in {"模拟", "就近"}
-    assert (missing.mark == "模拟") == missing.synthetic_bold
+    assert missing.base_weight == expected_base
+    assert missing.embolden_delta == 600 - expected_base
+    assert missing.mark == "模拟"
+    assert missing.synthetic_bold is False
 
 
 @pytest.mark.skipif(
     not os.path.exists(_YUGOTH_FONT_PATH), reason="Yu Gothic font file not present"
 )
-def test_missing_weight_plan_reproduces_plain_qt_rendering(qapp):
-    """指纹解析的核心不变量：按 plan 构造的字体与「交给 Qt 决定」的字体
-    逐字 advance + 墨迹完全一致（否则 CPU/GPU 分叉）。"""
+def test_missing_weight_font_pins_floor_face(qapp):
+    """v6 构造不变量：模拟档钉住基 face（ QFontInfo 可证），墨迹比纯基
+    face 宽（膨胀生效），advance 与基 face 一致（native faceWeight 对齐）。"""
+    from PyQt6.QtGui import QPainterPath
+
     family = _register_yu_gothic()
-    probe = QFont(family)
-    probe.setPixelSize(48)
-    probe.setWeight(QFont.Weight(600))
-    plain_metrics = QFontMetrics(probe)
-    plan = resolve_weight_plan(family, 600)
+    runtime_weights = [weight for weight, _name in physical_weight_styles(family)]
+    floors = [weight for weight in runtime_weights if weight < 600]
+    expected_base = max(floors)
+    base = build_weight_font(family, 48, expected_base)
     planned = build_weight_font(family, 48, 600)
-    planned_metrics = QFontMetrics(planned)
-    for text in ("Ag0Wg指あソ", "歌詞表示"):
-        for index, char in enumerate(text):
-            assert planned_metrics.horizontalAdvance(
-                char
-            ) == plain_metrics.horizontalAdvance(char), (text, index)
-    assert QFontInfo(planned).styleName() in {
-        QFontInfo(probe).styleName(),
-        plan.style_name,
-    }
+    assert QFontInfo(planned).styleName() == QFontInfo(base).styleName()
+    assert QFontMetrics(planned).horizontalAdvance("教") == QFontMetrics(
+        base
+    ).horizontalAdvance("教")
+
+    def ink(font):
+        path = QPainterPath()
+        path.addText(0.0, 0.0, font, "教科書")
+        return embolden_glyph_path(path, font).boundingRect().width()
+
+    assert ink(planned) > ink(base)
 
 
-def test_static_single_face_family_simulates_bold_only_above_600():
+def test_static_single_face_family_emboldens_every_heavier_level():
+    """v6：{400} 族 500/600/700 全部模拟放大（Δ=100/200/300）。"""
     _require_family("MS Gothic")
     faces = physical_weight_styles("MS Gothic")
     assert len(faces) == 1
     assert faces[0][0] == 400
 
-    light = resolve_weight_plan("MS Gothic", 500)
-    assert light.synthetic_bold is False
-    assert light.mark == "就近"
+    for weight, delta in ((500, 100), (600, 200), (700, 300)):
+        plan = resolve_weight_plan("MS Gothic", weight)
+        assert plan.base_weight == 400
+        assert plan.embolden_delta == delta
+        assert plan.mark == "模拟"
+        assert plan.synthetic_bold is False
 
-    bold = resolve_weight_plan("MS Gothic", 700)
-    assert bold.synthetic_bold is True
-    assert bold.mark == "模拟"
-    assert bold.base_weight == 400
-
-    plain = build_weight_font("MS Gothic", 64, 400)
-    simulated = build_weight_font("MS Gothic", 64, 700)
-    metrics_plain = QFontMetrics(plain)
-    metrics_sim = QFontMetrics(simulated)
-    # 合成粗体把 advance 撑大约 1px（DWrite SIMULATIONS_BOLD），
-    # 与 native 侧模拟 face 的 advance 口径一致。
-    assert metrics_sim.horizontalAdvance("あ") == metrics_plain.horizontalAdvance("あ") + 1
+    lighter = resolve_weight_plan("MS Gothic", 200)
+    assert lighter.base_weight == 400
+    assert lighter.embolden_delta == 0
+    assert lighter.mark is None
 
 
 @pytest.mark.skipif(
@@ -176,13 +181,15 @@ def test_variable_font_renders_true_axis_instances(qapp):
     assert interpolated.axis_value == 650.0
     assert interpolated.mark is None
 
-    # 轴外请求钳制到端点并标注。
+    # 轴下限之下钳制到端点并标「越界」；950 桶化为 900=轴上限，落在
+    # 真实端点上（无标注、无膨胀）。
     below = resolve_weight_plan(family, 100)
     assert below.axis_value == 300.0
     assert below.mark == "越界"
     above = resolve_weight_plan(family, 950)
     assert above.axis_value == 900.0
-    assert above.mark == "越界"
+    assert above.mark is None
+    assert above.embolden_delta == 0
 
 
 def test_fake_variable_axis_falls_back_to_static(monkeypatch, qapp):
@@ -203,8 +210,7 @@ def test_fake_variable_axis_falls_back_to_static(monkeypatch, qapp):
     plan = fw.resolve_weight_plan("MS Gothic", 600)
     assert plan.axis_value is None
     assert plan.style_name == "Regular"
-    # 静态语义（就近/模拟随平台字体库而变），绝不标真实轴值。
-    assert plan.mark in {"就近", "模拟"}
+    assert plan.mark == "模拟"
 
 
 def test_constant_axis_variable_packaging_treated_as_static(qapp):
@@ -248,7 +254,7 @@ def test_bold_cut_family_emboldens_above_top_weight(qapp):
     lighter = resolve_weight_plan("UD Digi Kyokasho NK-B", 400)
     assert lighter.base_weight == 700
     assert lighter.embolden_delta == 0
-    assert lighter.mark == "就近"
+    assert lighter.mark is None
     # 膨胀公式：48px x 200/3000 = 3.2px。
     from krok_helper.subtitle_render.engine.text.font_weight import embolden_width_px
 
@@ -266,8 +272,8 @@ def test_missing_metadata_family_falls_back_to_plain_weight(monkeypatch):
     assert plan.axis_value is None
     assert plan.style_name is None
     assert plan.enum_weight == 700
-    # 元数据缺失也必须有 UI 标注（2026-10-07：曾全档无标注）。
-    assert plan.mark == "就近"
+    # 元数据缺失不产生任何模拟（无法判定基 face），不标注。
+    assert plan.mark is None
     font = QFont("__no_such_family__")
     fw.apply_weight_plan(font, plan)
     assert int(font.weight()) == 700
