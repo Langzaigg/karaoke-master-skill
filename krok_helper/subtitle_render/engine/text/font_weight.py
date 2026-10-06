@@ -142,7 +142,11 @@ def family_weight_axis(family: str) -> WeightAxis | None:
     except (RuntimeError, TypeError, ValueError):
         axes = None
     axis = None if axes is None else axes.get(_AXIS_TAG_WEIGHT)
-    if axis is not None and axis.minimum < axis.maximum:
+    if axis is not None:
+        # 恒定轴（min==max，单字重的"可变"包装文件）与轴两端指纹一致的
+        # 伪可变一律按静态处理——否则所有字重会被 clamp 到唯一值且 UI
+        # 全档标"真实"（2026-10-07 用户报「全字重无效且无就近/模拟标注」
+        # 的根因之一）。min==max 时两端指纹必相同，统一走指纹检测即可。
         if not _wght_axis_is_effective(key, axis):
             axes = None
     with _LOCK:
@@ -156,6 +160,10 @@ def _wght_axis_is_effective(family: str, axis: WeightAxis) -> bool:
     for value in (axis.minimum, axis.maximum):
         font = QFont(family)
         font.setVariableAxis(QFont.Tag(_AXIS_TAG_WEIGHT), float(value))
+        if QFontInfo(font).family().casefold() != family.casefold():
+            # 族名被静默替换（本地化名/别名不在 Qt 字体库）——指纹毫
+            # 无意义，按静态处理。
+            return False
         signatures.append(_font_fingerprint(font))
     return signatures[0] != signatures[1]
 
@@ -221,8 +229,8 @@ def physical_weight_styles(family: str) -> tuple[tuple[int, str], ...]:
 # 指纹探测：多字号 + advance + 墨迹包围盒。双字号是为了打断单字号的
 # 取整碰撞（Yu Gothic UI 的 Semibold/Bold 在 62px 的 advance 完全相同），
 # 拉丁大小写/数字 + 假名/汉字的混合串保证不同字重实例必然分离。
-_FINGERPRINT_TEXT = "Ag0Wg指あソ"
-_FINGERPRINT_SIZES = (40, 41)
+_FINGERPRINT_TEXT = "Ag0Wg指あそ爽永"
+_FINGERPRINT_SIZES = (40, 41, 56)
 
 
 def _font_fingerprint(font: QFont) -> tuple:
@@ -344,6 +352,7 @@ def _compute_weight_plan(
             base_weight=bucket,
             enum_weight=bucket,
             italic=bool(italic),
+            mark="就近",
         )
 
     bucket = bucket_weight(requested)

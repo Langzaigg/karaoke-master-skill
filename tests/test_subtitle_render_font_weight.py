@@ -207,6 +207,24 @@ def test_fake_variable_axis_falls_back_to_static(monkeypatch, qapp):
     assert plan.mark in {"就近", "模拟"}
 
 
+def test_constant_axis_variable_packaging_treated_as_static(qapp):
+    """恒定轴（min==max 的"可变"包装，单字重 VF 文件）必须按静态处理。
+
+    2026-10-07 用户报「全字重无效且无就近/模拟标注」的根因：恒定轴
+    曾跳过有效性检测，被当成真可变后所有字重 clamp 到唯一值且全档
+    标真实（无标注）。两端同值的轴指纹必相同→无效→静态。
+    """
+    import krok_helper.subtitle_render.engine.text.font_weight as fw
+
+    msgothic = r"C:\Windows\Fonts\msgothic.ttc"
+    if not os.path.exists(msgothic):
+        pytest.skip("MS Gothic font file not present")
+    QFontDatabase.addApplicationFont(msgothic)
+    _require_family("MS Gothic")
+    constant = fw.WeightAxis(minimum=700.0, default=700.0, maximum=700.0)
+    assert fw._wght_axis_is_effective("MS Gothic", constant) is False
+
+
 def test_missing_metadata_family_falls_back_to_plain_weight(monkeypatch):
     # 元数据缺失（字体不存在/headless 枚举为空）时保持旧的纯桶化行为；
     # 直接打桩两条元数据通道，避免平台默认字体回退的干扰。
@@ -218,6 +236,8 @@ def test_missing_metadata_family_falls_back_to_plain_weight(monkeypatch):
     assert plan.axis_value is None
     assert plan.style_name is None
     assert plan.enum_weight == 700
+    # 元数据缺失也必须有 UI 标注（2026-10-07：曾全档无标注）。
+    assert plan.mark == "就近"
     font = QFont("__no_such_family__")
     fw.apply_weight_plan(font, plan)
     assert int(font.weight()) == 700
