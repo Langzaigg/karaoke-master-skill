@@ -2657,7 +2657,10 @@ def launch_qt_app() -> int:
     app = QApplication.instance() or QApplication([])
     app.setFont(build_app_ui_font())
     app_icon = load_taskbar_icon()
-    if app_icon is not None:
+    # Keep the system-rendered bundle icon in the Dock for macOS builds.
+    if app_icon is not None and not (
+        sys.platform == "darwin" and getattr(sys, "frozen", False)
+    ):
         app.setWindowIcon(app_icon)
     window = KrokHelperQtApp()
     window.show()

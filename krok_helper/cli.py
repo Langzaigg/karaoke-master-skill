@@ -142,7 +142,10 @@ def run_gui(args: argparse.Namespace) -> int:
         _install_global_excepthook()
 
         app_icon = load_taskbar_icon()
-        if app_icon is not None:
+        # Keep the system-rendered bundle icon in the Dock for macOS builds.
+        if app_icon is not None and not (
+            sys.platform == "darwin" and getattr(sys, "frozen", False)
+        ):
             qt_app.setWindowIcon(app_icon)
         # 构造起点的「正在初始化工作台 (32%)」由 KrokHelperQtApp 自身上报。
         window = KrokHelperQtApp(startup_progress=report_startup_progress)
