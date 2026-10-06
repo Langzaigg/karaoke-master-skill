@@ -1,6 +1,9 @@
 # Legacy helper scripts
 一键HiRes（mkv）.bat
 
+# system files
+.DS_Store
+
 # Python cache and local env
 __pycache__/
 *.py[cod]

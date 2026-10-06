@@ -87,7 +87,7 @@ jobs:
       - name: Install dependencies
         run: |
           python3 -m pip install --upgrade pip
-          python3 -m pip install pyinstaller PySide6
+          python3 -m pip install pyinstaller
 
       - name: Build macOS package
         run: bash ./scripts/build_macos.command
