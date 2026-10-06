@@ -6,6 +6,7 @@ cd "$PROJECT_ROOT"
 
 PYTHON_BIN="${PYTHON_BIN:-python3}"
 APP_NAME="Lin-K Lyrics"
+APP_BUNDLE_ID="io.github.karaoke-studio.lin-k-lyrics"
 DIST_PATH="$PROJECT_ROOT/dist/macos"
 WORK_PATH="$PROJECT_ROOT/build/pyinstaller-macos"
 SPEC_PATH="$PROJECT_ROOT/build/spec-macos"
@@ -208,6 +209,7 @@ PYINSTALLER_ARGS=(
   --onedir
   --name "$APP_NAME"
   --icon "$PROJECT_ROOT/krok_helper/assets/logo/logo.ico"
+  --osx-bundle-identifier "$APP_BUNDLE_ID"
   --distpath "$DIST_PATH"
   --workpath "$WORK_PATH"
   --specpath "$SPEC_PATH"
