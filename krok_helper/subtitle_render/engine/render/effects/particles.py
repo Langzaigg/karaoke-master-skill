@@ -589,28 +589,68 @@ def _petal_commands() -> list[list[object]]:
 
 
 def _snow_commands() -> list[list[object]]:
-    """雪花剪影：❄ 枝晶轮廓（参考初音雪未来标志/❄ emoji——2026-10 用户
-    口径，初版六角星被否）。每 60° 扇区 = 主臂尖（r 470）+ 两侧枝尖
-    （±20°，r 250）+ 臂间谷（r 85），共 24 顶点直线轮廓——主臂六重
-    对称、侧枝朝外张开，粒子小尺寸下读作带枝晶的雪花；单轮廓无自交叠
-    （M + 23×L + Z）。"""
-    commands: list[list[object]] = []
-    vertex = 0
-    for arm in range(6):
-        arm_angle = -math.pi / 2.0 + arm * math.pi / 3.0
-        ring = (
-            (arm_angle, 470.0),                      # 主臂尖
-            (arm_angle + math.pi / 9.0, 250.0),      # 顺时针侧枝尖（+20°）
-            (arm_angle + math.pi / 6.0, 85.0),       # 臂间谷（+30°）
-            (arm_angle + math.pi * 2.0 / 9.0, 250.0),  # 逆时针侧枝尖（+40°）
+    """雪花剪影：雪未来/❄ 风格的**棒条式枝晶**（2026-10 用户口径，两版
+    星形均被否——画法参考 letsdrawthat 六臂枝晶教程）：六条细长主臂
+    （60° 间隔、半宽 48）+ 每臂两对自主臂中段以 60° 朝外伸出的侧枝
+    （V 形箭头枝：内侧枝长 170@r300、外侧枝长 120@r430）+ 臂端窄尖
+    封口（r 480）+ 中心六边形（r 150）。单轮廓一笔绕行（沿臂外缘上行、
+    逐侧枝绕出绕回、过臂尖、对称下行、六边形边过渡到下一臂），无自
+    交叠；约百个直线顶点，粒子小尺寸下读作经典雪花枝晶。"""
+    hex_r = 150.0      # 中心六边形半径
+    arm_w = 48.0       # 主臂半宽（细条）
+    tip_r = 480.0      # 臂尖半径
+    cap = 45.0         # 臂尖封口长度
+    # 侧枝（从臂缘伸出的 V 形箭头枝）：(根部距离, 枝长)。外枝受 ≤500
+    # 包络约束（430+0.5×100+…≈484）。
+    branches = ((300.0, 170.0), (430.0, 100.0))
+
+    def _point(theta: float, d: float, w: float) -> tuple[float, float]:
+        # 臀局部系：u=臂方向、n=左法向；d=沿臂距离、w=横向偏移。
+        cos_t = math.cos(theta)
+        sin_t = math.sin(theta)
+        return (
+            d * cos_t - w * sin_t,
+            d * sin_t + w * cos_t,
         )
-        for angle, radius in ring:
-            commands.append([
-                "M" if vertex == 0 else "L",
-                radius * math.cos(angle),
-                radius * math.sin(angle),
-            ])
-            vertex += 1
+
+    def _branch_tip(
+        theta: float, root_d: float, side: float, length: float
+    ) -> tuple[float, float]:
+        # 侧枝尖：自臂缘 (root_d, side*arm_w) 沿「0.5u + side*0.866n」
+        # （与主臂成 60°、朝 side 侧外张）伸出 length。
+        cos_t = math.cos(theta)
+        sin_t = math.sin(theta)
+        base_x, base_y = _point(theta, root_d, side * arm_w)
+        dir_x = 0.5 * cos_t - side * 0.866 * sin_t
+        dir_y = 0.5 * sin_t + side * 0.866 * cos_t
+        return (base_x + dir_x * length, base_y + dir_y * length)
+
+    commands: list[list[object]] = []
+
+    def _emit(x: float, y: float) -> None:
+        commands.append(["M" if not commands else "L", x, y])
+
+    for arm in range(6):
+        theta = -math.pi / 2.0 + arm * math.pi / 3.0
+        # 绕行方向统一逆时针（角度递增）：每臂块自「右缘」（极角小侧，
+        # w=-）上行 → 臂尖 → 「左缘」（w=+）下行 → 根左，再经六边形边
+        # 过渡到下一臂根右——块内块间角度都递增，过渡线不互穿。
+        _emit(*_point(theta, hex_r, -arm_w))
+        for root_d, length in branches:
+            _emit(*_point(theta, root_d, -arm_w))
+            _emit(*_branch_tip(theta, root_d, -1.0, length))
+            _emit(*_point(theta, root_d + 30.0, -arm_w))
+        _emit(*_point(theta, tip_r - cap, -arm_w))
+        # 臂端窄尖封口。
+        _emit(*_point(theta, tip_r, 0.0))
+        _emit(*_point(theta, tip_r - cap, arm_w))
+        # 左缘下行（w=+）：逐侧枝（对称）绕出/绕回 → 臂根左。
+        for root_d, length in reversed(branches):
+            _emit(*_point(theta, root_d + 30.0, arm_w))
+            _emit(*_branch_tip(theta, root_d, 1.0, length))
+            _emit(*_point(theta, root_d, arm_w))
+        _emit(*_point(theta, hex_r, arm_w))
+        # 六边形边过渡：本臂根左直线连到下一臂根右（下一臂的起点）。
     commands.append(["Z"])
     return commands
 

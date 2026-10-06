@@ -2553,14 +2553,50 @@ def test_snow_sprite_contract():
     assert snow[0][0] == "M" and snow[-1][0] == "Z"
     assert sum(1 for c in snow if c[0] == "M") == 1
     lines = [c for c in snow if c[0] == "L"]
-    assert len(lines) == 23  # 6 臂 × (尖+侧枝+谷+侧枝) - 1 个 M
+    assert len(lines) == 101  # 棒条式枝晶：6 臂 × 17 顶点 - 1 个 M
     points = [
         (float(c[i]), float(c[i + 1]))
         for c in snow
         for i in range(1, len(c) - 1, 2)
     ]
-    radii = sorted({round(math.hypot(x, y), 3) for x, y in points})
-    assert radii == [85.0, 250.0, 470.0]  # 主臂尖/侧枝尖/臂间谷
+    radii = [math.hypot(x, y) for x, y in points]
+    # 中心六边形（min r ≈ 157.5）+ 臂尖/外枝尖包络 ≤ 500。
+    assert 140.0 < min(radii) < 175.0
+    assert 470.0 < max(radii) <= 500.0
+    # 严格无自交叠（浮点容差，防将来调轮廓参数破坏绕行）。
+    def _cross(o, a, b):
+        return (a[0] - o[0]) * (b[1] - o[1]) - (a[1] - o[1]) * (b[0] - o[0])
+
+    def _sign(value):
+        return 0 if abs(value) < 1e-9 else (1 if value > 0 else -1)
+
+    def _segments():
+        return [
+            (points[i], points[(i + 1) % len(points)])
+            for i in range(len(points))
+        ]
+
+    segs = _segments()
+    for i in range(len(segs)):
+        for j in range(i + 2, len(segs)):
+            if i == 0 and j == len(segs) - 1:
+                continue
+            p1, p2 = segs[i]
+            p3, p4 = segs[j]
+            s1 = _sign(_cross(p3, p4, p1))
+            s2 = _sign(_cross(p3, p4, p2))
+            s3 = _sign(_cross(p1, p2, p3))
+            s4 = _sign(_cross(p1, p2, p4))
+            assert not (s1 * s2 < 0 and s3 * s4 < 0), (i, j, segs[i], segs[j])
+    # 中心实心（雪花不是环）。
+    x, y = 0.0, 0.0
+    inside = False
+    for i in range(len(points)):
+        x1, y1 = points[i]
+        x2, y2 = points[(i + 1) % len(points)]
+        if (y1 > y) != (y2 > y) and x < (x2 - x1) * (y - y1) / (y2 - y1) + x1:
+            inside = not inside
+    assert inside
     assert sprite_for_kind("snow") == "snow"
 
 
