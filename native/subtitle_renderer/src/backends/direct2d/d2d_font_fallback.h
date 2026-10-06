@@ -38,7 +38,8 @@ ResolvedFontFaces resolveFontFaces(
     int weight,
     bool italic,
     int faceWeight = -1,
-    bool simBold = false
+    bool simBold = false,
+    bool axisHint = false
 );
 
 // Outline-only view of resolveFontFaces for callers that do not need the
@@ -50,7 +51,8 @@ Microsoft::WRL::ComPtr<IDWriteFontFace> createFontFace(
     int weight,
     bool italic,
     int faceWeight = -1,
-    bool simBold = false
+    bool simBold = false,
+    bool axisHint = false
 );
 
 bool containsEmoji(const std::wstring &text);

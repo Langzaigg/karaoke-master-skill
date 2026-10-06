@@ -235,16 +235,33 @@ def _font_face_slot_overrides(payload: dict[str, Any]) -> None:
         return plan.base_weight, bool(plan.synthetic_bold)
 
     main_family = payload.get("font_family")
-    face_weight, sim_bold = resolved(main_family, main_weight)
-    payload["font_face_weight"] = face_weight
-    payload["font_sim_bold"] = sim_bold
+    plan = resolve_weight_plan(str(main_family or ""), main_weight, italic)
+    payload["font_face_weight"] = plan.base_weight
+    payload["font_sim_bold"] = bool(plan.synthetic_bold)
+    payload["font_axis"] = plan.axis_value is not None
 
     latin_family = payload.get("latin_font_family") or main_family
+    payload["latin_font_axis"] = (
+        resolve_weight_plan(
+            str(latin_family or ""),
+            int(payload.get("latin_font_weight") or main_weight),
+            italic,
+        ).axis_value
+        is not None
+    )
     face_weight, sim_bold = resolved(latin_family, payload.get("latin_font_weight"))
     payload["latin_font_face_weight"] = face_weight
     payload["latin_font_sim_bold"] = sim_bold
 
     ruby_family = payload.get("ruby_font_family") or main_family
+    payload["ruby_font_axis"] = (
+        resolve_weight_plan(
+            str(ruby_family or ""),
+            int(payload.get("ruby_font_weight") or main_weight),
+            italic,
+        ).axis_value
+        is not None
+    )
     face_weight, sim_bold = resolved(ruby_family, payload.get("ruby_font_weight"))
     payload["ruby_font_face_weight"] = face_weight
     payload["ruby_font_sim_bold"] = sim_bold
@@ -253,6 +270,14 @@ def _font_face_slot_overrides(payload: dict[str, Any]) -> None:
     ruby_latin_weight = payload.get("ruby_latin_font_weight")
     if ruby_latin_weight is None:
         ruby_latin_weight = payload.get("ruby_font_weight")
+    payload["ruby_latin_font_axis"] = (
+        resolve_weight_plan(
+            str(ruby_latin_family or ""),
+            int(ruby_latin_weight or main_weight),
+            italic,
+        ).axis_value
+        is not None
+    )
     face_weight, sim_bold = resolved(ruby_latin_family, ruby_latin_weight)
     payload["ruby_latin_font_face_weight"] = face_weight
     payload["ruby_latin_font_sim_bold"] = sim_bold

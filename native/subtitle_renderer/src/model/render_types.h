@@ -359,9 +359,11 @@ struct TextStyle {
     // faceWeight = 实际渲染 face 的字重（可变字体=轴值），simBold = 合成粗体。
     int fontFaceWeight = -1;
     bool fontSimBold = false;
+    bool fontAxis = false;
     std::optional<int> latinFontWeight;
     int latinFontFaceWeight = -1;
     bool latinFontSimBold = false;
+    bool latinFontAxis = false;
     int latinFontStretchPct = 100;
     bool italic = false;
     bool allowBiting = false;
@@ -420,9 +422,11 @@ struct TextStyle {
     int rubyFontWeight = 400;
     int rubyFontFaceWeight = -1;
     bool rubyFontSimBold = false;
+    bool rubyFontAxis = false;
     std::optional<int> rubyLatinFontWeight;
     int rubyLatinFontFaceWeight = -1;
     bool rubyLatinFontSimBold = false;
+    bool rubyLatinFontAxis = false;
     int rubyLatinFontStretchPct = 100;
     float rubyGap = 0.0f;
     float rubyInterval = 0.0f;

@@ -193,9 +193,11 @@ struct ResolvedStyle {
     // simBold = 该槽走合成粗体。缺省（-1/false）回落本地自治规则。
     int fontFaceWeight = -1;
     bool fontSimBold = false;
+    bool fontAxis = false;
     std::optional<int> latinFontWeight;
     int latinFontFaceWeight = -1;
     bool latinFontSimBold = false;
+    bool latinFontAxis = false;
     int latinFontStretchPct = 100;
     bool italic = false;
     bool allowBiting = false;
@@ -276,10 +278,12 @@ struct ResolvedStyle {
     std::optional<int> rubyFontWeight;
     int rubyFontFaceWeight = -1;
     bool rubyFontSimBold = false;
+    bool rubyFontAxis = false;
     std::optional<int> rubyLatinFontSizePx;
     std::optional<int> rubyLatinFontWeight;
     int rubyLatinFontFaceWeight = -1;
     bool rubyLatinFontSimBold = false;
+    bool rubyLatinFontAxis = false;
     std::optional<int> rubyLatinFontStretchPct;
     bool rubyFontFollowMain = true;
     int rubyGapPx = 8;

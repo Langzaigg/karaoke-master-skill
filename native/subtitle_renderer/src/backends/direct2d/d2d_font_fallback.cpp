@@ -260,7 +260,8 @@ ResolvedFontFaces resolveUnifiedFaces(
     int weight,
     bool italic,
     int faceWeight,
-    bool simBold
+    bool simBold,
+    bool axisHint
 ) {
     ResolvedFontFaces result;
     Microsoft::WRL::ComPtr<IDWriteFontFace> probeFace;
@@ -268,15 +269,20 @@ ResolvedFontFaces resolveUnifiedFaces(
         return result;
     }
 
-    // 可变字体：faceWeight 即钳制后的轴值（CPU 侧统一解析下发）。
-    if (auto axisFace = axisWeightFace(
-            probeFace.Get(), faceWeight > 0 ? faceWeight : weight)) {
-        result.outline = axisFace;
-        result.metrics = defaultAxisFace(probeFace.Get());
-        if (!result.metrics) {
-            result.metrics = axisFace;
+    // 可变字体：faceWeight 即钳制后的轴值。axisHint 由 CPU 侧统一解析
+    // 下发——这台 Win11 的 DWrite 对静态字体也报告 wght 标准轴，凭
+    // GetFontAxisCount 判可变会把静态族全部劫持进恒定的轴实例；只有
+    // Python 侧实测（轴两端指纹不同）确认的真可变字体才走这里。
+    if (axisHint) {
+        if (auto axisFace = axisWeightFace(
+                probeFace.Get(), faceWeight > 0 ? faceWeight : weight)) {
+            result.outline = axisFace;
+            result.metrics = defaultAxisFace(probeFace.Get());
+            if (!result.metrics) {
+                result.metrics = axisFace;
+            }
+            return result;
         }
-        return result;
     }
 
     struct FaceEntry {
@@ -388,7 +394,8 @@ ResolvedFontFaces resolveFontFaces(
     int weight,
     bool italic,
     int faceWeight,
-    bool simBold
+    bool simBold,
+    bool axisHint
 ) {
     if (familyName.empty()) {
         return {};
@@ -404,7 +411,8 @@ ResolvedFontFaces resolveFontFaces(
         if (auto font = tryFamilyFont(
                 typographicCollection, familyName, weight, italic, &family)) {
             return resolveUnifiedFaces(
-                font.Get(), family.Get(), weight, italic, faceWeight, simBold);
+                font.Get(), family.Get(), weight, italic, faceWeight, simBold,
+                axisHint);
         }
     }
     {
@@ -412,12 +420,13 @@ ResolvedFontFaces resolveFontFaces(
         if (auto font = tryFamilyFont(
                 collection, familyName, weight, italic, &family)) {
             return resolveUnifiedFaces(
-                font.Get(), family.Get(), weight, italic, faceWeight, simBold);
+                font.Get(), family.Get(), weight, italic, faceWeight, simBold,
+                axisHint);
         }
     }
     if (auto font = findFontByGdiFamilyName(collection, familyName)) {
         return resolveUnifiedFaces(
-            font.Get(), nullptr, weight, italic, faceWeight, simBold);
+            font.Get(), nullptr, weight, italic, faceWeight, simBold, axisHint);
     }
     return {};
 }
@@ -429,11 +438,12 @@ Microsoft::WRL::ComPtr<IDWriteFontFace> createFontFace(
     int weight,
     bool italic,
     int faceWeight,
-    bool simBold
+    bool simBold,
+    bool axisHint
 ) {
     return resolveFontFaces(
         collection, typographicCollection, familyName, weight, italic,
-        faceWeight, simBold
+        faceWeight, simBold, axisHint
     ).outline;
 }
 
