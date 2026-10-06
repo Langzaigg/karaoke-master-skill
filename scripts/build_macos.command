@@ -292,6 +292,13 @@ for rel in "${REMOVE_QT_LIBS[@]}"; do
   while IFS= read -r -d '' target; do
     rm -rf "$target"
   done < <(find "$APP_DIST" -name "$rel" -print0)
+  # PyInstaller also links framework binaries into both Contents directories.
+  for content_dir in Frameworks Resources; do
+    alias_path="$APP_DIST/Contents/$content_dir/${rel%.framework}"
+    if [ -L "$alias_path" ]; then
+      rm -f "$alias_path"
+    fi
+  done
 done
 
 # 嵌入的 AI 打轴 worker 以外部解释器子进程运行，runpy 引导要求 bundle
