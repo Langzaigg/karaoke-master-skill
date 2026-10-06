@@ -188,16 +188,21 @@ restore_sug_version() {
 }
 trap restore_sug_version EXIT
 
-echo "Setting SUG package variant to mac for this build..."
+echo "Setting SUG package variant for this build..."
 "$PYTHON_BIN" - <<PY
 from pathlib import Path
+import platform
 import re
+variant = {"arm64": "mac-arm64", "x86_64": "mac-intel"}.get(platform.machine())
+if variant is None:
+    raise SystemExit(f"Unsupported macOS build architecture: {platform.machine()}")
 path = Path(r"$SUG_VERSION_FILE")
 text = path.read_text(encoding="utf-8")
-patched = re.sub(r'^(VARIANT\s*=\s*)"[^"]*"', r'\1"mac"', text, flags=re.MULTILINE)
+patched = re.sub(r'^(VARIANT\s*=\s*)"[^"]*"', rf'\1"{variant}"', text, flags=re.MULTILINE)
 if patched == text:
     raise SystemExit("Could not patch VARIANT in strange_uta_game/__version__.py")
 path.write_text(patched, encoding="utf-8")
+print(f"  SUG variant: {variant}")
 PY
 
 mkdir -p "$DIST_PATH" "$WORK_PATH" "$SPEC_PATH"
