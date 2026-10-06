@@ -372,6 +372,13 @@ if [ -n "$warn_file" ]; then
 fi
 echo "Package content validation passed."
 
+# Refresh the resource seal after trimming and copying the SUG sources.
+echo "Re-signing the final macOS package..."
+if ! /usr/bin/codesign --force --sign - "$APP_DIST"; then
+  echo "Failed to re-sign the macOS package."
+  exit 1
+fi
+
 echo
 echo "Build complete:"
 echo "$APP_DIST"
