@@ -225,6 +225,28 @@ def test_constant_axis_variable_packaging_treated_as_static(qapp):
     assert fw._wght_axis_is_effective("MS Gothic", constant) is False
 
 
+def test_bold_cut_family_caps_at_top_weight(qapp):
+    """粗体单字重族：请求更重时停在原 face 并标「已最粗」。
+
+    Qt 的合成粗体只补齐"非粗→粗"，不会在已是粗体（≥600）的 face 上
+    再加粗（实测钉扎 Bold + setWeight(900) 渲染恒定）；DWrite 虽可
+    SIMS_BOLD 但 CPU 无法跟进，两后端一致优先——UI 用「已最粗」如实
+    标注，提示用户用同色描边实现更粗。
+    """
+    ttc = "C:/Windows/Fonts/UDDIGIKYOKASHON-B_0.TTC"
+    if not os.path.exists(ttc):
+        pytest.skip("UD Digi Kyokasho NK-B font file not present")
+    QFontDatabase.addApplicationFont(ttc)
+    _require_family("UD Digi Kyokasho NK-B")
+    heavier = resolve_weight_plan("UD Digi Kyokasho NK-B", 900)
+    assert heavier.base_weight == 700
+    assert heavier.synthetic_bold is False
+    assert heavier.mark == "已最粗"
+    lighter = resolve_weight_plan("UD Digi Kyokasho NK-B", 400)
+    assert lighter.base_weight == 700
+    assert lighter.mark == "就近"
+
+
 def test_missing_metadata_family_falls_back_to_plain_weight(monkeypatch):
     # 元数据缺失（字体不存在/headless 枚举为空）时保持旧的纯桶化行为；
     # 直接打桩两条元数据通道，避免平台默认字体回退的干扰。

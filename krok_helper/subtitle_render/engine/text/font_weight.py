@@ -366,8 +366,16 @@ def _compute_weight_plan(
         mark: str | None
         if synthetic:
             mark = "模拟"
+        elif base_weight == bucket:
+            mark = None
+        elif bucket > base_weight >= 600:
+            # 基 face 已是粗体（≥600）：Qt 的合成粗体只补齐"非粗→粗"，
+            # 不会粗上加粗（实测钉扎 Bold+setWeight(900) 恒定）——请求
+            # 更重只能停在原 face。DWrite 虽可 SIMS_BOLD 加粗（实测
+            # advance 2048→2089）但 CPU 侧无法跟进，两后端一致优先。
+            mark = "已最粗"
         else:
-            mark = None if base_weight == bucket else "就近"
+            mark = "就近"
         return FontWeightPlan(
             family=family,
             requested_weight=requested,
