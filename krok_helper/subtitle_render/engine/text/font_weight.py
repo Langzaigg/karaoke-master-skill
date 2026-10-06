@@ -99,6 +99,7 @@ class FontWeightPlan:
     mark: str | None = None
 
 
+_CANON_CACHE: dict[str, str] = {}
 _AXIS_CACHE: dict[str, dict[bytes, WeightAxis] | None] = {}
 _FACE_CACHE: dict[str, tuple[tuple[int, str, bool], ...]] = {}
 _PLAN_CACHE: dict[tuple[str, int, bool], FontWeightPlan] = {}
@@ -108,9 +109,41 @@ _LOCK = threading.Lock()
 def clear_font_weight_cache() -> None:
     """字体安装/卸载后清空进程级缓存（调用方：宿主字体库刷新）。"""
     with _LOCK:
+        _CANON_CACHE.clear()
         _AXIS_CACHE.clear()
         _FACE_CACHE.clear()
         _PLAN_CACHE.clear()
+
+
+def canonical_family(family: str) -> str:
+    """把存储/显示用的本地化族名换成 Qt 字体库拼写。
+
+    工作台字体选择器列出的是 SUG 文件扫描的本地化名（日文/别名），
+    渲染端经 n3 字体目录的别名表（DirectWrite 全本地化名清单）换算；
+    字重解析必须走同一换算，否则 face 枚举落空、全档退兜底。换算失败
+    或换算后仍枚举不到 face 时保留原名（调用方按兜底处理）。
+    """
+    key = str(family)
+    with _LOCK:
+        cached = _CANON_CACHE.get(key)
+    if cached is not None:
+        return cached
+    canonical = key
+    try:
+        from krok_helper.subtitle_render.n3.font_catalog import (
+            resolve_qt_font_family,
+        )
+
+        resolved = resolve_qt_font_family(key)
+        if resolved and resolved != key:
+            probe = QFont(resolved)
+            if QFontInfo(probe).family().casefold() == resolved.casefold():
+                canonical = resolved
+    except Exception:
+        canonical = key
+    with _LOCK:
+        _CANON_CACHE[key] = canonical
+    return canonical
 
 
 def _parse_fvar(raw: bytes) -> dict[bytes, WeightAxis] | None:
@@ -148,7 +181,7 @@ def family_weight_axis(family: str) -> WeightAxis | None:
     if cached is not _MISSING:
         return None if cached is None else cached.get(_AXIS_TAG_WEIGHT)
     try:
-        raw_font = QRawFont.fromFont(QFont(key))
+        raw_font = QRawFont.fromFont(QFont(canonical_family(key)))
         table = bytes(raw_font.fontTable(b"fvar"))
         axes = _parse_fvar(table) if table else None
     except (RuntimeError, TypeError, ValueError):
@@ -159,7 +192,7 @@ def family_weight_axis(family: str) -> WeightAxis | None:
         # 伪可变一律按静态处理——否则所有字重会被 clamp 到唯一值且 UI
         # 全档标"真实"（2026-10-07 用户报「全字重无效且无就近/模拟标注」
         # 的根因之一）。min==max 时两端指纹必相同，统一走指纹检测即可。
-        if not _wght_axis_is_effective(key, axis):
+        if not _wght_axis_is_effective(canonical_family(key), axis):
             axes = None
     with _LOCK:
         _AXIS_CACHE[key] = axes
@@ -169,6 +202,7 @@ def family_weight_axis(family: str) -> WeightAxis | None:
 def _wght_axis_is_effective(family: str, axis: WeightAxis) -> bool:
     """wght 轴两端是否产生可观测差异（advance/墨迹指纹）。"""
     signatures = []
+    family = canonical_family(family)
     for value in (axis.minimum, axis.maximum):
         font = QFont(family)
         font.setVariableAxis(QFont.Tag(_AXIS_TAG_WEIGHT), float(value))
@@ -198,12 +232,13 @@ def face_inventory(family: str) -> tuple[tuple[int, str, bool], ...]:
         cached = _FACE_CACHE.get(key)
     if cached is not None:
         return cached
+    canonical = canonical_family(key)
     faces: list[tuple[int, str, bool]] = []
     try:
-        for style in QFontDatabase.styles(key):
-            weight = int(QFontDatabase.weight(key, style))
+        for style in QFontDatabase.styles(canonical):
+            weight = int(QFontDatabase.weight(canonical, style))
             name = str(style)
-            italic = bool(QFontDatabase.italic(key, style))
+            italic = bool(QFontDatabase.italic(canonical, style))
             if 1 <= weight <= 1000:
                 faces.append((weight, name, italic))
     except (RuntimeError, TypeError, ValueError):
@@ -278,6 +313,7 @@ def _resolve_missing_static_weight(
     匹配者即 Qt 的实际选择——因此 plan 与 CPU 渲染恒等。无匹配（字体
     被替换 / 度量异常）返回 None，由调用方走就近吸附兜底。
     """
+    family = canonical_family(family)
     plain = QFont(family)
     plain.setWeight(QFont.Weight(bucket))
     if italic:
@@ -489,6 +525,7 @@ __all__ = [
     "apply_weight_plan",
     "bucket_weight",
     "build_weight_font",
+    "canonical_family",
     "clear_font_weight_cache",
     "embolden_delta_of_font",
     "embolden_glyph_path",

@@ -231,6 +231,7 @@ from krok_helper.subtitle_render.engine.style.style_semantics import (
     style_for_role,
 )
 from krok_helper.subtitle_render.engine.text.font_weight import (
+    canonical_family,
     physical_weight_styles,
     resolve_weight_plan,
 )
@@ -324,16 +325,13 @@ _FONT_CARD_FIELDS: tuple[str, ...] = (
 
 
 def _available_font_weights(family: str) -> tuple[int, ...]:
-    """Return the distinct weights Qt can actually resolve for a font family."""
-    try:
-        styles = QFontDatabase.styles(str(family))
-        weights = {
-            int(QFontDatabase.weight(str(family), style))
-            for style in styles
-        }
-    except (RuntimeError, TypeError, ValueError):
-        weights = set()
-    normalized = tuple(sorted(weight for weight in weights if 1 <= weight <= 1000))
+    """Return the distinct weights Qt can actually resolve for a font family.
+
+    经 font_weight 的规范名换算（选择器存储的是本地化显示名，直查
+    styles() 会落空），物理字重列不全会让下拉缺真实档。
+    """
+    faces = physical_weight_styles(canonical_family(str(family)))
+    normalized = tuple(weight for weight, _name in faces)
     # Missing project fonts and headless Qt platforms expose no style metadata.
     # Keep the legacy choices in that case instead of forcing an arbitrary value.
     return normalized or _DEFAULT_FONT_WEIGHTS
