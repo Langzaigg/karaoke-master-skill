@@ -392,7 +392,10 @@ if [ -n "$warn_file" ]; then
 fi
 echo "Package content validation passed."
 
-# Refresh the resource seal after trimming and copying the SUG sources.
+echo "Updating macOS package version metadata..."
+"$PYTHON_BIN" "$PROJECT_ROOT/scripts/update_macos_version.py" "$APP_DIST/Contents/Info.plist"
+
+# Re-sign after all package contents and metadata have been finalized.
 echo "Re-signing the final macOS package..."
 if ! /usr/bin/codesign --force --sign - "$APP_DIST"; then
   echo "Failed to re-sign the macOS package."
