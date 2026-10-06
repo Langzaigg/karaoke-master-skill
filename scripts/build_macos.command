@@ -270,7 +270,7 @@ else
     done < <(find "$TRANSLATIONS_DIR" -type f -print0)
   fi
 
-  PLUGINS_DIR="$(find "$PYQT_DIR" -type d -name plugins -print -quit || true)"
+  PLUGINS_DIR="$PYQT_DIR/Qt6/plugins"
   if [ -n "$PLUGINS_DIR" ] && [ -d "$PLUGINS_DIR" ]; then
     for rel in "${REMOVE_PLUGIN_FILES[@]}"; do
       target="$PLUGINS_DIR/$rel"
