@@ -43,6 +43,7 @@ from krok_helper.subtitle_render.domain.models import (
 )
 from krok_helper.subtitle_render.domain.timing import normalize_reversed_wipe_lines
 from krok_helper.subtitle_render.engine.style.style_semantics import style_for_role
+from krok_helper.subtitle_render.engine.text.font_weight import clear_font_weight_cache
 from krok_helper.subtitle_render.n3.font_catalog import invalidate_n3_font_caches
 from krok_helper.subtitle_render.n3.project_import import load_n3proj
 from krok_helper.subtitle_render.sources.subtitles import load_nicokara_lrc
@@ -110,14 +111,18 @@ def _gpu_test_application_fonts():
     for family in _GPU_TEST_FONT_FAMILIES:
         assert QFontInfo(QFont(family)).family() == family, family
     # EMBEDDING §8：SUG 的进程级字体缓存也必须看到应用字体的装卸，与 N3
-    # 缓存一并失效，否则后续用例里 SUG 侧读到过期字体族快照。
+    # 缓存一并失效，否则后续用例里 SUG 侧读到过期字体族快照。字重 face
+    # 缓存同理显式清（invalidate_n3_font_caches 不再 import engine 侧——
+    # font_weight 正向依赖 n3.font_catalog，反向清缓存会成环）。
     from strange_uta_game.frontend import font_cache as sug_font_cache
 
     invalidate_n3_font_caches()
+    clear_font_weight_cache()
     sug_font_cache.invalidate()
     yield
     QFontDatabase.removeAllApplicationFonts()
     invalidate_n3_font_caches()
+    clear_font_weight_cache()
     sug_font_cache.invalidate()
 
 

@@ -595,21 +595,19 @@ resolve_qt_font_family.cache_info = _resolve_qt_font_family_cached.cache_info  #
 
 
 def invalidate_n3_font_caches() -> None:
-    """Invalidate caches after the process-wide Qt font registry changes."""
+    """Invalidate caches after the process-wide Qt font registry changes.
+
+    只清 n3 目录自身的缓存与 SUG 字体缓存。**不得**在这里 import
+    engine.text.font_weight 清字重缓存：font_weight 已正向依赖本模块
+    （canonical_family 走别名表，与 painter/metrics/title/ruby 同款），
+    反向 import 会成环（architecture
+    test_subtitle_render_internal_import_graph_is_acyclic 守的就是这个）。
+    装卸应用字体的调用方（测试夹具）需要字重 face 缓存一并失效时，
+    显式调 clear_font_weight_cache()。
+    """
 
     _get_n3_font_catalog.cache_clear()
     _resolve_qt_font_family_cached.cache_clear()
-    try:
-        from krok_helper.subtitle_render.engine.text.font_weight import (
-            clear_font_weight_cache,
-        )
-
-        # face_inventory 是进程级缓存；Qt 字体登记变化后必须一并清掉，
-        # 否则注册/注销应用字体的测试会把旧的空 inventory 快照留给后续
-        # 用例（如 Yu Gothic 多面字重测试读到 []）。
-        clear_font_weight_cache()
-    except Exception:
-        pass
     try:
         from strange_uta_game.frontend import font_cache
 

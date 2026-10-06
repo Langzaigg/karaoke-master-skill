@@ -4131,6 +4131,13 @@ def test_native_gpu_title_rows_follow_layout_alignments_when_exe_exists(
         )
 
         invalidate_n3_font_caches()
+        # 字重 face 缓存显式清：invalidate_n3_font_caches 不再 import
+        # engine 侧清（font_weight 正向依赖 n3.font_catalog，反向清会成环）。
+        from krok_helper.subtitle_render.engine.text.font_weight import (
+            clear_font_weight_cache,
+        )
+
+        clear_font_weight_cache()
         from strange_uta_game.frontend import font_cache as sug_font_cache
 
         sug_font_cache.invalidate()
