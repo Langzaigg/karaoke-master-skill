@@ -14,6 +14,8 @@ SUG_SRC="$PROJECT_ROOT/krok_helper/lyrics_timing/src"
 SUG_PACKAGE="$SUG_SRC/strange_uta_game"
 SUG_VERSION_FILE="$SUG_PACKAGE/__version__.py"
 SUG_VERSION_BACKUP=""
+PYQT6_BINDING_VERSION="6.11.0"
+PYQT6_QT_VERSION="6.11.0"
 
 EXCLUDED_MODULES=(
   PySide6
@@ -103,6 +105,20 @@ REMOVE_QT_LIBS=(
   "QtQuick.framework"
 )
 
+ensure_pyqt6() {
+  echo "Checking PyQt6 $PYQT6_BINDING_VERSION with Qt $PYQT6_QT_VERSION..."
+  if ! "$PYTHON_BIN" -c "from PyQt6.QtCore import PYQT_VERSION_STR, qVersion; raise SystemExit(0 if PYQT_VERSION_STR == '$PYQT6_BINDING_VERSION' and qVersion() == '$PYQT6_QT_VERSION' else 1)" >/dev/null 2>&1; then
+    echo "Installing PyQt6 $PYQT6_BINDING_VERSION with Qt $PYQT6_QT_VERSION..."
+    if ! "$PYTHON_BIN" -m pip install --upgrade "PyQt6==$PYQT6_BINDING_VERSION" "PyQt6-Qt6==$PYQT6_QT_VERSION"; then
+      echo "Failed to install PyQt6 $PYQT6_BINDING_VERSION with Qt $PYQT6_QT_VERSION."
+      if [ -z "${CI:-}" ]; then
+        read -r -p "Press Enter to close..."
+      fi
+      exit 1
+    fi
+  fi
+}
+
 ensure_pkg() {
   local module="$1"
   local pip_name="$2"
@@ -129,7 +145,7 @@ if ! command -v "$PYTHON_BIN" >/dev/null 2>&1; then
 fi
 
 ensure_pkg PyInstaller pyinstaller
-ensure_pkg PyQt6 PyQt6
+ensure_pyqt6
 ensure_pkg fontTools fonttools
 ensure_pkg qfluentwidgets "PyQt6-Fluent-Widgets"
 ensure_pkg yt_dlp yt-dlp
