@@ -2715,22 +2715,54 @@ def test_snow_sprite_contract():
 
 
 def test_snow_solid_sprite_contract():
-    """·实心档 sprite = 同并集轮廓只留外环：单轮廓、无洞环、与·镂空档
-    的外环逐点一致（两档唯一「差分」是洞的有无）。"""
-    hollow = FX_SPRITES["snow"]["path_commands"]
+    """·实心档 sprite = **0890458d 时代的 ❄ 枝晶星形**（2026-10-07 用户
+    口径指定保留）：单轮廓 24 顶点、三档半径（主臂尖 470 / 侧枝尖 250 /
+    臂间谷 85）、六重对称、无自交叠；与·镂空档是两套不同外形（差分=
+    整套形状，不是洞的有无）。"""
     solid = FX_SPRITES["snow_solid"]["path_commands"]
     assert solid[0][0] == "M" and solid[-1][0] == "Z"
     for command in solid:
         assert command[0] in {"M", "L", "Z"}
+    assert sum(1 for c in solid if c[0] == "M") == 1
+    lines = [c for c in solid if c[0] == "L"]
+    assert len(lines) == 23  # 6 臂 × (主臂尖+侧枝+谷+侧枝) - 1 个 M
+    points = [
+        (float(c[i]), float(c[i + 1]))
+        for c in solid
+        for i in range(1, len(c) - 1, 2)
+    ]
+    assert len(points) == 24
+    radii = sorted({round(math.hypot(x, y), 3) for x, y in points})
+    assert radii == [85.0, 250.0, 470.0]  # 臂间谷/侧枝尖/主臂尖
     solid_loops = _sprite_loops(solid)
-    assert len(solid_loops) == 1  # 单轮廓：无窗洞、无中心洞
-    hollow_loops = _sprite_loops(hollow)
-    outer = [loop for loop in hollow_loops if _sprite_loop_area(loop) > 0.0]
-    assert len(outer) == 1
-    assert solid_loops[0] == outer[0]
+    assert len(solid_loops) == 1  # 单轮廓
     assert _sprite_loop_intersections(solid_loops) == 0
-    radii = [math.hypot(x, y) for x, y in solid_loops[0]]
-    assert max(radii) == pytest.approx(470.0, abs=1e-6)
+    # 中心实心（ray-cast 在多边形内）。
+    x, y = 0.0, 0.0
+    inside = False
+    loop = solid_loops[0]
+    for i in range(len(loop)):
+        x1, y1 = loop[i]
+        x2, y2 = loop[(i + 1) % len(loop)]
+        if (y1 > y) != (y2 > y) and x < (x2 - x1) * (y - y1) / (y2 - y1) + x1:
+            inside = not inside
+    assert inside
+    # 六折对称：旋转 60° 后与原顶点集合重合。
+    cos60 = math.cos(math.pi / 3.0)
+    sin60 = math.sin(math.pi / 3.0)
+    for px, py in loop:
+        rotated = (px * cos60 - py * sin60, px * sin60 + py * cos60)
+        nearest = min(math.hypot(rotated[0] - qx, rotated[1] - qy) for qx, qy in loop)
+        assert nearest < 1e-6
+    # 与镂空档是两套形状：顶点集合不同（差分=整套外形）。
+    hollow = FX_SPRITES["snow"]["path_commands"]
+    hollow_points = {
+        (round(float(c[i]), 3), round(float(c[i + 1]), 3))
+        for c in hollow
+        for i in range(1, len(c) - 1, 2)
+    }
+    solid_points = {(round(x, 3), round(y, 3)) for x, y in loop}
+    assert solid_points != hollow_points
     assert sprite_for_kind("snow_solid") == "snow_solid"
 
 

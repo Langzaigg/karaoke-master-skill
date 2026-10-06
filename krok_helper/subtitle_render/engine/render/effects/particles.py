@@ -71,7 +71,8 @@ SNOW_LIFE_MS = 1100
 SNOW_A = "#F2F8FF"
 SNOW_B = "#BFDFFF"
 # 雪花两档（2026-10 用户口径）：``snow`` = 教程并集轮廓带全部洞环（界面
-# 「雪花飘入/飘出/飘动·镂空」）；``snow_solid`` = 同一轮廓去掉洞环（「…·实心」）。
+# 「雪花飘入/飘出/飘动·镂空」）；``snow_solid`` = **0890458d 时代的 ❄ 枝晶
+# 星形**（「…·实心」，2026-10-07 用户指定保留当时形状，不是镂空档去洞环）。
 # 运动签名、配色与出入场时序完全同源，只有 sprite 不同——规划器/求值器里
 # 所有按 snow 分流的判断都必须用本集合，别写成单值比较。
 SNOW_KINDS = frozenset({"snow", "snow_solid"})
@@ -875,12 +876,30 @@ def _snow_commands() -> list[list[object]]:
 
 
 def _snow_solid_commands() -> list[list[object]]:
-    """雪花剪影·实心（kind ``snow_solid``）：与镂空档同一并集轮廓，只留外环、
-    去掉全部洞环——两档「差分」仅在洞的有无，外形/比例完全同源。"""
-    outer = [loop for loop in _snow_loops() if _polygon_signed_area(loop) > 0.0]
-    if len(outer) != 1:
-        raise ValueError(f"雪花并集外环异常：{len(outer)}（期望 1）")
-    return _loops_to_commands(outer)
+    """雪花剪影·实心（kind ``snow_solid``）：**0890458d 时代的 ❄ 枝晶星形**
+    （2026-10-07 用户口径指定保留——「实心」档不是镂空档去洞环，而是当时
+    那版形状）。每 60° 扇区 = 主臂尖（r 470）+ 两侧枝尖（±20°，r 250）+
+    臂间谷（r 85），共 24 顶点直线轮廓——主臂六重对称、侧枝朝外张开，
+    粒子小尺寸下读作带枝晶的雪花；单轮廓无自交叠（M + 23×L + Z）。"""
+    commands: list[list[object]] = []
+    vertex = 0
+    for arm in range(6):
+        arm_angle = -math.pi / 2.0 + arm * math.pi / 3.0
+        ring = (
+            (arm_angle, 470.0),                      # 主臂尖
+            (arm_angle + math.pi / 9.0, 250.0),      # 顺时针侧枝尖（+20°）
+            (arm_angle + math.pi / 6.0, 85.0),       # 臂间谷（+30°）
+            (arm_angle + math.pi * 2.0 / 9.0, 250.0),  # 逆时针侧枝尖（+40°）
+        )
+        for angle, radius in ring:
+            commands.append([
+                "M" if vertex == 0 else "L",
+                radius * math.cos(angle),
+                radius * math.sin(angle),
+            ])
+            vertex += 1
+    commands.append(["Z"])
+    return commands
 
 
 FX_SPRITES: dict[str, dict[str, object]] = {
