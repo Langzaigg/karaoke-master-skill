@@ -301,6 +301,15 @@ def _animation_summary(
     return summary
 
 
+# 特效列条目 sizeHint 的有界宽（2026-10-07 栈溢出闪退修复）：摘要文本
+# 变长后，经条目 sizeHint 参与 Qt 布局几何测量，会与 qframeless 主窗的
+# win32 几何路径构成 resize 反馈环（user32→qwindows→Qt 信号→PyQt 槽→
+# pywin32，纯 C 栈溢出 0xC000041D，无 Python 帧、递归上限不设防）。
+# 钉住条目 sizeHint 切断该通路；列宽语义测量由 _cell_width_hint 字体直测
+# 另行供给，不受影响。
+_EFFECT_HINT_W = 160
+
+
 # 挂载行开关三档选项（value, label）——与右键菜单同口径；首项即中性档
 # （跟随默认），多行混合态未命中任何值时代为缺省。反向走字是二态布尔，
 # 用复选框承载（勾选 = 反向）。
@@ -1807,6 +1816,7 @@ class LyricsPanel(DropPanel):
                 if line is None:
                     continue
                 track_index = self._presentation_rows[row].track_line_index
+                effect_item.setSizeHint(QSize(_EFFECT_HINT_W, -1))
                 effect_item.setText(
                     _animation_summary(
                         style,
@@ -2004,6 +2014,7 @@ class LyricsPanel(DropPanel):
                     if line is not None
                     else ""
                 )
+                effect_item.setSizeHint(QSize(_EFFECT_HINT_W, -1))
                 effect_item.setFlags(effect_item.flags() & ~Qt.ItemFlag.ItemIsEditable)
                 if blank:
                     effect_item.setFlags(Qt.ItemFlag.NoItemFlags)
@@ -2222,9 +2233,21 @@ class LyricsPanel(DropPanel):
         return max(self._table.horizontalHeader().sectionSizeHint(column), 1)
 
     def _cell_width_hint(self, row: int, column: int) -> int:
-        index = self._table.model().index(row, column)
-        hint = self._table.sizeHintForIndex(index)
-        return max(hint.width(), 0)
+        item = self._table.item(row, column)
+        if item is None:
+            index = self._table.model().index(row, column)
+            hint = self._table.sizeHintForIndex(index)
+            return max(hint.width(), 0)
+        # 字体直测而非 sizeHintForIndex：特效列条目的 sizeHint 被钉成有界宽
+        #（见 _EFFECT_HINT_W——2026-10-07 栈溢出闪退修复），列宽语义测量必须
+        # 绕开被钉住的 sizeHint，仍按真实文本宽度供给最小宽逻辑。
+        fm = self._table.fontMetrics()
+        margin = 2 * self._table.style().pixelMetric(
+            QStyle.PixelMetric.PM_FocusFrameHMargin
+        ) + 2 * self._table.style().pixelMetric(
+            QStyle.PixelMetric.PM_HeaderMargin
+        )
+        return max(fm.horizontalAdvance(item.text()) + margin, 0)
 
     def _visible_column_width_hint(self, column: int) -> int:
         return max(
@@ -2889,6 +2912,7 @@ class LyricsPanel(DropPanel):
                         role_item.setToolTip("")
                     role_item.setIcon(self._role_swatch_icon_for(line, role))
                 if line is not None and not self._title_mode:
+                    effect_item.setSizeHint(QSize(_EFFECT_HINT_W, -1))
                     effect_item.setText(
                         _animation_summary(
                             style,
