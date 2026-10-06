@@ -239,6 +239,7 @@ def _font_face_slot_overrides(payload: dict[str, Any]) -> None:
     payload["font_face_weight"] = plan.base_weight
     payload["font_sim_bold"] = bool(plan.synthetic_bold)
     payload["font_axis"] = plan.axis_value is not None
+    payload["font_embolden"] = int(plan.embolden_delta)
 
     latin_family = payload.get("latin_font_family") or main_family
     payload["latin_font_axis"] = (
@@ -249,6 +250,12 @@ def _font_face_slot_overrides(payload: dict[str, Any]) -> None:
         ).axis_value
         is not None
     )
+    latin_plan = resolve_weight_plan(
+        str(latin_family or ""),
+        int(payload.get("latin_font_weight") or main_weight),
+        italic,
+    )
+    payload["latin_font_embolden"] = int(latin_plan.embolden_delta)
     face_weight, sim_bold = resolved(latin_family, payload.get("latin_font_weight"))
     payload["latin_font_face_weight"] = face_weight
     payload["latin_font_sim_bold"] = sim_bold
@@ -262,6 +269,12 @@ def _font_face_slot_overrides(payload: dict[str, Any]) -> None:
         ).axis_value
         is not None
     )
+    ruby_plan = resolve_weight_plan(
+        str(ruby_family or ""),
+        int(payload.get("ruby_font_weight") or main_weight),
+        italic,
+    )
+    payload["ruby_font_embolden"] = int(ruby_plan.embolden_delta)
     face_weight, sim_bold = resolved(ruby_family, payload.get("ruby_font_weight"))
     payload["ruby_font_face_weight"] = face_weight
     payload["ruby_font_sim_bold"] = sim_bold
@@ -278,6 +291,12 @@ def _font_face_slot_overrides(payload: dict[str, Any]) -> None:
         ).axis_value
         is not None
     )
+    ruby_latin_plan = resolve_weight_plan(
+        str(ruby_latin_family or ""),
+        int(ruby_latin_weight or main_weight),
+        italic,
+    )
+    payload["ruby_latin_font_embolden"] = int(ruby_latin_plan.embolden_delta)
     face_weight, sim_bold = resolved(ruby_latin_family, ruby_latin_weight)
     payload["ruby_latin_font_face_weight"] = face_weight
     payload["ruby_latin_font_sim_bold"] = sim_bold

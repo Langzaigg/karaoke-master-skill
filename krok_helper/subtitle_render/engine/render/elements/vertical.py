@@ -37,6 +37,7 @@ from krok_helper.subtitle_render.engine.ruby import (
 from krok_helper.subtitle_render.engine.style.style_semantics import (
     effective_karaoke_colors,
 )
+from krok_helper.subtitle_render.engine.text.font_weight import embolden_glyph_path
 from krok_helper.subtitle_render.engine.text import (
     build_font,
     build_latin_font,
@@ -234,6 +235,7 @@ def vertical_glyph_path(
     path = QPainterPath()
     if vertical_orientation(text) == "R":
         path.addText(float(glyph_x), float(baseline), font, text)
+        path = embolden_glyph_path(path, font)
         center_x = float(column_x)
         center_y = float(cell_top + cell_h / 2)
         transform = QTransform()
@@ -243,7 +245,7 @@ def vertical_glyph_path(
         return transform.map(path)
     dx, dy = vertical_glyph_offset(text, cell_w, cell_h)
     path.addText(float(glyph_x + dx), float(baseline + dy), font, text)
-    return path
+    return embolden_glyph_path(path, font)
 
 
 def vertical_cell_width(metrics: QFontMetrics) -> int:

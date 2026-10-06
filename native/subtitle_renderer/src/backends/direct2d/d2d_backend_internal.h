@@ -230,7 +230,7 @@ struct Direct2DGpuBackend::Impl {
 
     using FontFaceKey = std::tuple<std::wstring, int, bool>;
     using TextGlyphKey = std::tuple<
-        std::uintptr_t, int, std::uint32_t, int, std::vector<UINT16>
+        std::uintptr_t, int, std::uint32_t, int, int, std::vector<UINT16>
     >;
     using VectorGlyphKey = std::tuple<std::string, int, std::uint32_t>;
     using RealizationCacheKey = std::tuple<

@@ -360,10 +360,12 @@ struct TextStyle {
     int fontFaceWeight = -1;
     bool fontSimBold = false;
     bool fontAxis = false;
+    int fontEmbolden = 0;
     std::optional<int> latinFontWeight;
     int latinFontFaceWeight = -1;
     bool latinFontSimBold = false;
     bool latinFontAxis = false;
+    int latinFontEmbolden = 0;
     int latinFontStretchPct = 100;
     bool italic = false;
     bool allowBiting = false;
@@ -423,10 +425,12 @@ struct TextStyle {
     int rubyFontFaceWeight = -1;
     bool rubyFontSimBold = false;
     bool rubyFontAxis = false;
+    int rubyFontEmbolden = 0;
     std::optional<int> rubyLatinFontWeight;
     int rubyLatinFontFaceWeight = -1;
     bool rubyLatinFontSimBold = false;
     bool rubyLatinFontAxis = false;
+    int rubyLatinFontEmbolden = 0;
     int rubyLatinFontStretchPct = 100;
     float rubyGap = 0.0f;
     float rubyInterval = 0.0f;

@@ -11,6 +11,7 @@ from krok_helper.subtitle_render.engine.layout.layout_context import _LAYOUT_PAS
 from krok_helper.subtitle_render.engine.text.font_weight import (
     bucket_weight,
     build_weight_font,
+    embolden_glyph_path,
 )
 from krok_helper.subtitle_render.domain.models import Style
 from krok_helper.subtitle_render.n3.font_catalog import resolve_qt_font_family
@@ -190,6 +191,7 @@ def char_ink_width(
         return cache[cache_key]
     path = QPainterPath()
     path.addText(0.0, 0.0, source_font, text)
+    path = embolden_glyph_path(path, source_font)
     rect = path.boundingRect()
     width = 0 if rect.isEmpty() else max(int(math.ceil(rect.width())), 0)
     if cache is not None:
@@ -273,6 +275,7 @@ def _char_glyph_metrics(
     path = QPainterPath()
     if text:
         path.addText(0.0, 0.0, glyph_font, text)
+    path = embolden_glyph_path(path, glyph_font)
     bounds = path.boundingRect()
     bounds_empty = bounds.isEmpty()
     bounds_width = float(bounds.width())

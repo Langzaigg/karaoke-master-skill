@@ -67,6 +67,7 @@ from krok_helper.subtitle_render.engine.ruby import (
     ruby_target_x_range,
     ruby_visual_units_and_intervals,
 )
+from krok_helper.subtitle_render.engine.text.font_weight import embolden_glyph_path
 from krok_helper.subtitle_render.engine.text import (
     TextLayout,
     build_font,
@@ -524,12 +525,9 @@ def ruby_wipe_geometry(
     ):
         path = QPainterPath()
         # GPU 对齐：扫光墨水盒也用逐单元脚本字体，与绘制/测量同源。
-        path.addText(
-            float(unit_x),
-            float(baseline_y),
-            build_ruby_font_for_text(style, unit),
-            unit,
-        )
+        unit_font = build_ruby_font_for_text(style, unit)
+        path.addText(float(unit_x), float(baseline_y), unit_font, unit)
+        path = embolden_glyph_path(path, unit_font)
         ink = path.boundingRect()
         if ink.isEmpty():
             ink_left = float(unit_x)
@@ -917,6 +915,7 @@ def ruby_text_path_and_rect(
     path = QPainterPath()
     if target_width is None:
         path.addText(float(x), float(baseline_y), ruby_font, reading)
+        path = embolden_glyph_path(path, ruby_font)
         width = ruby_metrics.horizontalAdvance(reading)
         return path, QRectF(
             float(x),
@@ -939,7 +938,9 @@ def ruby_text_path_and_rect(
         unit_font = (
             build_ruby_font_for_text(style, unit) if style is not None else ruby_font
         )
-        path.addText(float(unit_x), float(baseline_y), unit_font, unit)
+        unit_path = QPainterPath()
+        unit_path.addText(float(unit_x), float(baseline_y), unit_font, unit)
+        path.addPath(embolden_glyph_path(unit_path, unit_font))
     layout_width = ruby_layout_width(
         reading,
         ruby_metrics,

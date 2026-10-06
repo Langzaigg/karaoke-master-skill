@@ -128,10 +128,12 @@ void applyGpuResolvedStyle(
     target.fontFaceWeight = source.fontFaceWeight;
     target.fontSimBold = source.fontSimBold;
     target.fontAxis = source.fontAxis;
+    target.fontEmbolden = source.fontEmbolden;
     target.latinFontWeight = source.latinFontWeight;
     target.latinFontFaceWeight = source.latinFontFaceWeight;
     target.latinFontSimBold = source.latinFontSimBold;
     target.latinFontAxis = source.latinFontAxis;
+    target.latinFontEmbolden = source.latinFontEmbolden;
     target.latinFontStretchPct = source.latinFontStretchPct;
     target.italic = source.italic;
     target.allowBiting = source.allowBiting;
@@ -249,10 +251,14 @@ void applyGpuResolvedStyle(
     target.rubyFontAxis = rubyUsesMainFont
         ? source.fontAxis
         : source.rubyFontAxis;
+    target.rubyFontEmbolden = rubyUsesMainFont
+        ? source.fontEmbolden
+        : source.rubyFontEmbolden;
     target.rubyLatinFontWeight = source.rubyLatinFontWeight;
     target.rubyLatinFontFaceWeight = source.rubyLatinFontFaceWeight;
     target.rubyLatinFontSimBold = source.rubyLatinFontSimBold;
     target.rubyLatinFontAxis = source.rubyLatinFontAxis;
+    target.rubyLatinFontEmbolden = source.rubyLatinFontEmbolden;
     target.rubyLatinFontStretchPct = source.rubyLatinFontStretchPct.value_or(
         source.latinFontStretchPct
     );

@@ -489,6 +489,9 @@ void applyScalarStyleOverrides(ResolvedStyle &cfg, const QJsonObject &style) {
     );
     cfg.fontSimBold = style.value(QStringLiteral("font_sim_bold")).toBool(cfg.fontSimBold);
     cfg.fontAxis = style.value(QStringLiteral("font_axis")).toBool(cfg.fontAxis);
+    cfg.fontEmbolden = intValue(
+        style, QStringLiteral("font_embolden"), cfg.fontEmbolden
+    );
     if (hasNonNull(style, QStringLiteral("latin_font_size_px"))) {
         cfg.latinFontSizePx = std::max(
             1, intValue(style, QStringLiteral("latin_font_size_px"), cfg.fontSizePx)
@@ -508,6 +511,9 @@ void applyScalarStyleOverrides(ResolvedStyle &cfg, const QJsonObject &style) {
     cfg.latinFontAxis = style.value(
         QStringLiteral("latin_font_axis")
     ).toBool(cfg.latinFontAxis);
+    cfg.latinFontEmbolden = intValue(
+        style, QStringLiteral("latin_font_embolden"), cfg.latinFontEmbolden
+    );
     if (hasNonNull(style, QStringLiteral("latin_font_stretch_pct"))) {
         cfg.latinFontStretchPct = std::clamp(
             intValue(style, QStringLiteral("latin_font_stretch_pct"), 100), 50, 200
@@ -667,6 +673,9 @@ void applyScalarStyleOverrides(ResolvedStyle &cfg, const QJsonObject &style) {
     cfg.rubyFontAxis = style.value(
         QStringLiteral("ruby_font_axis")
     ).toBool(cfg.rubyFontAxis);
+    cfg.rubyFontEmbolden = intValue(
+        style, QStringLiteral("ruby_font_embolden"), cfg.rubyFontEmbolden
+    );
     if (hasNonNull(style, QStringLiteral("ruby_latin_font_size_px"))) {
         cfg.rubyLatinFontSizePx = std::max(
             1, intValue(style, QStringLiteral("ruby_latin_font_size_px"), cfg.rubyFontSizePx)
@@ -691,6 +700,9 @@ void applyScalarStyleOverrides(ResolvedStyle &cfg, const QJsonObject &style) {
     cfg.rubyLatinFontAxis = style.value(
         QStringLiteral("ruby_latin_font_axis")
     ).toBool(cfg.rubyLatinFontAxis);
+    cfg.rubyLatinFontEmbolden = intValue(
+        style, QStringLiteral("ruby_latin_font_embolden"), cfg.rubyLatinFontEmbolden
+    );
     if (hasNonNull(style, QStringLiteral("ruby_font_follow_main"))) {
         cfg.rubyFontFollowMain = style.value(
             QStringLiteral("ruby_font_follow_main")
@@ -864,6 +876,9 @@ ResolvedStyle resolvedStyleFromTitle(
     cfg.fontAxis = title.value(
         QStringLiteral("font_axis")
     ).toBool(cfg.fontAxis);
+    cfg.fontEmbolden = intValue(
+        title, QStringLiteral("font_embolden"), cfg.fontEmbolden
+    );
     cfg.latinFontFaceWeight = intValue(
         title, QStringLiteral("latin_font_face_weight"), cfg.latinFontFaceWeight
     );
@@ -873,6 +888,9 @@ ResolvedStyle resolvedStyleFromTitle(
     cfg.latinFontAxis = title.value(
         QStringLiteral("latin_font_axis")
     ).toBool(cfg.latinFontAxis);
+    cfg.latinFontEmbolden = intValue(
+        title, QStringLiteral("latin_font_embolden"), cfg.latinFontEmbolden
+    );
     cfg.italic = title.value(QStringLiteral("italic")).toBool(cfg.italic);
     cfg.letterSpacingPx = intValue(
         title, QStringLiteral("letter_spacing_px"), cfg.letterSpacingPx
@@ -968,6 +986,9 @@ void applyStyleSection(RenderConfig &cfg, const QJsonObject &style) {
     );
     base.fontSimBold = style.value(QStringLiteral("font_sim_bold")).toBool(base.fontSimBold);
     base.fontAxis = style.value(QStringLiteral("font_axis")).toBool(base.fontAxis);
+    base.fontEmbolden = intValue(
+        style, QStringLiteral("font_embolden"), base.fontEmbolden
+    );
     if (style.value(QStringLiteral("latin_font_weight")).isDouble()) {
         base.latinFontWeight = std::clamp(intValue(style, QStringLiteral("latin_font_weight"), base.fontWeight), 1, 999);
     }
@@ -980,6 +1001,9 @@ void applyStyleSection(RenderConfig &cfg, const QJsonObject &style) {
     base.latinFontAxis = style.value(
         QStringLiteral("latin_font_axis")
     ).toBool(base.latinFontAxis);
+    base.latinFontEmbolden = intValue(
+        style, QStringLiteral("latin_font_embolden"), base.latinFontEmbolden
+    );
     base.latinFontStretchPct = std::clamp(
         intValue(style, QStringLiteral("latin_font_stretch_pct"), 100), 50, 200
     );
@@ -1080,6 +1104,9 @@ void applyStyleSection(RenderConfig &cfg, const QJsonObject &style) {
     base.rubyFontAxis = style.value(
         QStringLiteral("ruby_font_axis")
     ).toBool(base.rubyFontAxis);
+    base.rubyFontEmbolden = intValue(
+        style, QStringLiteral("ruby_font_embolden"), base.rubyFontEmbolden
+    );
     if (style.value(QStringLiteral("ruby_latin_font_size_px")).isDouble()) {
         base.rubyLatinFontSizePx = std::max(
             1, intValue(style, QStringLiteral("ruby_latin_font_size_px"), base.rubyFontSizePx)
@@ -1104,6 +1131,9 @@ void applyStyleSection(RenderConfig &cfg, const QJsonObject &style) {
     base.rubyLatinFontAxis = style.value(
         QStringLiteral("ruby_latin_font_axis")
     ).toBool(base.rubyLatinFontAxis);
+    base.rubyLatinFontEmbolden = intValue(
+        style, QStringLiteral("ruby_latin_font_embolden"), base.rubyLatinFontEmbolden
+    );
     base.rubyFontFollowMain = style.value(QStringLiteral("ruby_font_follow_main")).isBool()
         ? style.value(QStringLiteral("ruby_font_follow_main")).toBool()
         : base.rubyFontFollowMain;

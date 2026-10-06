@@ -225,13 +225,13 @@ def test_constant_axis_variable_packaging_treated_as_static(qapp):
     assert fw._wght_axis_is_effective("MS Gothic", constant) is False
 
 
-def test_bold_cut_family_caps_at_top_weight(qapp):
-    """粗体单字重族：请求更重时停在原 face 并标「已最粗」。
+def test_bold_cut_family_emboldens_above_top_weight(qapp):
+    """粗体单字重族：请求更重时按统一公式膨胀轮廓（粗上加粗）。
 
     Qt 的合成粗体只补齐"非粗→粗"，不会在已是粗体（≥600）的 face 上
-    再加粗（实测钉扎 Bold + setWeight(900) 渲染恒定）；DWrite 虽可
-    SIMS_BOLD 但 CPU 无法跟进，两后端一致优先——UI 用「已最粗」如实
-    标注，提示用户用同色描边实现更粗。
+    再加粗；DWrite 的 SIMS_BOLD 可以但 CPU 无法跟进。改为两后端按同一
+    公式（字号 x Δ/3000 圆形膨胀）自绘加粗——plan 携带 embolden_delta，
+    GPU 端 textRealizationFor 对轮廓 Widen+Union。
     """
     ttc = "C:/Windows/Fonts/UDDIGIKYOKASHON-B_0.TTC"
     if not os.path.exists(ttc):
@@ -241,10 +241,18 @@ def test_bold_cut_family_caps_at_top_weight(qapp):
     heavier = resolve_weight_plan("UD Digi Kyokasho NK-B", 900)
     assert heavier.base_weight == 700
     assert heavier.synthetic_bold is False
-    assert heavier.mark == "已最粗"
+    assert heavier.embolden_delta == 200
+    assert heavier.mark == "模拟"
+    mid = resolve_weight_plan("UD Digi Kyokasho NK-B", 800)
+    assert mid.embolden_delta == 100
     lighter = resolve_weight_plan("UD Digi Kyokasho NK-B", 400)
     assert lighter.base_weight == 700
+    assert lighter.embolden_delta == 0
     assert lighter.mark == "就近"
+    # 膨胀公式：48px x 200/3000 = 3.2px。
+    from krok_helper.subtitle_render.engine.text.font_weight import embolden_width_px
+
+    assert embolden_width_px(48, 200) == pytest.approx(3.2)
 
 
 def test_missing_metadata_family_falls_back_to_plain_weight(monkeypatch):

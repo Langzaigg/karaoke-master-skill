@@ -99,6 +99,7 @@ from krok_helper.subtitle_render.engine.style.style_semantics import (
     effective_karaoke_colors,
 )
 from krok_helper.subtitle_render.engine.text import GlyphLayout
+from krok_helper.subtitle_render.engine.text.font_weight import embolden_glyph_path
 
 
 UTOPIA_RUN_GLOW_CACHE = LayerCache(max_items=128)
@@ -517,6 +518,7 @@ def utopia_ruby_scope_rect(
             continue
         path = QPainterPath()
         path.addText(float(unit_x), float(layout.baseline_y), ruby_font, unit)
+        path = embolden_glyph_path(path, ruby_font)
         scale_origin_x, scale_origin_y = character_scale_origin(
             style, unit_x, layout.baseline_y
         )

@@ -54,7 +54,10 @@ from krok_helper.subtitle_render.engine.text import (
     n3_char_box_ascent,
     n3_char_box_descent,
 )
-from krok_helper.subtitle_render.engine.text.font_weight import build_weight_font
+from krok_helper.subtitle_render.engine.text.font_weight import (
+    build_weight_font,
+    embolden_glyph_path,
+)
 from krok_helper.subtitle_render.domain.models import (
     Style,
     TitleOverlay,
@@ -823,12 +826,14 @@ def build_title_overlay_layer(
                                 )
                             )
                         else:
-                            path.addText(
+                            glyph_path = QPainterPath()
+                            glyph_path.addText(
                                 float(line_x + glyph.x + glyph.path_offset),
                                 baseline,
                                 glyph.font,
                                 glyph.text,
                             )
+                            path.addPath(embolden_glyph_path(glyph_path, glyph.font))
                     left = float(line_x + run[0].x + run[0].path_offset)
                     right = float(line_x + run[-1].x + run[-1].advance)
                     ascent = max(glyph.metrics.ascent() for glyph in run)

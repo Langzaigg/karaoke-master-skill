@@ -665,13 +665,15 @@ void Direct2DGpuBackend::configure(const RenderScene &scene) {
         const Microsoft::WRL::ComPtr<IDWriteFontFace> &face,
         const std::vector<UINT16> &glyphs,
         int unit,
-        int stretchPct
+        int stretchPct,
+        int emboldenDelta
     ) -> GlyphGeometryResource & {
         const Impl::TextGlyphKey key{
             reinterpret_cast<std::uintptr_t>(face.Get()),
             unit,
             layoutScaleKey,
             stretchPct,
+            emboldenDelta,
             glyphs,
         };
         const auto found = textGlyphRealizations.find(key);
@@ -718,6 +720,87 @@ void Direct2DGpuBackend::configure(const RenderScene &scene) {
             1.0f,
             "ID2D1Factory::CreateTransformedGeometry(stretch Latin character)"
         );
+        if (emboldenDelta > 0 && unit > 0) {
+            // 粗上加粗：与 CPU 侧 font_weight.embolden_glyph_path 同一公式
+            // （字号 x 重量差 / 3000，圆帽圆角）对轮廓做 Widen+Union 膨胀，
+            // 下游描边/走字/墨迹盒全部消费膨胀后的几何。
+            const float emboldenWidth =
+                static_cast<float>(unit) * static_cast<float>(emboldenDelta) / 3000.0f;
+            D2D1_STROKE_STYLE_PROPERTIES properties = D2D1::StrokeStyleProperties();
+            properties.startCap = D2D1_CAP_STYLE_ROUND;
+            properties.endCap = D2D1_CAP_STYLE_ROUND;
+            properties.dashCap = D2D1_CAP_STYLE_ROUND;
+            properties.lineJoin = D2D1_LINE_JOIN_ROUND;
+            Microsoft::WRL::ComPtr<ID2D1StrokeStyle> emboldenStyle;
+            checkHr(
+                device_.d2dFactory()->CreateStrokeStyle(
+                    properties, nullptr, 0, emboldenStyle.ReleaseAndGetAddressOf()
+                ),
+                "Create embolden stroke style",
+                device_
+            );
+            Microsoft::WRL::ComPtr<ID2D1PathGeometry> widened;
+            checkHr(
+                device_.d2dFactory()->CreatePathGeometry(
+                    widened.ReleaseAndGetAddressOf()
+                ),
+                "Create embolden widened geometry",
+                device_
+            );
+            Microsoft::WRL::ComPtr<ID2D1GeometrySink> widenedSink;
+            checkHr(
+                widened->Open(widenedSink.ReleaseAndGetAddressOf()),
+                "Open embolden widened geometry",
+                device_
+            );
+            checkHr(
+                resource.path->Widen(
+                    emboldenWidth,
+                    emboldenStyle.Get(),
+                    nullptr,
+                    0.5f,
+                    widenedSink.Get()
+                ),
+                "Widen embolden body",
+                device_
+            );
+            checkHr(
+                widenedSink->Close(),
+                "Close embolden widened geometry",
+                device_
+            );
+            Microsoft::WRL::ComPtr<ID2D1PathGeometry> united;
+            checkHr(
+                device_.d2dFactory()->CreatePathGeometry(
+                    united.ReleaseAndGetAddressOf()
+                ),
+                "Create embolden united geometry",
+                device_
+            );
+            Microsoft::WRL::ComPtr<ID2D1GeometrySink> unitedSink;
+            checkHr(
+                united->Open(unitedSink.ReleaseAndGetAddressOf()),
+                "Open embolden united geometry",
+                device_
+            );
+            checkHr(
+                resource.path->CombineWithGeometry(
+                    widened.Get(),
+                    D2D1_COMBINE_MODE_UNION,
+                    nullptr,
+                    0.5f,
+                    unitedSink.Get()
+                ),
+                "Union embolden body",
+                device_
+            );
+            checkHr(
+                unitedSink->Close(),
+                "Close embolden united geometry",
+                device_
+            );
+            resource.path = united;
+        }
         checkHr(
             resource.path->GetBounds(nullptr, &resource.referenceBounds),
             "ID2D1Geometry::GetBounds(character)",
@@ -1092,8 +1175,11 @@ void Direct2DGpuBackend::configure(const RenderScene &scene) {
                     );
                 }
                 if (outlineFace && !glyphs.empty()) {
+                    const int emboldenDelta = hasCharStyle
+                        ? (latin ? charStyle.latinFontEmbolden : charStyle.fontEmbolden)
+                        : (latin ? style.latinFontEmbolden : style.fontEmbolden);
                     glyphResource = &textRealizationFor(
-                        outlineFace, glyphs, unit, stretchPct
+                        outlineFace, glyphs, unit, stretchPct, emboldenDelta
                     );
                     path = glyphResource->path;
                 }
@@ -1921,8 +2007,11 @@ void Direct2DGpuBackend::configure(const RenderScene &scene) {
                 Microsoft::WRL::ComPtr<ID2D1PathGeometry> path;
                 GlyphGeometryResource *glyphResource = nullptr;
                 if (outlineFace && !glyphs.empty()) {
+                    const int emboldenDelta = latin
+                        ? rubyStyle.rubyLatinFontEmbolden
+                        : rubyStyle.rubyFontEmbolden;
                     glyphResource = &textRealizationFor(
-                        outlineFace, glyphs, drawingUnit, stretchPct
+                        outlineFace, glyphs, drawingUnit, stretchPct, emboldenDelta
                     );
                     path = glyphResource->path;
                 }

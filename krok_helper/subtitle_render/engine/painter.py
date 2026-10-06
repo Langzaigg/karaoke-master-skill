@@ -232,6 +232,7 @@ from krok_helper.subtitle_render.engine.ruby import (
 from krok_helper.subtitle_render.engine.text import (
     build_font as _build_font,
     build_latin_font as _build_latin_font,
+    embolden_glyph_path as _embolden_glyph_path,
     char_advance as _char_advance,
     char_layout_width as _char_layout_width,
     char_path_left_offset as _char_path_left_offset,
@@ -5158,7 +5159,9 @@ def _line_text_path(
         char_path_offsets = [0.0 for _ in char_lefts]
     for ch, left, path_offset_x in zip(line.chars, char_lefts, char_path_offsets):
         glyph_font = font_for(ch.text) if font_for is not None else font
-        path.addText(float(left + path_offset_x), float(y), glyph_font, ch.text)
+        glyph_path = QPainterPath()
+        glyph_path.addText(float(left + path_offset_x), float(y), glyph_font, ch.text)
+        path.addPath(_embolden_glyph_path(glyph_path, glyph_font))
     return path
 
 
@@ -5325,7 +5328,12 @@ def _paint_line_with_character_transition(
                     )
                 )
             else:
-                path.addText(float(glyph_left + path_offset_x), float(baseline_y), glyph_font, glyph.text)
+                glyph_path = QPainterPath()
+                glyph_path.addText(
+                    float(glyph_left + path_offset_x), float(baseline_y),
+                    glyph_font, glyph.text,
+                )
+                path.addPath(_embolden_glyph_path(glyph_path, glyph_font))
         painter.save()
         try:
             painter.setOpacity(painter.opacity() * opacity)
@@ -5623,6 +5631,7 @@ def _char_ink_x_ranges(
             continue
         path = QPainterPath()
         path.addText(float(left + path_offset_x), 0.0, font, text)
+        path = _embolden_glyph_path(path, font)
         br = path.boundingRect()
         if br.isEmpty():
             ranges.append((left, left))
@@ -6330,6 +6339,7 @@ def _paint_ruby_text_fragment(
 ) -> None:
     path = QPainterPath()
     path.addText(float(x), float(baseline_y), ruby_font, text)
+    path = _embolden_glyph_path(path, ruby_font)
     rect = QRectF(
         float(x),
         float(baseline_y - ruby_metrics.ascent()),

@@ -54,6 +54,7 @@ from krok_helper.subtitle_render.engine.ruby import (
 from krok_helper.subtitle_render.engine.style.style_semantics import (
     effective_karaoke_colors,
 )
+from krok_helper.subtitle_render.engine.text.font_weight import embolden_glyph_path
 from krok_helper.subtitle_render.engine.text import (
     GlyphLayout,
     TextLayout,
@@ -476,7 +477,7 @@ def glyph_path(glyph: GlyphLayout, baseline_y: int) -> QPainterPath:
         glyph.font,
         glyph.text,
     )
-    return path
+    return embolden_glyph_path(path, glyph.font)
 
 
 def role_visual_text_padding(layout: TextLayout) -> int:

@@ -35,7 +35,16 @@ import struct
 import threading
 from dataclasses import dataclass
 
-from PyQt6.QtGui import QFont, QFontDatabase, QFontInfo, QFontMetrics, QPainterPath, QRawFont
+from PyQt6.QtCore import Qt
+from PyQt6.QtGui import (
+    QFont,
+    QFontDatabase,
+    QFontInfo,
+    QFontMetrics,
+    QPainterPath,
+    QPainterPathStroker,
+    QRawFont,
+)
 
 _AXIS_TAG_WEIGHT = b"wght"
 
@@ -84,6 +93,9 @@ class FontWeightPlan:
     synthetic_bold: bool = False
     enum_weight: int = 0
     italic: bool = False
+    # 粗上加粗：请求字重超过粗体基 face（≥600）且引擎无法合成时，两后端
+    # 按同一公式（字号×Δ/3000 圆形膨胀轮廓）自绘加粗的重量差。
+    embolden_delta: int = 0
     mark: str | None = None
 
 
@@ -364,16 +376,18 @@ def _compute_weight_plan(
     if resolved is not None:
         base_weight, style_name, synthetic = resolved
         mark: str | None
+        embolden = 0
         if synthetic:
             mark = "模拟"
         elif base_weight == bucket:
             mark = None
         elif bucket > base_weight >= 600:
             # 基 face 已是粗体（≥600）：Qt 的合成粗体只补齐"非粗→粗"，
-            # 不会粗上加粗（实测钉扎 Bold+setWeight(900) 恒定）——请求
-            # 更重只能停在原 face。DWrite 虽可 SIMS_BOLD 加粗（实测
-            # advance 2048→2089）但 CPU 侧无法跟进，两后端一致优先。
-            mark = "已最粗"
+            # 不会粗上加粗（实测钉扎 Bold+setWeight(900) 恒定）；DWrite
+            # 虽可 SIMS_BOLD 但 CPU 无法跟进。改由两后端按同一公式对
+            # 字形轮廓做圆形膨胀（字号×Δ/3000）实现粗上加粗。
+            embolden = bucket - base_weight
+            mark = "模拟"
         else:
             mark = "就近"
         return FontWeightPlan(
@@ -384,6 +398,7 @@ def _compute_weight_plan(
             synthetic_bold=synthetic,
             enum_weight=bucket,
             italic=bool(italic),
+            embolden_delta=embolden,
             mark=mark,
         )
 
@@ -399,6 +414,42 @@ def _compute_weight_plan(
         italic=bool(italic),
         mark="就近",
     )
+
+
+def embolden_width_px(font_size_px: int, delta: int) -> float:
+    """粗上加粗的膨胀描边宽：字号 × 重量差 / 3000（两后端同一公式，
+    native 侧 d2d_backend_configure.cpp 的 textRealizationFor）。"""
+    if delta <= 0 or font_size_px <= 0:
+        return 0.0
+    return float(font_size_px) * float(delta) / 3000.0
+
+
+def embolden_delta_of_font(font: QFont) -> int:
+    """从构造好的 QFont 反查该字体的粗上加粗重量差。"""
+    plan = resolve_weight_plan(
+        font.family(), int(font.weight()), bool(font.italic())
+    )
+    if plan.axis_value is not None:
+        return 0
+    return int(plan.embolden_delta)
+
+
+def embolden_glyph_path(path: QPainterPath, font: QFont) -> QPainterPath:
+    """按统一口径把字形轮廓圆形膨胀（粗上加粗）。
+
+    在 addText 之后、进入任何绘制/度量之前应用——填充、描边、走字、
+    墨迹盒等全部下游管线自动消费膨胀后的轮廓，CPU/GPU 一致由构造保证。
+    """
+    if path.isEmpty():
+        return path
+    width = embolden_width_px(font.pixelSize(), embolden_delta_of_font(font))
+    if width <= 0.0:
+        return path
+    stroker = QPainterPathStroker()
+    stroker.setWidth(width)
+    stroker.setCapStyle(Qt.PenCapStyle.RoundCap)
+    stroker.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
+    return path.united(stroker.createStroke(path))
 
 
 def apply_weight_plan(font: QFont, plan: FontWeightPlan) -> None:
@@ -439,6 +490,9 @@ __all__ = [
     "bucket_weight",
     "build_weight_font",
     "clear_font_weight_cache",
+    "embolden_delta_of_font",
+    "embolden_glyph_path",
+    "embolden_width_px",
     "face_inventory",
     "family_weight_axis",
     "physical_weight_styles",
