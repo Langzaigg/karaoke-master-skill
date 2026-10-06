@@ -4,6 +4,7 @@ import ctypes
 import subprocess
 import sys
 from ctypes import wintypes
+from pathlib import Path
 
 
 if sys.platform == "win32":
@@ -66,5 +67,10 @@ def hidden_subprocess_kwargs() -> dict[str, object]:
 
 
 def open_in_explorer(path) -> None:
-    """在资源管理器里打开目录。各页的「打开输出目录」都走这里。"""
-    subprocess.Popen(["explorer", str(path)])
+    """在系统文件管理器中打开目录，不存在则先创建。"""
+    from PyQt6.QtCore import QUrl
+    from PyQt6.QtGui import QDesktopServices
+
+    directory = Path(path).resolve()
+    directory.mkdir(parents=True, exist_ok=True)
+    QDesktopServices.openUrl(QUrl.fromLocalFile(str(directory)))

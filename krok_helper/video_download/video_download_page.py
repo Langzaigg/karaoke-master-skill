@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import logging
-import subprocess
 import time
 import uuid
 from dataclasses import dataclass
@@ -51,6 +50,7 @@ from krok_helper.qfluent_compat import (
     show_fluent_info,
 )
 from krok_helper.ui_kit import StyledComboBox
+from krok_helper.windows import open_in_explorer
 
 
 log = logging.getLogger(__name__)
@@ -138,11 +138,6 @@ DOWNLOAD_TABLE_FIXED_WIDTHS = {
     5: 118,
     6: 124,
 }
-
-
-def open_in_explorer(path: Path) -> None:
-    path.mkdir(parents=True, exist_ok=True)
-    subprocess.Popen(["explorer", str(path)])
 
 
 def format_duration(seconds: float | None) -> str:
