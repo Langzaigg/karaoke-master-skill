@@ -70,6 +70,11 @@ SNOW_LIFE_MS = 1100
 # 取默认对（雪花=雪色，花瓣与其余 kind=樱花粉，见 _default_color_pair）。
 SNOW_A = "#F2F8FF"
 SNOW_B = "#BFDFFF"
+# 雪花两档（2026-10 用户口径）：``snow`` = 教程并集轮廓带全部洞环（界面
+# 「雪花飘入/飘出/飘动·镂空」）；``snow_solid`` = 同一轮廓去掉洞环（「…·实心」）。
+# 运动签名、配色与出入场时序完全同源，只有 sprite 不同——规划器/求值器里
+# 所有按 snow 分流的判断都必须用本集合，别写成单值比较。
+SNOW_KINDS = frozenset({"snow", "snow_solid"})
 
 
 def _default_color_pair(snow: bool) -> tuple[str, str]:
@@ -835,20 +840,8 @@ def _snow_element_polygons() -> list[list[tuple[float, float]]]:
     return polygons
 
 
-def _snow_commands() -> list[list[object]]:
-    """雪花剪影：letsdrawthat 教程「六臂枝晶」画法（2026-10 用户口径，目标
-    为教程成图而非线条星形）：**空心中心六边形**（顶点朝向六臂）+ 六条 60°
-    尖锐主臂 + **内层 12 条细枝两两触接**（端点在臂间 30° 中线上汇成六角星）
-    + 外层每臂一对同形细枝（近尖端，仿箭羽）。比例按教程成图取样：六边形
-    外沿顶点半径 0.253R、星环交线半径臂上 0.35R（中线 0.607R）、臂宽 0.128R；
-    枝宽为粒子尺寸下的可读性略加粗（0.028R）。元素多边形取精确并集轮廓：
-    外环 + 六个「六边形与星环之间的窗洞」环 + 中心六边形洞环——even-odd /
-    winding 两填充规则渲染一致（见 `_union_outline`）。"""
-    loops = _union_outline(_snow_element_polygons())
-    if len(loops) != 8:
-        raise ValueError(
-            f"雪花并集轮廓环数异常：{len(loops)}（期望 1 外环 + 6 窗洞 + 1 中心洞）"
-        )
+def _loops_to_commands(loops: list[list[tuple[float, float]]]) -> list[list[object]]:
+    """并集环 → path_commands（每环一个 M..Z 子路径）。"""
     commands: list[list[object]] = []
     for loop in loops:
         commands.append(["M", loop[0][0], loop[0][1]])
@@ -858,6 +851,38 @@ def _snow_commands() -> list[list[object]]:
     return commands
 
 
+def _snow_loops() -> list[list[tuple[float, float]]]:
+    """雪花并集轮廓环：1 外环（CCW）+ 6 窗洞 + 1 中心六边形洞（CW）。"""
+    loops = _union_outline(_snow_element_polygons())
+    if len(loops) != 8:
+        raise ValueError(
+            f"雪花并集轮廓环数异常：{len(loops)}（期望 1 外环 + 6 窗洞 + 1 中心洞）"
+        )
+    return loops
+
+
+def _snow_commands() -> list[list[object]]:
+    """雪花剪影·镂空（kind ``snow``）：letsdrawthat 教程「六臂枝晶」画法
+    （2026-10 用户口径，目标为教程成图而非线条星形）：**空心中心六边形**
+    （顶点朝向六臂）+ 六条 60° 尖锐主臂 + **内层 12 条细枝两两触接**（端点在
+    臂间 30° 中线上汇成六角星）+ 外层每臂一对同形细枝（近尖端，仿箭羽）。
+    比例按教程成图取样：六边形外沿顶点半径 0.253R、星环交线半径臂上 0.35R
+    （中线 0.607R）、臂宽 0.128R；枝宽为粒子尺寸下的可读性略加粗（0.028R）。
+    元素多边形取精确并集轮廓：外环 + 六个「六边形与星环之间的窗洞」环 +
+    中心六边形洞环——even-odd / winding 两填充规则渲染一致（见
+    `_union_outline`）。"""
+    return _loops_to_commands(_snow_loops())
+
+
+def _snow_solid_commands() -> list[list[object]]:
+    """雪花剪影·实心（kind ``snow_solid``）：与镂空档同一并集轮廓，只留外环、
+    去掉全部洞环——两档「差分」仅在洞的有无，外形/比例完全同源。"""
+    outer = [loop for loop in _snow_loops() if _polygon_signed_area(loop) > 0.0]
+    if len(outer) != 1:
+        raise ValueError(f"雪花并集外环异常：{len(outer)}（期望 1）")
+    return _loops_to_commands(outer)
+
+
 FX_SPRITES: dict[str, dict[str, object]] = {
     "star4": _sprite_ir(_star4_commands()),
     "ring": _sprite_ir(_ring_commands()),
@@ -865,6 +890,7 @@ FX_SPRITES: dict[str, dict[str, object]] = {
     "pixel": _sprite_ir(_pixel_commands()),
     "petal": _sprite_ir(_petal_commands()),
     "snow": _sprite_ir(_snow_commands()),
+    "snow_solid": _sprite_ir(_snow_solid_commands()),
 }
 
 _SPRITE_FOR_KIND = {
@@ -877,6 +903,7 @@ _SPRITE_FOR_KIND = {
     "dissolve": "pixel",
     "petal": "petal",
     "snow": "snow",
+    "snow_solid": "snow_solid",
 }
 
 
@@ -1233,7 +1260,7 @@ def plan_line_bursts(
                 "size_px": anim_size, "travel_px": 0.0,
                 "front": True, "sweep": 1,
             }, _burst_paint(char_index, anim_size, anim=True, petal=True))
-    elif entry_anim == "snow" and entry_active and display_start_ms is not None:
+    elif entry_anim in SNOW_KINDS and entry_active and display_start_ms is not None:
         # 雪花飘入（2026-10 用户口径）：整行雪花**同时出现**（无逐字错
         # 峰）；起点略早于逐字渐隐首字（规划窗前移——行窗打开的瞬间雪花
         # 已在半空，视觉上"雪先出现"），终点略晚于逐字渐隐结束（窗口 +
@@ -1245,7 +1272,7 @@ def plan_line_bursts(
         snow_end = int(display_start_ms) + snow_window + int(250 * entry_scale)
         for char_index in range(char_count):
             _variant_bursts({
-                "kind": "snow", "anchor": "char",
+                "kind": entry_anim, "anchor": "char",
                 "char_index": int(char_index),
                 "start_ms": snow_start,
                 "end_ms": snow_end,
@@ -1339,7 +1366,7 @@ def plan_line_bursts(
                 "size_px": anim_size, "travel_px": 0.0,
                 "front": True, "sweep": -1,
             }, _burst_paint(char_index, anim_size, anim=True, petal=True))
-    elif exit_anim == "snow" and exit_active and display_end_ms is not None:
+    elif exit_anim in SNOW_KINDS and exit_active and display_end_ms is not None:
         # 雪花飘散（2026-10 用户口径）：与逐字渐隐**同步开始**（同一起点
         # 整行同刻），终点略晚于逐字渐隐结束（显示末之后仍有余尾——画面
         # 随行消失截断，但淡出包络完整走到低透明度而非中途被掐）。
@@ -1353,7 +1380,7 @@ def plan_line_bursts(
         snow_exit_end = int(display_end_ms) + int(300 * exit_scale)
         for char_index in range(char_count):
             _variant_bursts({
-                "kind": "snow", "anchor": "char",
+                "kind": exit_anim, "anchor": "char",
                 "char_index": int(char_index),
                 "start_ms": snow_exit_start,
                 "end_ms": snow_exit_end,
@@ -1445,7 +1472,7 @@ def plan_line_bursts(
                 "size_px": size, "travel_px": 0.0,
                 "front": True, "sweep": 0,
             }, _burst_paint(char_index, size, anim=False, petal=True))
-    elif style.sing_fx == "snow":
+    elif style.sing_fx in SNOW_KINDS:
         # 雪花飘动：唱到的字上自 ruby 锚出生的雪花匀速缓沉穿过字框
         #（数量吃粒子旋钮，默认 4/字；尺寸随下落由大变小——轨迹口径），
         # 窗口不受唱字窗约束、自然播完（与花瓣同口径）。
@@ -1457,7 +1484,7 @@ def plan_line_bursts(
             if char_visible is not None and not char_visible[char_index]:
                 continue
             _variant_bursts({
-                "kind": "snow", "anchor": "char",
+                "kind": style.sing_fx, "anchor": "char",
                 "char_index": int(char_index),
                 "start_ms": int(start_ms),
                 "end_ms": int(start_ms) + SNOW_LIFE_MS,
@@ -1768,7 +1795,7 @@ def burst_particles_at(
                     size_i * (0.85 + 0.15 * math.sin(math.pi * p)),
                     min(p * 5.0, 1.0) * math.sin(math.pi * p),
                 ))
-        elif kind == "snow":
+        elif kind in SNOW_KINDS:
             # 雪花飘落（AE CC Snowfall 运动签名 + 2026-10 用户口径）：
             # 出生高度统一锚在 **ruby 盒中心-底部二分之一处**（主文字顶
             # 上方 ≈0.68~0.90 box_h 窄随机带，窄到 ruby 盒下半部——出生

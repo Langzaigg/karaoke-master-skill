@@ -191,7 +191,7 @@ GeoCharState geoCharState(
         return state;
     }
     if (effect == "sparkle" || effect == "ripple" || effect == "note"
-        || effect == "petal" || effect == "snow") {
+        || effect == "petal" || effect == "snow" || effect == "snow_solid") {
         // 粒子类出入场动画的本体：文字逐字显形（入场 4 倍速透明度，
         // 粒子拼接同款编排），退场逐字淡出；粒子由 planner 叠加。
         const float p = staggerProgress;
@@ -511,7 +511,7 @@ std::vector<FxParticle> burstParticlesAt(
                     std::min(p * 5.0f, 1.0f) * std::sin(pi * p),
                 });
             }
-        } else if (burst.kind == "snow") {
+        } else if (burst.kind == "snow" || burst.kind == "snow_solid") {
             // 雪花飘落（镜像 particles.burst_particles_at snow 分支，
             // 2026-10 用户口径）：出生锚 = ruby 盒中心-底部二分之一处
             //（birthY 窄随机带）；匀速下沉 + 宽幅低频摇摆 + 慢自转；

@@ -574,19 +574,19 @@ def test_style_controller_keeps_new_geo_kinds():
     cases = {
         "entry_anim": (
             "tracking_in", "wave_in", "stretch_in", "glow_in", "assemble_in",
-            "sparkle", "ripple", "note", "petal", "snow",
+            "sparkle", "ripple", "note", "petal", "snow", "snow_solid",
         ),
         "exit_anim": (
             "scatter_out", "converge_out", "stretch_out", "glow_out", "dissolve_out",
-            "sparkle", "ripple", "note", "petal", "snow",
+            "sparkle", "ripple", "note", "petal", "snow", "snow_solid",
         ),
         "section_head_anim": (
             "tracking_in", "wave_in", "stretch_in", "glow_in", "assemble_in",
-            "sparkle", "ripple", "note", "petal", "snow",
+            "sparkle", "ripple", "note", "petal", "snow", "snow_solid",
         ),
         "section_tail_anim": (
             "scatter_out", "converge_out", "stretch_out", "glow_out", "dissolve_out",
-            "sparkle", "ripple", "note", "petal", "snow",
+            "sparkle", "ripple", "note", "petal", "snow", "snow_solid",
         ),
     }
     for field, values in cases.items():
@@ -2442,14 +2442,16 @@ def test_painter_particle_shadow_layer_smoke(qapp):
 # ---------------------------------------------------------------------------
 
 
-def test_plan_line_bursts_snow_entry_exit_sing():
-    """雪花三档规划：出入场整行同刻 + 早现晚收/同步晚收时序 + 雪色。"""
+@pytest.mark.parametrize("snow_kind", ["snow", "snow_solid"])
+def test_plan_line_bursts_snow_entry_exit_sing(snow_kind):
+    """雪花两档（·镂空/·实心）规划同源：出入场整行同刻 + 早现晚收/
+    同步晚收时序 + 雪色 + 逐字唱字；两档只差 kind（决定 sprite）。"""
     style = Style(
-        entry_anim="snow",
+        entry_anim=snow_kind,
         entry_lead_ms=600,
-        exit_anim="snow",
+        exit_anim=snow_kind,
         exit_fade_ms=600,
-        sing_fx="snow",
+        sing_fx=snow_kind,
         fx_particle_count=14,
         font_size_px=100,
         karaoke_anim="none",
@@ -2460,7 +2462,7 @@ def test_plan_line_bursts_snow_entry_exit_sing():
     )
     # 入场雪花：整行同刻（无逐字错峰），起点早于逐字渐隐 200ms（行窗
     # 打开瞬间雪花已在半空），终点晚于逐字渐隐结束 250ms（余尾）。
-    entry = [b for b in bursts if b["kind"] == "snow" and b["sweep"] == 1]
+    entry = [b for b in bursts if b["kind"] == snow_kind and b["sweep"] == 1]
     assert len(entry) == 6
     assert {b["start_ms"] for b in entry} == {800}  # 1000 - 200×scale
     assert {b["end_ms"] for b in entry} == {1850}  # 1000 + 600 + 250
@@ -2469,21 +2471,22 @@ def test_plan_line_bursts_snow_entry_exit_sing():
     assert all(b["travel_px"] == 0.0 for b in entry)
     # 退场雪花：与逐字渐隐同步开始（同刻 max(行末, 显示末-窗口)），
     # 终点晚于逐字渐隐结束 300ms。
-    exit_snow = [b for b in bursts if b["kind"] == "snow" and b["sweep"] == -1]
+    exit_snow = [b for b in bursts if b["kind"] == snow_kind and b["sweep"] == -1]
     assert len(exit_snow) == 6
     assert {b["start_ms"] for b in exit_snow} == {4100}
     assert {b["end_ms"] for b in exit_snow} == {4500}  # 4200 + 300
     assert {b["color"] for b in exit_snow} == {"#F2F8FF", "#BFDFFF"}
     # 唱字雪花：逐字发射（唱字窗起点）、每字 4 颗、尺寸吃旋钮。
-    sing = [b for b in bursts if b["kind"] == "snow" and b["sweep"] == 0]
+    sing = [b for b in bursts if b["kind"] == snow_kind and b["sweep"] == 0]
     assert len(sing) == 3
     assert all(b["count"] == 4 for b in sing)
     assert sing[0]["size_px"] == pytest.approx(100 * 0.40)
     assert sing[0]["end_ms"] - sing[0]["start_ms"] == 1100
 
 
-def test_snow_default_colors_differ_from_other_kinds():
-    """默认双色按 kind：雪花=雪白+冰蓝；花瓣与音符等维持樱花粉。"""
+@pytest.mark.parametrize("snow_kind", ["snow", "snow_solid"])
+def test_snow_default_colors_differ_from_other_kinds(snow_kind):
+    """默认双色按 kind：雪花两档=雪白+冰蓝；花瓣与音符等维持樱花粉。"""
     def _sing_colors(kind: str) -> set[str]:
         bursts = plan_line_bursts(
             Style(
@@ -2497,16 +2500,17 @@ def test_snow_default_colors_differ_from_other_kinds():
         )
         return {b["color"] for b in bursts if b["kind"] == kind}
 
-    assert _sing_colors("snow") == {"#F2F8FF", "#BFDFFF"}
+    assert _sing_colors(snow_kind) == {"#F2F8FF", "#BFDFFF"}
     assert _sing_colors("petal") == {"#FFB7C5", "#FFD7E0"}
     assert _sing_colors("twinkle") == {"#FFB7C5", "#FFD7E0"}
 
 
-def test_snow_trajectory_windows_and_bounds():
-    """雪花轨迹：窗口外空、确定性、匀速单调下沉、ruby 锚出生（高于
-    字形顶）、尺寸随播放递减、飘散终点向右（同花瓣口径）。"""
+@pytest.mark.parametrize("snow_kind", ["snow", "snow_solid"])
+def test_snow_trajectory_windows_and_bounds(snow_kind):
+    """雪花两档轨迹同源：窗口外空、确定性、匀速单调下沉、ruby 锚出生
+    （高于字形顶）、尺寸随播放递减、飘散终点向右（同花瓣口径）。"""
     base = {
-        "kind": "snow", "anchor": "char", "char_index": 0,
+        "kind": snow_kind, "anchor": "char", "char_index": 0,
         "start_ms": 0, "end_ms": 1050, "count": 6, "seed": 54321,
         "size_px": 30.0, "travel_px": 0.0, "front": True,
     }
@@ -2710,29 +2714,80 @@ def test_snow_sprite_contract():
     assert sprite_for_kind("snow") == "snow"
 
 
-def test_snow_gpu_support_and_override_roundtrip():
-    """雪花档位不触发 GPU 整帧回退；逐行覆盖可往返序列化。"""
+def test_snow_solid_sprite_contract():
+    """·实心档 sprite = 同并集轮廓只留外环：单轮廓、无洞环、与·镂空档
+    的外环逐点一致（两档唯一「差分」是洞的有无）。"""
+    hollow = FX_SPRITES["snow"]["path_commands"]
+    solid = FX_SPRITES["snow_solid"]["path_commands"]
+    assert solid[0][0] == "M" and solid[-1][0] == "Z"
+    for command in solid:
+        assert command[0] in {"M", "L", "Z"}
+    solid_loops = _sprite_loops(solid)
+    assert len(solid_loops) == 1  # 单轮廓：无窗洞、无中心洞
+    hollow_loops = _sprite_loops(hollow)
+    outer = [loop for loop in hollow_loops if _sprite_loop_area(loop) > 0.0]
+    assert len(outer) == 1
+    assert solid_loops[0] == outer[0]
+    assert _sprite_loop_intersections(solid_loops) == 0
+    radii = [math.hypot(x, y) for x, y in solid_loops[0]]
+    assert max(radii) == pytest.approx(470.0, abs=1e-6)
+    assert sprite_for_kind("snow_solid") == "snow_solid"
+
+
+def test_snow_solid_and_hollow_plan_identically():
+    """·实心/·镂空两档除 kind（决定 sprite）外规划完全一致：同一轨迹、
+    配色与时序，差分只在 sprite。"""
+    def plan(kind: str):
+        style = Style(
+            entry_anim=kind, entry_lead_ms=600, exit_anim=kind,
+            exit_fade_ms=600, sing_fx=kind, fx_particle_count=14,
+            font_size_px=100, karaoke_anim="none",
+        )
+        return plan_line_bursts(
+            style, 0, 1000, 4200, 4100,
+            [(1200, 1600), (1600, 2000), (2000, 3000)],
+        )
+
+    hollow = plan("snow")
+    solid = plan("snow_solid")
+    assert len(hollow) == len(solid) > 0
+    for one, other in zip(hollow, solid):
+        assert (one["kind"], other["kind"]) == ("snow", "snow_solid")
+        assert {k: v for k, v in one.items() if k != "kind"} == {
+            k: v for k, v in other.items() if k != "kind"
+        }
+
+
+@pytest.mark.parametrize("snow_kind", ["snow", "snow_solid"])
+def test_snow_gpu_support_and_override_roundtrip(snow_kind):
+    """雪花两档都不触发 GPU 整帧回退；逐行覆盖可往返序列化。"""
     track = type("Track", (), {"lines": []})()
     style = Style(
-        entry_anim="snow",
-        exit_anim="snow",
-        sing_fx="snow",
+        entry_anim=snow_kind,
+        exit_anim=snow_kind,
+        sing_fx=snow_kind,
         karaoke_anim="inherit",
         reverse_karaoke_anim="inherit",
     )
     assert gpu_unsupported_features(track, style) == ()
     data = line_animation_override_to_dict(
-        LineAnimationOverride(entry_anim="snow", exit_anim="snow", sing_fx="snow")
+        LineAnimationOverride(entry_anim=snow_kind, exit_anim=snow_kind, sing_fx=snow_kind)
     )
     restored = line_animation_override_from_dict(data)
     assert restored is not None
-    assert restored.entry_anim == "snow"
-    assert restored.exit_anim == "snow"
-    assert restored.sing_fx == "snow"
+    assert restored.entry_anim == snow_kind
+    assert restored.exit_anim == snow_kind
+    assert restored.sing_fx == snow_kind
+    # 未知值不在往返白名单：整份覆盖直接拒绝（返回 None）。
+    assert (
+        line_animation_override_from_dict({**data, "entry_anim": "snow_solid2"})
+        is None
+    )
 
 
-def test_painter_snow_smoke(qapp):
-    """CPU painter 雪花三档冒烟：飘入/飘动各一帧不抛异常。"""
+@pytest.mark.parametrize("snow_kind", ["snow", "snow_solid"])
+def test_painter_snow_smoke(qapp, snow_kind):
+    """CPU painter 雪花两档冒烟：飘入/飘动各一帧不抛异常。"""
     from PyQt6.QtGui import QImage
 
     from krok_helper.subtitle_render.domain.timing import TimingChar, TimingTrack
@@ -2750,7 +2805,7 @@ def test_painter_snow_smoke(qapp):
         ]
     )
     sing = Style(
-        sing_fx="snow",
+        sing_fx=snow_kind,
         karaoke_anim="utopia",
         fx_particle_size_em=0.6,
         fx_particle_count=8,
@@ -2759,7 +2814,7 @@ def test_painter_snow_smoke(qapp):
     img.fill(0xFF101010)
     paint_frame(img, track, 1300, sing)
     entry = Style(
-        entry_anim="snow",
+        entry_anim=snow_kind,
         entry_lead_ms=600,
         karaoke_anim="utopia",
     )
@@ -2768,7 +2823,7 @@ def test_painter_snow_smoke(qapp):
     paint_frame(img2, track, 1100, entry)
 
 
-@pytest.mark.parametrize("sing_kind", ["petal", "snow"])
+@pytest.mark.parametrize("sing_kind", ["petal", "snow", "snow_solid"])
 def test_petal_and_snow_sing_particles_skip_whitespace(sing_kind):
     """空格例外（旧粒子口径）对花瓣/雪花同样成立：空格字符不发射唱字
     粒子（无走字内容），出入场粒子仍整行逐字参与（含空格位）。"""

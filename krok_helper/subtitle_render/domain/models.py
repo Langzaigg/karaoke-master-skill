@@ -2221,7 +2221,7 @@ def style_from_dict(payload: object) -> Style:
                 value
                 if value in {
                     "none", "fade", "slide_in", "rise", "char_fade", "char_drip", "spin_flip", "utopia",
-                    "stretch_in", "glow_in", "assemble_in", "sparkle", "ripple", "note", "petal", "snow",
+                    "stretch_in", "glow_in", "assemble_in", "sparkle", "ripple", "note", "petal", "snow", "snow_solid",
                 }
                 else defaults.entry_anim
             )
@@ -2230,7 +2230,7 @@ def style_from_dict(payload: object) -> Style:
                 value
                 if value in {
                     "none", "fade", "slide_out", "rise", "char_fade", "char_drip", "spin_flip", "utopia",
-                    "stretch_out", "glow_out", "dissolve_out", "sparkle", "ripple", "note", "petal", "snow",
+                    "stretch_out", "glow_out", "dissolve_out", "sparkle", "ripple", "note", "petal", "snow", "snow_solid",
                 }
                 else defaults.exit_anim
             )
@@ -2331,7 +2331,7 @@ def style_from_dict(payload: object) -> Style:
                 value
                 if value in {
                     "none", "fade", "slide_in", "rise", "char_fade", "char_drip", "spin_flip", "utopia",
-                    "stretch_in", "glow_in", "assemble_in", "sparkle", "ripple", "note", "petal", "snow",
+                    "stretch_in", "glow_in", "assemble_in", "sparkle", "ripple", "note", "petal", "snow", "snow_solid",
                 }
                 else defaults.section_head_anim
             )
@@ -2340,7 +2340,7 @@ def style_from_dict(payload: object) -> Style:
                 value
                 if value in {
                     "none", "fade", "slide_out", "rise", "char_fade", "char_drip", "spin_flip", "utopia",
-                    "stretch_out", "glow_out", "dissolve_out", "sparkle", "ripple", "note", "petal", "snow",
+                    "stretch_out", "glow_out", "dissolve_out", "sparkle", "ripple", "note", "petal", "snow", "snow_solid",
                 }
                 else defaults.section_tail_anim
             )

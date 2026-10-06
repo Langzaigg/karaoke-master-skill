@@ -376,12 +376,12 @@ def gpu_unsupported_features(
     if style.entry_anim not in {
         "none", "fade", "slide_in", "rise", "char_fade", "char_drip", "spin_flip", "utopia",
         "tracking_in", "wave_in", "stretch_in", "glow_in", "assemble_in",
-        "sparkle", "ripple", "note", "petal", "snow",
+        "sparkle", "ripple", "note", "petal", "snow", "snow_solid",
     } or (
         style.exit_anim not in {
             "none", "fade", "slide_out", "rise", "char_fade", "char_drip", "spin_flip", "utopia",
             "scatter_out", "converge_out", "stretch_out", "glow_out", "dissolve_out",
-            "sparkle", "ripple", "note", "petal", "snow",
+            "sparkle", "ripple", "note", "petal", "snow", "snow_solid",
         }
     ):
         reasons.append("line_animation")
@@ -435,6 +435,7 @@ def gpu_unsupported_features(
                     "note",
                     "petal",
                     "snow",
+                    "snow_solid",
                 }:
                     reasons.append("line_animation_override")
     # 标题图片导唱符（2026-09 新增）由 GPU sidecar 原生渲染（gpu_scene_projection

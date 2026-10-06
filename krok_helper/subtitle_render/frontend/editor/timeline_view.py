@@ -124,7 +124,8 @@ _ENTRY_ANIMATION_LABELS = {
     "ripple": "涟漪光环",
     "note": "音符飘出",
     "petal": "花瓣飘入",
-    "snow": "雪花飘入",
+    "snow": "雪花飘入·镂空",
+    "snow_solid": "雪花飘入·实心",
 }
 _EXIT_ANIMATION_LABELS = {
     "none": "无",
@@ -144,7 +145,8 @@ _EXIT_ANIMATION_LABELS = {
     "ripple": "涟漪光环",
     "note": "音符飘出",
     "petal": "花瓣飘散",
-    "snow": "雪花飘散",
+    "snow": "雪花飘出·镂空",
+    "snow_solid": "雪花飘出·实心",
 }
 
 

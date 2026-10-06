@@ -40,7 +40,8 @@ ENTRY_ANIMATION_OPTIONS = (
     ("涟漪光环", "ripple"),
     ("音符飘出", "note"),
     ("花瓣飘入", "petal"),
-    ("雪花飘入", "snow"),
+    ("雪花飘入·镂空", "snow"),
+    ("雪花飘入·实心", "snow_solid"),
 )
 
 EXIT_ANIMATION_OPTIONS = (
@@ -61,7 +62,8 @@ EXIT_ANIMATION_OPTIONS = (
     ("涟漪光环", "ripple"),
     ("音符飘出", "note"),
     ("花瓣飘散", "petal"),
-    ("雪花飘散", "snow"),
+    ("雪花飘出·镂空", "snow"),
+    ("雪花飘出·实心", "snow_solid"),
 )
 
 FX_PARTICLE_OPTIONS = (
@@ -77,7 +79,8 @@ FX_SING_OPTIONS = (
     ("音符飘出", "note"),
     ("涟漪光环", "ripple"),
     ("花瓣飘动", "petal"),
-    ("雪花飘动", "snow"),
+    ("雪花飘动·镂空", "snow"),
+    ("雪花飘动·实心", "snow_solid"),
 )
 
 FX_PARTICLE_COLOR_MODE_OPTIONS = (
