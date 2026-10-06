@@ -356,6 +356,7 @@ REQUIRED_FILES=(
   "strange_uta_game/config/dictionary.json"
   "strange_uta_game/config/cmudict-0.7b"
   "strange_uta_game/config/e2k.txt"
+  "strange_uta_game/config/g2p_en_checkpoint20.npz"
   "strange_uta_game/config/kanji_readings.json"
   "strange_uta_game/config/hanja_korean.json"
   "strange_uta_game/backend/application/ai_timing/worker/client.py"
