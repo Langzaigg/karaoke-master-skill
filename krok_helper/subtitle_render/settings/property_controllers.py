@@ -455,6 +455,7 @@ def normalize_entry_animation(value: object) -> EntryAnimation:
         "ripple",
         "note",
         "petal",
+        "snow",
     }:
         return value  # type: ignore[return-value]
     return "none"
@@ -479,6 +480,7 @@ def normalize_exit_animation(value: object) -> ExitAnimation:
         "ripple",
         "note",
         "petal",
+        "snow",
     }:
         return value  # type: ignore[return-value]
     return "none"

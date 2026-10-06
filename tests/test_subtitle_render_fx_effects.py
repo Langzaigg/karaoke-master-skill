@@ -574,19 +574,19 @@ def test_style_controller_keeps_new_geo_kinds():
     cases = {
         "entry_anim": (
             "tracking_in", "wave_in", "stretch_in", "glow_in", "assemble_in",
-            "sparkle", "ripple", "note", "petal",
+            "sparkle", "ripple", "note", "petal", "snow",
         ),
         "exit_anim": (
             "scatter_out", "converge_out", "stretch_out", "glow_out", "dissolve_out",
-            "sparkle", "ripple", "note", "petal",
+            "sparkle", "ripple", "note", "petal", "snow",
         ),
         "section_head_anim": (
             "tracking_in", "wave_in", "stretch_in", "glow_in", "assemble_in",
-            "sparkle", "ripple", "note", "petal",
+            "sparkle", "ripple", "note", "petal", "snow",
         ),
         "section_tail_anim": (
             "scatter_out", "converge_out", "stretch_out", "glow_out", "dissolve_out",
-            "sparkle", "ripple", "note", "petal",
+            "sparkle", "ripple", "note", "petal", "snow",
         ),
     }
     for field, values in cases.items():
@@ -2434,3 +2434,175 @@ def test_painter_particle_shadow_layer_smoke(qapp):
     img2 = QImage(800, 450, QImage.Format.Format_ARGB32_Premultiplied)
     img2.fill(0xFF101010)
     paint_frame(img2, track, 1300, glow_style)
+
+
+# ---------------------------------------------------------------------------
+# 2026-10 雪花（六角星 + 匀速慢落）：入场飘入 / 退场飘散 / 唱字飘动。
+# ---------------------------------------------------------------------------
+
+
+def test_plan_line_bursts_snow_entry_exit_sing():
+    """雪花三档规划接线（与花瓣同构）+ 按 kind 的默认雪色。"""
+    style = Style(
+        entry_anim="snow",
+        entry_lead_ms=600,
+        exit_anim="snow",
+        exit_fade_ms=600,
+        sing_fx="snow",
+        fx_particle_count=14,
+        font_size_px=100,
+        karaoke_anim="none",
+    )
+    bursts = plan_line_bursts(
+        style, 0, 1000, 4200, 4100,
+        [(1200, 1600), (1600, 2000), (2000, 3000)],
+    )
+    # 入场雪花：逐字错峰，每字 3 颗拆雪色双色 2+1（kind 默认对≠樱花粉）。
+    entry = [b for b in bursts if b["kind"] == "snow" and b["sweep"] == 1]
+    assert len(entry) == 6
+    assert [b["start_ms"] for b in entry] == [
+        1000, 1000, 1175, 1175, 1350, 1350,
+    ]
+    assert sorted({b["count"] for b in entry}) == [1, 2]
+    assert {b["color"] for b in entry} == {"#F2F8FF", "#BFDFFF"}
+    assert all(b["travel_px"] == 0.0 for b in entry)
+    # 退场雪花：尾窗钳制（显示末-120 护栏）、雪色双色。
+    exit_snow = [b for b in bursts if b["kind"] == "snow" and b["sweep"] == -1]
+    assert len(exit_snow) == 6
+    assert {b["start_ms"] for b in exit_snow} == {4080}
+    assert {b["color"] for b in exit_snow} == {"#F2F8FF", "#BFDFFF"}
+    # 唱字雪花：每字 4 颗、尺寸吃旋钮、寿命比花瓣长（慢落）。
+    sing = [b for b in bursts if b["kind"] == "snow" and b["sweep"] == 0]
+    assert len(sing) == 3
+    assert all(b["count"] == 4 for b in sing)
+    assert sing[0]["size_px"] == pytest.approx(100 * 0.40)
+    assert sing[0]["end_ms"] - sing[0]["start_ms"] == 1100
+
+
+def test_snow_default_colors_differ_from_other_kinds():
+    """默认双色按 kind：雪花=雪白+冰蓝；花瓣与音符等维持樱花粉。"""
+    def _sing_colors(kind: str) -> set[str]:
+        bursts = plan_line_bursts(
+            Style(
+                sing_fx=kind,
+                fx_particle_color_mode="sakura",
+                fx_particle_count=12,
+                font_size_px=100,
+                karaoke_anim="none",
+            ),
+            0, 0, 3000, 2900, [(100, 400)],
+        )
+        return {b["color"] for b in bursts if b["kind"] == kind}
+
+    assert _sing_colors("snow") == {"#F2F8FF", "#BFDFFF"}
+    assert _sing_colors("petal") == {"#FFB7C5", "#FFD7E0"}
+    assert _sing_colors("twinkle") == {"#FFB7C5", "#FFD7E0"}
+
+
+def test_snow_trajectory_windows_and_bounds():
+    """雪花轨迹：窗口外空、确定性、匀速单调下沉、贴近字框、
+    飘散终点向右（同花瓣口径）。"""
+    base = {
+        "kind": "snow", "anchor": "char", "char_index": 0,
+        "start_ms": 0, "end_ms": 1100, "count": 6, "seed": 54321,
+        "size_px": 30.0, "travel_px": 0.0, "front": True,
+    }
+    for sweep in (1, -1, 0):
+        burst = {**base, "sweep": sweep}
+        assert burst_particles_at(burst, -1, 0.0, 0.0, 120.0, 100.0) == []
+        assert burst_particles_at(burst, 1101, 0.0, 0.0, 120.0, 100.0) == []
+        early = burst_particles_at(burst, 250, 0.0, 0.0, 120.0, 100.0)
+        assert early == burst_particles_at(
+            burst, 250, 0.0, 0.0, 120.0, 100.0
+        )  # 纯时间函数：重放逐位一致
+        assert len(early) == 6  # 出生延迟上限 160ms < 250
+        late = burst_particles_at(burst, 800, 0.0, 0.0, 120.0, 100.0)
+        for before, after in zip(early, late):
+            assert after.y >= before.y  # 无 y 向摇摆项：匀速单调下沉
+        if sweep < 0:
+            # 飘散终点向右：整簇随时间右移（摇摆是振荡项，按簇和判向）。
+            assert sum(s.x for s in late) > sum(s.x for s in early)
+        for states in (early, late):
+            for state in states:
+                assert 0.0 < state.alpha <= 1.0
+                assert state.size_px > 0.0
+                if sweep < 0:
+                    assert -70.0 <= state.x <= 190.0
+                else:
+                    assert abs(state.x) <= 140.0  # 字框 + 宽幅摇摆余量
+                assert -95.0 <= state.y <= 120.0
+
+
+def test_snow_sprite_contract():
+    """雪花 sprite：六角星 12 顶点、单轮廓闭合、六重对称。"""
+    snow = FX_SPRITES["snow"]["path_commands"]
+    assert snow[0][0] == "M" and snow[-1][0] == "Z"
+    assert sum(1 for c in snow if c[0] == "M") == 1
+    lines = [c for c in snow if c[0] == "L"]
+    assert len(lines) == 11
+    points = [
+        (float(c[i]), float(c[i + 1]))
+        for c in snow
+        for i in range(1, len(c) - 1, 2)
+    ]
+    radii = sorted({round(math.hypot(x, y), 3) for x, y in points})
+    assert radii == [160.0, 500.0]  # 内/外两档半径（六重星）
+    assert sprite_for_kind("snow") == "snow"
+
+
+def test_snow_gpu_support_and_override_roundtrip():
+    """雪花档位不触发 GPU 整帧回退；逐行覆盖可往返序列化。"""
+    track = type("Track", (), {"lines": []})()
+    style = Style(
+        entry_anim="snow",
+        exit_anim="snow",
+        sing_fx="snow",
+        karaoke_anim="inherit",
+        reverse_karaoke_anim="inherit",
+    )
+    assert gpu_unsupported_features(track, style) == ()
+    data = line_animation_override_to_dict(
+        LineAnimationOverride(entry_anim="snow", exit_anim="snow", sing_fx="snow")
+    )
+    restored = line_animation_override_from_dict(data)
+    assert restored is not None
+    assert restored.entry_anim == "snow"
+    assert restored.exit_anim == "snow"
+    assert restored.sing_fx == "snow"
+
+
+def test_painter_snow_smoke(qapp):
+    """CPU painter 雪花三档冒烟：飘入/飘动各一帧不抛异常。"""
+    from PyQt6.QtGui import QImage
+
+    from krok_helper.subtitle_render.domain.timing import TimingChar, TimingTrack
+    from krok_helper.subtitle_render.engine.painter import paint_frame
+
+    track = TimingTrack(
+        lines=[
+            TimingLine(
+                chars=[
+                    TimingChar(text="あ", start_ms=1000),
+                    TimingChar(text="い", start_ms=1600),
+                ],
+                end_ms=2200,
+            )
+        ]
+    )
+    sing = Style(
+        sing_fx="snow",
+        karaoke_anim="utopia",
+        fx_particle_size_em=0.6,
+        fx_particle_count=8,
+    )
+    img = QImage(800, 450, QImage.Format.Format_ARGB32_Premultiplied)
+    img.fill(0xFF101010)
+    paint_frame(img, track, 1300, sing)
+    entry = Style(
+        entry_anim="snow",
+        entry_lead_ms=600,
+        karaoke_anim="utopia",
+    )
+    img2 = QImage(800, 450, QImage.Format.Format_ARGB32_Premultiplied)
+    img2.fill(0xFF101010)
+    paint_frame(img2, track, 1100, entry)

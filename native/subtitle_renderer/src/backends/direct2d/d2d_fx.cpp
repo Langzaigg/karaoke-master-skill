@@ -191,7 +191,7 @@ GeoCharState geoCharState(
         return state;
     }
     if (effect == "sparkle" || effect == "ripple" || effect == "note"
-        || effect == "petal") {
+        || effect == "petal" || effect == "snow") {
         // 粒子类出入场动画的本体：文字逐字显形（入场 4 倍速透明度，
         // 粒子拼接同款编排），退场逐字淡出；粒子由 planner 叠加。
         const float p = staggerProgress;
@@ -509,6 +509,72 @@ std::vector<FxParticle> burstParticlesAt(
                     spin,
                     sizeI * (0.85f + 0.15f * std::sin(pi * p)),
                     std::min(p * 5.0f, 1.0f) * std::sin(pi * p),
+                });
+            }
+        } else if (burst.kind == "snow") {
+            // 雪花飘落（镜像 particles.burst_particles_at snow 分支，
+            // AE CC Snowfall 运动签名）：匀速下沉（eased=线性）+ 宽幅
+            // 低频摇摆 + 慢自转 + 柔包络。sweep>0 飘入、sweep<0 飘散
+            //（终点向右，同花瓣口径）、sweep==0 唱字飘动。
+            const float u1 = fxUnitHash(index, 1u);
+            const float u2 = fxUnitHash(index, 2u);
+            const float u3 = fxUnitHash(index, 3u);
+            const float u4 = fxUnitHash(index, 4u);
+            const float u5 = fxUnitHash(index, 5u);
+            const float delay = u3 * 160.0f;
+            const float p = std::clamp(
+                (tau - delay)
+                    / std::max(static_cast<float>(life) - delay, 1.0f),
+                0.0f,
+                1.0f
+            );
+            if (p <= 0.0f) {
+                continue;
+            }
+            constexpr float pi = 3.14159265358979323846f;
+            const float sway = std::sin(
+                (u2 + p * (0.35f + 0.45f * u5)) * 2.0f * pi
+            ) * size * (0.75f + 0.65f * u4);
+            const float sizeI = size * (0.70f + 0.50f * u4);
+            const float spin = u3 * 360.0f
+                + p * (80.0f + 140.0f * u5) * (u4 >= 0.5f ? 1.0f : -1.0f);
+            const float eased = p;  // 匀速下沉（雪的终端速度感）
+            if (burst.sweep > 0) {
+                // 雪花飘入：自字形顶上方匀速缓降进字框。
+                const float landX = (u1 - 0.5f) * boxW * 0.85f;
+                const float landY = (u4 - 0.5f) * boxH * 0.55f;
+                const float startX = landX + (u5 - 0.5f) * boxW * 0.6f;
+                const float startY = -(0.60f + 0.30f * u2) * boxH;
+                out.push_back(FxParticle{
+                    originX + startX + (landX - startX) * eased + sway,
+                    originY + startY + (landY - startY) * eased,
+                    spin,
+                    sizeI * (0.85f + 0.15f * std::sin(pi * p)),
+                    std::min(p * 4.0f, 1.0f) * (1.0f - p) * (1.0f - p * 0.4f),
+                });
+            } else if (burst.sweep < 0) {
+                // 雪花飘散：随机摇摆、终点向右缓漂（幅度小于花瓣），
+                // 下探行间隙淡出。
+                const float startX = (u1 - 0.5f) * boxW * 0.85f;
+                const float endX = startX + (0.35f + 0.6f * u5) * boxW;
+                const float startY = (u4 - 0.5f) * boxH * 0.55f;
+                out.push_back(FxParticle{
+                    originX + startX + (endX - startX) * eased + sway,
+                    originY + startY
+                        + (0.50f + 0.30f * u2) * boxH * eased,
+                    spin,
+                    sizeI * (0.90f + 0.10f * (1.0f - p)),
+                    (1.0f - p) * (1.0f - p * 0.5f),
+                });
+            } else {
+                // 雪花飘动：字框上半出生、轻摆缓沉，sin 包络淡入淡出。
+                out.push_back(FxParticle{
+                    originX + (u1 - 0.5f) * boxW * 0.7f + sway,
+                    originY - (0.25f + 0.30f * u4) * boxH
+                        + (0.40f + 0.30f * u2) * boxH * eased,
+                    spin,
+                    sizeI * (0.85f + 0.15f * std::sin(pi * p)),
+                    std::min(p * 4.0f, 1.0f) * std::sin(pi * p),
                 });
             }
         }

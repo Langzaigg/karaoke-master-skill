@@ -62,6 +62,21 @@ PETAL_LIFE_MS = 900
 # 「默认颜色」档的两种樱花粉：规划器拆双 burst 随机混发（每颗粒子一色）。
 SAKURA_PINK_A = "#FFB7C5"
 SAKURA_PINK_B = "#FFD7E0"
+# 雪花（2026-10，与花瓣同管线）：六角星 sprite + 慢速匀速飘落的运动签名
+#（宽幅低频摇摆、慢自转、柔包络——AE CC Snowfall 等参考的共同观感）；
+# 寿命比花瓣长（下落更慢）。
+SNOW_LIFE_MS = 1100
+# 「默认颜色」档的雪花双色（雪白 + 冰蓝）随机混发；固定默认档按 kind
+# 取默认对（雪花=雪色，花瓣与其余 kind=樱花粉，见 _default_color_pair）。
+SNOW_A = "#F2F8FF"
+SNOW_B = "#BFDFFF"
+
+
+def _default_color_pair(snow: bool) -> tuple[str, str]:
+    """按 kind 的默认双色（固定默认档与「默认颜色」模式共用）：雪花=雪白
+    +冰蓝；花瓣与其余 kind 维持樱花粉（b5a1b7fb 用户口径不回归）。"""
+
+    return (SNOW_A, SNOW_B) if snow else (SAKURA_PINK_A, SAKURA_PINK_B)
 # 出入场动画驱动的粒子（星光/涟漪/音符/花瓣/拼接/消散）默认用固定默认档：
 # 樱花粉双色随机混发 + 40% 字号（2026-10 用户口径：出入场粒子用「默认
 # 颜色」的樱花色，而不是单独颜色的默认白）；开启 ``fx_apply_to_entry_exit``
@@ -381,13 +396,15 @@ def particle_variant_paints(
     size_px: float,
     *,
     petal: bool = False,
+    snow: bool = False,
     include_strokes: bool = True,
 ) -> list[dict[str, object]] | None:
     """双色随机模式的**变体实色/规格列表**（2026-10 花瓣特效口径）：
 
     - ``color`` 单独颜色——颜色一/颜色二双色槽随机混发（颜色二默认白色，
       白色即颜色本身——2026-10 用户口径：必须设置双色，无「未设置」态）；
-    - ``sakura`` 默认颜色——两种樱花粉实色变体；
+    - ``sakura`` 默认颜色——按 kind 的默认双色变体（花瓣=樱花粉、
+      雪花=雪白+冰蓝，见 :func:`_default_color_pair`）；
     - ``follow_mix`` 跟随字体·前后各一——当前字符角色方案（缺省回落行
       样式）配色的走字前/后两个变体；装饰层按 ``fx_particle_color_layers``
       取色层级裁剪（默认仅实色，见 :func:`_state_paint_spec`）；
@@ -411,7 +428,8 @@ def particle_variant_paints(
             return [{"color": fallback}]
         return [{"color": fallback}, {"color": color2}]
     if mode == "sakura":
-        return [{"color": SAKURA_PINK_A}, {"color": SAKURA_PINK_B}]
+        pair = _default_color_pair(snow)
+        return [{"color": pair[0]}, {"color": pair[1]}]
 
     layers = str(
         getattr(style, "fx_particle_color_layers", "solid") or "solid"
@@ -570,12 +588,30 @@ def _petal_commands() -> list[list[object]]:
     ]
 
 
+def _snow_commands() -> list[list[object]]:
+    """雪花剪影：六角星——外径 500 / 内径 160 的 12 顶点直线轮廓。六重
+    对称是雪花晶体的辨识特征；单轮廓无自交叠（M + 11×L + Z），粒子
+    小尺寸下读作 ❄ 星形枝晶。"""
+    commands: list[list[object]] = []
+    for k in range(12):
+        radius = 500.0 if k % 2 == 0 else 160.0
+        angle = math.pi * k / 6.0 - math.pi / 2.0
+        commands.append([
+            "M" if k == 0 else "L",
+            radius * math.cos(angle),
+            radius * math.sin(angle),
+        ])
+    commands.append(["Z"])
+    return commands
+
+
 FX_SPRITES: dict[str, dict[str, object]] = {
     "star4": _sprite_ir(_star4_commands()),
     "ring": _sprite_ir(_ring_commands()),
     "note": _sprite_ir(_note_commands()),
     "pixel": _sprite_ir(_pixel_commands()),
     "petal": _sprite_ir(_petal_commands()),
+    "snow": _sprite_ir(_snow_commands()),
 }
 
 _SPRITE_FOR_KIND = {
@@ -587,6 +623,7 @@ _SPRITE_FOR_KIND = {
     "assemble": "pixel",
     "dissolve": "pixel",
     "petal": "petal",
+    "snow": "snow",
 }
 
 
@@ -670,6 +707,7 @@ def _cached_particle_variants(
     size_px: float,
     *,
     petal: bool,
+    snow: bool = False,
     include_strokes: bool,
 ) -> list[dict[str, object]] | None:
     key = (
@@ -677,6 +715,7 @@ def _cached_particle_variants(
         id(char_style) if char_style is not None else 0,
         round(float(size_px), 3),
         bool(petal),
+        bool(snow),
         bool(include_strokes),
     )
     entry = _VARIANT_CACHE.get(key)
@@ -692,6 +731,7 @@ def _cached_particle_variants(
         char_style,
         size_px,
         petal=petal,
+        snow=snow,
         include_strokes=include_strokes,
     )
     if len(_VARIANT_CACHE) >= _VARIANT_CACHE_MAX:
@@ -778,9 +818,11 @@ def plan_line_bursts(
         ring: bool = False,
         line_anchor: bool = False,
         petal: bool = False,
+        snow: bool = False,
     ) -> list[dict[str, object]]:
-        """burst 的颜色规格**列表**：固定樱花粉档 / 实色回退 (+ 取色层级
-        的装饰规格) / 双色档的变体规格列表（见 :func:`particle_variant_paints`）。
+        """burst 的颜色规格**列表**：固定默认档（按 kind 的默认双色）/ 实色
+        回退 (+ 取色层级的装饰规格) / 双色档的变体规格列表
+        （见 :func:`particle_variant_paints`）。
 
         规格按「样式 × 角色方案 × 尺寸 × 是否涟漪」缓存——同一组合全帧
         复用一份（见 :func:`_cached_particle_paint`）。涟漪光环不带描边
@@ -799,9 +841,11 @@ def plan_line_bursts(
         """
 
         if anim and not apply_to_anim:
-            # 固定默认档 = 樱花粉双色随机混发（2026-10 用户口径：出入场
-            # 粒子用「默认颜色」的樱花色，而非单独颜色的默认白）。
-            return [{"color": SAKURA_PINK_A}, {"color": SAKURA_PINK_B}]
+            # 固定默认档 = 按 kind 的默认双色随机混发（2026-10 用户口径：
+            # 出入场粒子用「默认颜色」而非单独颜色的默认白；樱花粉为既有
+            # 口径，雪花按 kind 取雪白+冰蓝）。
+            pair = _default_color_pair(snow)
+            return [{"color": pair[0]}, {"color": pair[1]}]
         mode = str(getattr(style, "fx_particle_color_mode", "color") or "color")
         if (
             line_anchor
@@ -822,6 +866,7 @@ def plan_line_bursts(
             char_style,
             burst_size,
             petal=petal,
+            snow=snow,
             include_strokes=not ring,
         )
         if variants is not None:
@@ -935,6 +980,20 @@ def plan_line_bursts(
                 "size_px": anim_size, "travel_px": 0.0,
                 "front": True, "sweep": 1,
             }, _burst_paint(char_index, anim_size, anim=True, petal=True))
+    elif entry_anim == "snow" and entry_active and display_start_ms is not None:
+        # 雪花飘入：每字自字形顶上方错峰匀速缓降进字框（宽幅低频摇摆 +
+        # 慢自转——AE CC Snowfall 同款运动签名）。
+        for char_index in range(char_count):
+            start = int(display_start_ms) + int(stagger * entry_scale) * char_index
+            _variant_bursts({
+                "kind": "snow", "anchor": "char",
+                "char_index": int(char_index),
+                "start_ms": start,
+                "end_ms": start + int(SNOW_LIFE_MS * entry_scale),
+                "count": 3, "seed": (seed_base + 12 + char_index) & 0xFFFFFFFF,
+                "size_px": anim_size, "travel_px": 0.0,
+                "front": True, "sweep": 1,
+            }, _burst_paint(char_index, anim_size, anim=True, snow=True))
 
     exit_anim = str(getattr(style, "exit_anim", "none") or "none")
     if exit_anim == "sparkle" and exit_active and display_end_ms is not None:
@@ -1021,6 +1080,35 @@ def plan_line_bursts(
                 "size_px": anim_size, "travel_px": 0.0,
                 "front": True, "sweep": -1,
             }, _burst_paint(char_index, anim_size, anim=True, petal=True))
+    elif exit_anim == "snow" and exit_active and display_end_ms is not None:
+        exit_start_snow = max(
+            int(line_end_ms) if line_end_ms is not None else 0,
+            int(display_end_ms)
+            - int((RIPPLE_CHAR_STAGGER_MS + SNOW_LIFE_MS) * exit_scale),
+        )
+        if int(display_end_ms) - exit_start_snow < 120:
+            exit_start_snow = int(display_end_ms) - 120
+        tail_snow = (
+            int(display_end_ms) - exit_start_snow
+            - int(SNOW_LIFE_MS * exit_scale)
+        )
+        stagger_snow = min(
+            int(stagger * exit_scale),
+            max(0, tail_snow) // max(1, char_count - 1),
+        )
+        # 雪花飘散：每字自字框内错峰剥落、随机摇摆、终点向右缓漂、下探
+        # 行间隙淡出（与花瓣同款编排，行程更缓）。
+        for char_index in range(char_count):
+            start = exit_start_snow + stagger_snow * char_index
+            _variant_bursts({
+                "kind": "snow", "anchor": "char",
+                "char_index": int(char_index),
+                "start_ms": start,
+                "end_ms": start + int(SNOW_LIFE_MS * exit_scale),
+                "count": 3, "seed": (seed_base + 13 + char_index) & 0xFFFFFFFF,
+                "size_px": anim_size, "travel_px": 0.0,
+                "front": True, "sweep": -1,
+            }, _burst_paint(char_index, anim_size, anim=True, snow=True))
 
     # 粒子拼接/消散：像素风方块粒子，同出入场动画档（默认固定档）。
     per_char_assemble = max(4, ANIM_PARTICLE_COUNT // 2)
@@ -1105,6 +1193,26 @@ def plan_line_bursts(
                 "size_px": size, "travel_px": 0.0,
                 "front": True, "sweep": 0,
             }, _burst_paint(char_index, size, anim=False, petal=True))
+    elif style.sing_fx == "snow":
+        # 雪花飘动：唱到的字上雪花轻摆缓沉（数量吃粒子旋钮，默认 4/字），
+        # 窗口不受唱字窗约束、自然播完（与花瓣同口径，摇摆更慢更宽）。
+        per_char = max(3, count // 3)
+        for char_index, (start_ms, end_ms) in enumerate(char_windows):
+            duration = int(end_ms) - int(start_ms)
+            if duration <= 0:
+                continue
+            if char_visible is not None and not char_visible[char_index]:
+                continue
+            _variant_bursts({
+                "kind": "snow", "anchor": "char",
+                "char_index": int(char_index),
+                "start_ms": int(start_ms),
+                "end_ms": int(start_ms) + SNOW_LIFE_MS,
+                "count": per_char,
+                "seed": (seed_base + 5 + char_index) & 0xFFFFFFFF,
+                "size_px": size, "travel_px": 0.0,
+                "front": True, "sweep": 0,
+            }, _burst_paint(char_index, size, anim=False, snow=True))
     elif style.sing_fx in ("twinkle", "twinkle_classic", "note"):
         # 唱字星光并入出入场星光运动学后，密度对齐出入场观感（默认 7/字）；
         # 「旧版」档（twinkle_classic）保留 2026-10 运动学改造前的原地闪烁
@@ -1406,5 +1514,67 @@ def burst_particles_at(
                     spin,
                     size_i * (0.85 + 0.15 * math.sin(math.pi * p)),
                     min(p * 5.0, 1.0) * math.sin(math.pi * p),
+                ))
+        elif kind == "snow":
+            # 雪花飘落（AE CC Snowfall 运动签名，2026-10）：匀速下沉
+            #（终端速度感，ease=线性）+ 宽幅**低频**摇摆（不足一个整周期
+            # 的大漂移——雪的漂浮感，与花瓣的高频小摆相区分）+ 慢自转 +
+            # 柔包络。位置偏移全部 box 比例（星光/音符/花瓣同约定）。
+            # sweep>0 飘入、sweep<0 飘散（终点向右，同花瓣口径）、
+            # sweep==0 唱字飘动。随机出生延迟错峰。镜像 d2d_fx.cpp。
+            u1 = fx_unit_hash(seed + i, 1)
+            u2 = fx_unit_hash(seed + i, 2)
+            u3 = fx_unit_hash(seed + i, 3)
+            u4 = fx_unit_hash(seed + i, 4)
+            u5 = fx_unit_hash(seed + i, 5)
+            delay = u3 * 160.0
+            p = min(max((tau - delay) / max(life - delay, 1.0), 0.0), 1.0)
+            if p <= 0.0:
+                continue
+            sway = (
+                math.sin((u2 + p * (0.35 + 0.45 * u5)) * 2.0 * math.pi)
+                * size * (0.75 + 0.65 * u4)
+            )
+            size_i = size * (0.70 + 0.50 * u4)
+            spin = (
+                u3 * 360.0
+                + p * (80.0 + 140.0 * u5) * (1.0 if u4 >= 0.5 else -1.0)
+            )
+            eased = p  # 匀速下沉（雪的终端速度感）
+            if sweep > 0:
+                # 雪花飘入：自字形顶上方匀速缓降进字框。
+                land_x = (u1 - 0.5) * box_w * 0.85
+                land_y = (u4 - 0.5) * box_h * 0.55
+                start_x = land_x + (u5 - 0.5) * box_w * 0.6
+                start_y = -(0.60 + 0.30 * u2) * box_h
+                out.append(ParticleDraw(
+                    origin_x + start_x + (land_x - start_x) * eased + sway,
+                    origin_y + start_y + (land_y - start_y) * eased,
+                    spin,
+                    size_i * (0.85 + 0.15 * math.sin(math.pi * p)),
+                    min(p * 4.0, 1.0) * (1.0 - p) * (1.0 - p * 0.4),
+                ))
+            elif sweep < 0:
+                # 雪花飘散：随机摇摆、终点向右缓漂（幅度小于花瓣），
+                # 下探行间隙淡出。
+                start_x = (u1 - 0.5) * box_w * 0.85
+                end_x = start_x + (0.35 + 0.6 * u5) * box_w
+                start_y = (u4 - 0.5) * box_h * 0.55
+                out.append(ParticleDraw(
+                    origin_x + start_x + (end_x - start_x) * eased + sway,
+                    origin_y + start_y + (0.50 + 0.30 * u2) * box_h * eased,
+                    spin,
+                    size_i * (0.90 + 0.10 * (1.0 - p)),
+                    (1.0 - p) * (1.0 - p * 0.5),
+                ))
+            else:
+                # 雪花飘动：字框上半出生、轻摆缓沉，sin 包络淡入淡出。
+                out.append(ParticleDraw(
+                    origin_x + (u1 - 0.5) * box_w * 0.7 + sway,
+                    origin_y - (0.25 + 0.30 * u4) * box_h
+                    + (0.40 + 0.30 * u2) * box_h * eased,
+                    spin,
+                    size_i * (0.85 + 0.15 * math.sin(math.pi * p)),
+                    min(p * 4.0, 1.0) * math.sin(math.pi * p),
                 ))
     return out

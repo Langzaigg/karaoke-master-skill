@@ -160,6 +160,7 @@ _ENTRY_EFFECTS = (
     ("ripple", "涟漪光环"),
     ("note", "音符飘出"),
     ("petal", "花瓣飘入"),
+    ("snow", "雪花飘入"),
 )
 _EXIT_EFFECTS = (
     ("none", "无"),
@@ -179,6 +180,7 @@ _EXIT_EFFECTS = (
     ("ripple", "涟漪光环"),
     ("note", "音符飘出"),
     ("petal", "花瓣飘散"),
+    ("snow", "雪花飘散"),
 )
 #: 唱字特效比入退场多一档「跟随全局」——覆盖这一行的入退场时，唱字往往仍想跟着
 #: 主字幕走，不该被迫二选一。
@@ -202,6 +204,7 @@ _SING_FX_EFFECTS = (
     ("note", "音符飘出"),
     ("ripple", "涟漪光环"),
     ("petal", "花瓣飘动"),
+    ("snow", "雪花飘动"),
 )
 _ENTRY_LABELS = dict(_ENTRY_EFFECTS)
 _EXIT_LABELS = dict(_EXIT_EFFECTS)
@@ -230,6 +233,7 @@ _PRESET_COMBO_ITEMS = (
     ("sing_note", "唱字·音符飘出"),
     ("sing_ripple", "唱字·涟漪光环"),
     ("sing_petal", "唱字·花瓣飘动"),
+    ("sing_snow", "唱字·雪花飘动"),
 )
 _PRESET_ENTRY_EXIT = {
     "none": ("none", "none"),
@@ -252,6 +256,7 @@ _PRESET_SING_FX = {
     "sing_note": "note",
     "sing_ripple": "ripple",
     "sing_petal": "petal",
+    "sing_snow": "snow",
 }
 
 

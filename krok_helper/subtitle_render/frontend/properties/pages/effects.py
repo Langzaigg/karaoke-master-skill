@@ -40,6 +40,7 @@ ENTRY_ANIMATION_OPTIONS = (
     ("涟漪光环", "ripple"),
     ("音符飘出", "note"),
     ("花瓣飘入", "petal"),
+    ("雪花飘入", "snow"),
 )
 
 EXIT_ANIMATION_OPTIONS = (
@@ -60,6 +61,7 @@ EXIT_ANIMATION_OPTIONS = (
     ("涟漪光环", "ripple"),
     ("音符飘出", "note"),
     ("花瓣飘散", "petal"),
+    ("雪花飘散", "snow"),
 )
 
 FX_PARTICLE_OPTIONS = (
@@ -75,6 +77,7 @@ FX_SING_OPTIONS = (
     ("音符飘出", "note"),
     ("涟漪光环", "ripple"),
     ("花瓣飘动", "petal"),
+    ("雪花飘动", "snow"),
 )
 
 FX_PARTICLE_COLOR_MODE_OPTIONS = (

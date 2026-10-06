@@ -294,7 +294,7 @@ class TestSingFxDialog:
         }
         assert values == {
             "inherit", "none", "twinkle", "twinkle_classic", "note", "ripple",
-            "petal",
+            "petal", "snow",
         }
 
     def test_it_round_trips_the_choice(self) -> None:
