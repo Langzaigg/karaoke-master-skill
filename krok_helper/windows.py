@@ -67,10 +67,21 @@ def hidden_subprocess_kwargs() -> dict[str, object]:
 
 
 def open_in_explorer(path) -> None:
-    """在系统文件管理器中打开目录，不存在则先创建。"""
+    """在系统文件管理器中打开目录，目录不存在则先创建。
+
+    传入已存在的文件时定位其所在目录：Windows 用资源管理器直接选中该文件
+    （与 subtitle_render._open_export_folder 同一手法），其余平台打开所在
+    目录。合成页「打开输出目录」传的就是输出文件路径，不能按目录建。
+    """
     from PyQt6.QtCore import QUrl
     from PyQt6.QtGui import QDesktopServices
 
-    directory = Path(path).resolve()
-    directory.mkdir(parents=True, exist_ok=True)
-    QDesktopServices.openUrl(QUrl.fromLocalFile(str(directory)))
+    target = Path(path).resolve()
+    if target.exists() and not target.is_dir():
+        if sys.platform == "win32":
+            subprocess.Popen(["explorer", "/select,", str(target)])
+        else:
+            QDesktopServices.openUrl(QUrl.fromLocalFile(str(target.parent)))
+        return
+    target.mkdir(parents=True, exist_ok=True)
+    QDesktopServices.openUrl(QUrl.fromLocalFile(str(target)))
