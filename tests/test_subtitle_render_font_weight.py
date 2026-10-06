@@ -26,6 +26,19 @@ _IWATA_FONT_PATH = (
 )
 
 
+@pytest.fixture(autouse=True, scope="module")
+def _cleanup_application_fonts():
+    """模块级应用字体注册不泄漏到同进程的后续测试模块（painter 用例对
+    字体库状态敏感）。"""
+    yield
+    QFontDatabase.removeAllApplicationFonts()
+    from krok_helper.subtitle_render.engine.text.font_weight import (
+        clear_font_weight_cache,
+    )
+
+    clear_font_weight_cache()
+
+
 @pytest.mark.parametrize(
     ("requested", "expected"),
     (
@@ -170,6 +183,28 @@ def test_variable_font_renders_true_axis_instances(qapp):
     above = resolve_weight_plan(family, 950)
     assert above.axis_value == 900.0
     assert above.mark == "越界"
+
+
+def test_fake_variable_axis_falls_back_to_static(monkeypatch, qapp):
+    """伪可变字体（带 fvar 的 wght 轴但渲染恒定）按静态族处理。
+
+    打桩 ``_wght_axis_is_effective`` 为恒 False，模拟「轴两端指纹一致」
+    （无真实变体数据 / 当前环境无法应用轴值），此时不得走轴值路径。
+    """
+    import krok_helper.subtitle_render.engine.text.font_weight as fw
+
+    monkeypatch.setattr(fw, "_wght_axis_is_effective", lambda family, axis: False)
+    fw.clear_font_weight_cache()
+    msgothic = r"C:\Windows\Fonts\msgothic.ttc"
+    if not os.path.exists(msgothic):
+        pytest.skip("MS Gothic font file not present")
+    QFontDatabase.addApplicationFont(msgothic)
+    _require_family("MS Gothic")
+    plan = fw.resolve_weight_plan("MS Gothic", 600)
+    assert plan.axis_value is None
+    assert plan.style_name == "Regular"
+    # 静态语义（就近/模拟随平台字体库而变），绝不标真实轴值。
+    assert plan.mark in {"就近", "模拟"}
 
 
 def test_missing_metadata_family_falls_back_to_plain_weight(monkeypatch):

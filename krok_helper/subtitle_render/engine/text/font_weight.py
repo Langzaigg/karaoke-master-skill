@@ -122,7 +122,14 @@ def _parse_fvar(raw: bytes) -> dict[bytes, WeightAxis] | None:
 
 
 def family_weight_axis(family: str) -> WeightAxis | None:
-    """返回族解析结果里的 wght 轴；静态字体 / 解析失败返回 None。"""
+    """返回族解析结果里**有效**的 wght 轴；静态 / 伪可变 / 失败返回 None。
+
+    「伪可变」：字体带 fvar 的 wght 轴（有范围）但实际渲染不变——轴上
+    没有真实变体数据（gvar/HVAR 缺失或恒等），或该字体在当前 Qt 环境
+    无法应用轴值。检测口径：轴两端（min/max）构造的字体指纹完全一致 ⇒
+    调字重不会产生任何视觉/宽度变化，按静态族处理（就近/模拟语义），
+    避免把「恒定渲染」误判为真实可变而被标注为真实档。
+    """
     key = str(family)
     with _LOCK:
         cached = _AXIS_CACHE.get(key, _MISSING)
@@ -134,9 +141,23 @@ def family_weight_axis(family: str) -> WeightAxis | None:
         axes = _parse_fvar(table) if table else None
     except (RuntimeError, TypeError, ValueError):
         axes = None
+    axis = None if axes is None else axes.get(_AXIS_TAG_WEIGHT)
+    if axis is not None and axis.minimum < axis.maximum:
+        if not _wght_axis_is_effective(key, axis):
+            axes = None
     with _LOCK:
         _AXIS_CACHE[key] = axes
     return None if axes is None else axes.get(_AXIS_TAG_WEIGHT)
+
+
+def _wght_axis_is_effective(family: str, axis: WeightAxis) -> bool:
+    """wght 轴两端是否产生可观测差异（advance/墨迹指纹）。"""
+    signatures = []
+    for value in (axis.minimum, axis.maximum):
+        font = QFont(family)
+        font.setVariableAxis(QFont.Tag(_AXIS_TAG_WEIGHT), float(value))
+        signatures.append(_font_fingerprint(font))
+    return signatures[0] != signatures[1]
 
 
 class _Missing:
@@ -227,14 +248,15 @@ def _resolve_missing_static_weight(
     bucket: int,
     italic: bool,
 ) -> tuple[int, str, bool] | None:
-    """实测 Qt 对缺失档的实际渲染目标：``(face字重, styleName, 是否合成)``。
+    """实测 Qt 对桶化字重的实际渲染目标：``(face字重, styleName, 是否合成)``。
 
-    Qt 对静态族缺失字重的选择（就近吸附 vs 某个基 face + 合成粗体）由
-    其内部匹配器打分决定，跨族结构不可预测也读不回来（QFontInfo/QRawFont
-    只回显请求）。这里用公开 API 实测：把「交给 Qt 决定」的字体与每个
-    候选 face 的「真实渲染 / 钉扎+加粗」构造做逐字 advance + 墨迹指纹
-    比对，匹配者即 Qt 的实际选择。无匹配（字体被替换 / 度量异常）返回
-    None，由调用方走就近吸附兜底。
+    Qt 对静态族字重的选择（精确/就近吸附/某个基 face + 合成粗体）由其
+    内部匹配器打分决定，跨族结构不可预测也读不回来（QFontInfo/QRawFont
+    只回显请求）。CPU 渲染字体一律用 plain ``setWeight(桶)`` 构造（见
+    :func:`apply_weight_plan`），本函数对同一构造做实测：与每个候选
+    face 的「真实渲染 / 钉扎+加粗」构造做逐字 advance + 墨迹指纹比对，
+    匹配者即 Qt 的实际选择——因此 plan 与 CPU 渲染恒等。无匹配（字体
+    被替换 / 度量异常）返回 None，由调用方走就近吸附兜底。
     """
     plain = QFont(family)
     plain.setWeight(QFont.Weight(bucket))
@@ -326,22 +348,17 @@ def _compute_weight_plan(
 
     bucket = bucket_weight(requested)
     weights = [face_weight for face_weight, _name, _face_italic in selected]
-    if bucket in weights:
-        base_weight, style_name, _face_italic = selected[weights.index(bucket)]
-        return FontWeightPlan(
-            family=family,
-            requested_weight=requested,
-            style_name=style_name,
-            base_weight=base_weight,
-            enum_weight=bucket,
-            italic=bool(italic),
-        )
 
-    # 缺失档：以实测的 Qt 实际渲染目标为权威（含合成粗体——旧版模拟
-    # 字重语义；Qt 选哪个基 face 跨族不可预测，必须指纹实测）。
+    # 一律以 plain setWeight(桶) 的实测结果为权威（精确命中也实测——
+    # 保证 plan 与 CPU 渲染字体恒等；含合成粗体=旧版模拟字重语义）。
     resolved = _resolve_missing_static_weight(family, inventory, bucket, italic)
     if resolved is not None:
         base_weight, style_name, synthetic = resolved
+        mark: str | None
+        if synthetic:
+            mark = "模拟"
+        else:
+            mark = None if base_weight == bucket else "就近"
         return FontWeightPlan(
             family=family,
             requested_weight=requested,
@@ -350,7 +367,7 @@ def _compute_weight_plan(
             synthetic_bold=synthetic,
             enum_weight=bucket,
             italic=bool(italic),
-            mark="模拟" if synthetic else "就近",
+            mark=mark,
         )
 
     # 指纹无匹配（被替换字体 / 度量异常）：就近吸附兜底（平局取较轻）。
@@ -368,18 +385,22 @@ def _compute_weight_plan(
 
 
 def apply_weight_plan(font: QFont, plan: FontWeightPlan) -> None:
-    """把权威解析结果应用到 QFont（调用方已设 family/pixelSize）。"""
+    """把权威解析结果应用到 QFont（调用方已设 family/pixelSize）。
+
+    CPU 渲染字体一律用「plain setWeight(桶化值)」构造——这正是指纹实测
+    的参照构造（plan 就是从它测出来的），主 face 选择与最初的旧行为逐
+    一致；同时 QFont.weight 保留请求桶化值，**缺字 fallback 字体**（日
+    中字体互缺的假名/汉字走 Qt 内部回退）跟随请求字重——钉扎
+    setStyleName 会把 QFont.weight 冻结在 face 值上，fallback 字符的
+    粗细就不再随请求变化（2026-10-06 用户报「调字重宽度观感与最初不
+    一致」的根因）。可变字体在 plain 之上叠加 wght 轴值（优先级高于
+    setWeight，仅作用于轴字体本身，不影响 fallback 字重）。
+    ``plan.style_name`` 只用于 UI 展示与 GPU 显式下发，不再作用于 QFont。
+    """
     font.setItalic(bool(plan.italic))
+    font.setWeight(QFont.Weight(plan.enum_weight))
     if plan.axis_value is not None:
         font.setVariableAxis(QFont.Tag(_AXIS_TAG_WEIGHT), float(plan.axis_value))
-        return
-    if plan.style_name is not None:
-        font.setStyleName(plan.style_name)
-    if plan.synthetic_bold:
-        font.setWeight(QFont.Weight(plan.enum_weight))
-    elif plan.style_name is None:
-        # 元数据缺失的兜底：维持旧的桶化 setWeight 行为。
-        font.setWeight(QFont.Weight(plan.enum_weight))
 
 
 def build_weight_font(
