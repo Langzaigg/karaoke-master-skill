@@ -2437,12 +2437,13 @@ def test_painter_particle_shadow_layer_smoke(qapp):
 
 
 # ---------------------------------------------------------------------------
-# 2026-10 雪花（六角星 + 匀速慢落）：入场飘入 / 退场飘散 / 唱字飘动。
+# 2026-10 雪花（❄ 枝晶 + 匀速慢落 + ruby 锚出生 + 尺寸递减）：
+# 入场飘入 / 退场飘散 / 唱字飘动。
 # ---------------------------------------------------------------------------
 
 
 def test_plan_line_bursts_snow_entry_exit_sing():
-    """雪花三档规划接线（与花瓣同构）+ 按 kind 的默认雪色。"""
+    """雪花三档规划：出入场整行同刻 + 早现晚收/同步晚收时序 + 雪色。"""
     style = Style(
         entry_anim="snow",
         entry_lead_ms=600,
@@ -2457,21 +2458,23 @@ def test_plan_line_bursts_snow_entry_exit_sing():
         style, 0, 1000, 4200, 4100,
         [(1200, 1600), (1600, 2000), (2000, 3000)],
     )
-    # 入场雪花：逐字错峰，每字 3 颗拆雪色双色 2+1（kind 默认对≠樱花粉）。
+    # 入场雪花：整行同刻（无逐字错峰），起点早于逐字渐隐 200ms（行窗
+    # 打开瞬间雪花已在半空），终点晚于逐字渐隐结束 250ms（余尾）。
     entry = [b for b in bursts if b["kind"] == "snow" and b["sweep"] == 1]
     assert len(entry) == 6
-    assert [b["start_ms"] for b in entry] == [
-        1000, 1000, 1175, 1175, 1350, 1350,
-    ]
-    assert sorted({b["count"] for b in entry}) == [1, 2]
+    assert {b["start_ms"] for b in entry} == {800}  # 1000 - 200×scale
+    assert {b["end_ms"] for b in entry} == {1850}  # 1000 + 600 + 250
+    assert sorted({b["count"] for b in entry}) == [1, 2]  # 拆雪色双色
     assert {b["color"] for b in entry} == {"#F2F8FF", "#BFDFFF"}
     assert all(b["travel_px"] == 0.0 for b in entry)
-    # 退场雪花：尾窗钳制（显示末-120 护栏）、雪色双色。
+    # 退场雪花：与逐字渐隐同步开始（同刻 max(行末, 显示末-窗口)），
+    # 终点晚于逐字渐隐结束 300ms。
     exit_snow = [b for b in bursts if b["kind"] == "snow" and b["sweep"] == -1]
     assert len(exit_snow) == 6
-    assert {b["start_ms"] for b in exit_snow} == {4080}
+    assert {b["start_ms"] for b in exit_snow} == {4100}
+    assert {b["end_ms"] for b in exit_snow} == {4500}  # 4200 + 300
     assert {b["color"] for b in exit_snow} == {"#F2F8FF", "#BFDFFF"}
-    # 唱字雪花：每字 4 颗、尺寸吃旋钮、寿命比花瓣长（慢落）。
+    # 唱字雪花：逐字发射（唱字窗起点）、每字 4 颗、尺寸吃旋钮。
     sing = [b for b in bursts if b["kind"] == "snow" and b["sweep"] == 0]
     assert len(sing) == 3
     assert all(b["count"] == 4 for b in sing)
@@ -2500,17 +2503,17 @@ def test_snow_default_colors_differ_from_other_kinds():
 
 
 def test_snow_trajectory_windows_and_bounds():
-    """雪花轨迹：窗口外空、确定性、匀速单调下沉、贴近字框、
-    飘散终点向右（同花瓣口径）。"""
+    """雪花轨迹：窗口外空、确定性、匀速单调下沉、ruby 锚出生（高于
+    字形顶）、尺寸随播放递减、飘散终点向右（同花瓣口径）。"""
     base = {
         "kind": "snow", "anchor": "char", "char_index": 0,
-        "start_ms": 0, "end_ms": 1100, "count": 6, "seed": 54321,
+        "start_ms": 0, "end_ms": 1050, "count": 6, "seed": 54321,
         "size_px": 30.0, "travel_px": 0.0, "front": True,
     }
     for sweep in (1, -1, 0):
         burst = {**base, "sweep": sweep}
         assert burst_particles_at(burst, -1, 0.0, 0.0, 120.0, 100.0) == []
-        assert burst_particles_at(burst, 1101, 0.0, 0.0, 120.0, 100.0) == []
+        assert burst_particles_at(burst, 1051, 0.0, 0.0, 120.0, 100.0) == []
         early = burst_particles_at(burst, 250, 0.0, 0.0, 120.0, 100.0)
         assert early == burst_particles_at(
             burst, 250, 0.0, 0.0, 120.0, 100.0
@@ -2519,9 +2522,15 @@ def test_snow_trajectory_windows_and_bounds():
         late = burst_particles_at(burst, 800, 0.0, 0.0, 120.0, 100.0)
         for before, after in zip(early, late):
             assert after.y >= before.y  # 无 y 向摇摆项：匀速单调下沉
+            # 尺寸随播放由大变小（2026-10 用户口径：近大远小）。
+            assert after.size_px < before.size_px
         if sweep < 0:
             # 飘散终点向右：整簇随时间右移（摇摆是振荡项，按簇和判向）。
             assert sum(s.x for s in late) > sum(s.x for s in early)
+        else:
+            # ruby 锚出生：早期整簇都在字形顶（-0.5 box_h）之上。
+            top = burst_particles_at(burst, 150, 0.0, 0.0, 120.0, 100.0)
+            assert top and max(s.y for s in top) < -50.0
         for states in (early, late):
             for state in states:
                 assert 0.0 < state.alpha <= 1.0
@@ -2534,19 +2543,20 @@ def test_snow_trajectory_windows_and_bounds():
 
 
 def test_snow_sprite_contract():
-    """雪花 sprite：六角星 12 顶点、单轮廓闭合、六重对称。"""
+    """雪花 sprite：❄ 枝晶——六主臂 + 每臂两侧枝，24 顶点三档半径、
+    单轮廓闭合。"""
     snow = FX_SPRITES["snow"]["path_commands"]
     assert snow[0][0] == "M" and snow[-1][0] == "Z"
     assert sum(1 for c in snow if c[0] == "M") == 1
     lines = [c for c in snow if c[0] == "L"]
-    assert len(lines) == 11
+    assert len(lines) == 23  # 6 臂 × (尖+侧枝+谷+侧枝) - 1 个 M
     points = [
         (float(c[i]), float(c[i + 1]))
         for c in snow
         for i in range(1, len(c) - 1, 2)
     ]
     radii = sorted({round(math.hypot(x, y), 3) for x, y in points})
-    assert radii == [160.0, 500.0]  # 内/外两档半径（六重星）
+    assert radii == [85.0, 250.0, 470.0]  # 主臂尖/侧枝尖/臂间谷
     assert sprite_for_kind("snow") == "snow"
 
 
@@ -2606,3 +2616,29 @@ def test_painter_snow_smoke(qapp):
     img2 = QImage(800, 450, QImage.Format.Format_ARGB32_Premultiplied)
     img2.fill(0xFF101010)
     paint_frame(img2, track, 1100, entry)
+
+
+@pytest.mark.parametrize("sing_kind", ["petal", "snow"])
+def test_petal_and_snow_sing_particles_skip_whitespace(sing_kind):
+    """空格例外（旧粒子口径）对花瓣/雪花同样成立：空格字符不发射唱字
+    粒子（无走字内容），出入场粒子仍整行逐字参与（含空格位）。"""
+    style = Style(
+        sing_fx=sing_kind,
+        entry_anim=sing_kind,
+        entry_lead_ms=600,
+        karaoke_anim="none",
+    )
+    # 「あ い」中间是空格：3 个字符窗。
+    windows = [(1200, 1600), (1600, 2000), (2000, 2400)]
+    visible = [True, False, True]
+    bursts = plan_line_bursts(
+        style, 0, 1000, 4000, 3900, windows, char_visible=visible
+    )
+    sing = [b for b in bursts if b["kind"] == sing_kind and b["sweep"] == 0]
+    # 空格（1600 起）不发射唱字粒子；可见字各 1 条（默认单独颜色双白
+    # 折叠单 burst——唱字粒子不吃固定默认档）。
+    assert 1600 not in [b["start_ms"] for b in sing]
+    assert sorted(b["start_ms"] for b in sing) == [1200, 2000]
+    # 入场仍按整行逐字（3 字 × 固定档双色拆分，含空格位）。
+    entry = [b for b in bursts if b["kind"] == sing_kind and b["sweep"] == 1]
+    assert sorted(b["char_index"] for b in entry) == [0, 0, 1, 1, 2, 2]

@@ -589,18 +589,28 @@ def _petal_commands() -> list[list[object]]:
 
 
 def _snow_commands() -> list[list[object]]:
-    """雪花剪影：六角星——外径 500 / 内径 160 的 12 顶点直线轮廓。六重
-    对称是雪花晶体的辨识特征；单轮廓无自交叠（M + 11×L + Z），粒子
-    小尺寸下读作 ❄ 星形枝晶。"""
+    """雪花剪影：❄ 枝晶轮廓（参考初音雪未来标志/❄ emoji——2026-10 用户
+    口径，初版六角星被否）。每 60° 扇区 = 主臂尖（r 470）+ 两侧枝尖
+    （±20°，r 250）+ 臂间谷（r 85），共 24 顶点直线轮廓——主臂六重
+    对称、侧枝朝外张开，粒子小尺寸下读作带枝晶的雪花；单轮廓无自交叠
+    （M + 23×L + Z）。"""
     commands: list[list[object]] = []
-    for k in range(12):
-        radius = 500.0 if k % 2 == 0 else 160.0
-        angle = math.pi * k / 6.0 - math.pi / 2.0
-        commands.append([
-            "M" if k == 0 else "L",
-            radius * math.cos(angle),
-            radius * math.sin(angle),
-        ])
+    vertex = 0
+    for arm in range(6):
+        arm_angle = -math.pi / 2.0 + arm * math.pi / 3.0
+        ring = (
+            (arm_angle, 470.0),                      # 主臂尖
+            (arm_angle + math.pi / 9.0, 250.0),      # 顺时针侧枝尖（+20°）
+            (arm_angle + math.pi / 6.0, 85.0),       # 臂间谷（+30°）
+            (arm_angle + math.pi * 2.0 / 9.0, 250.0),  # 逆时针侧枝尖（+40°）
+        )
+        for angle, radius in ring:
+            commands.append([
+                "M" if vertex == 0 else "L",
+                radius * math.cos(angle),
+                radius * math.sin(angle),
+            ])
+            vertex += 1
     commands.append(["Z"])
     return commands
 
@@ -981,15 +991,21 @@ def plan_line_bursts(
                 "front": True, "sweep": 1,
             }, _burst_paint(char_index, anim_size, anim=True, petal=True))
     elif entry_anim == "snow" and entry_active and display_start_ms is not None:
-        # 雪花飘入：每字自字形顶上方错峰匀速缓降进字框（宽幅低频摇摆 +
-        # 慢自转——AE CC Snowfall 同款运动签名）。
+        # 雪花飘入（2026-10 用户口径）：整行雪花**同时出现**（无逐字错
+        # 峰）；起点略早于逐字渐隐首字（规划窗前移——行窗打开的瞬间雪花
+        # 已在半空，视觉上"雪先出现"），终点略晚于逐字渐隐结束（窗口 +
+        # 余尾：文字全部显形后雪花仍有余韵在落）。
+        snow_window = min(
+            max(int(getattr(style, "entry_lead_ms", 0) or 0), 120), 3000
+        )
+        snow_start = int(display_start_ms) - int(200 * entry_scale)
+        snow_end = int(display_start_ms) + snow_window + int(250 * entry_scale)
         for char_index in range(char_count):
-            start = int(display_start_ms) + int(stagger * entry_scale) * char_index
             _variant_bursts({
                 "kind": "snow", "anchor": "char",
                 "char_index": int(char_index),
-                "start_ms": start,
-                "end_ms": start + int(SNOW_LIFE_MS * entry_scale),
+                "start_ms": snow_start,
+                "end_ms": snow_end,
                 "count": 3, "seed": (seed_base + 12 + char_index) & 0xFFFFFFFF,
                 "size_px": anim_size, "travel_px": 0.0,
                 "front": True, "sweep": 1,
@@ -1081,30 +1097,23 @@ def plan_line_bursts(
                 "front": True, "sweep": -1,
             }, _burst_paint(char_index, anim_size, anim=True, petal=True))
     elif exit_anim == "snow" and exit_active and display_end_ms is not None:
-        exit_start_snow = max(
+        # 雪花飘散（2026-10 用户口径）：与逐字渐隐**同步开始**（同一起点
+        # 整行同刻），终点略晚于逐字渐隐结束（显示末之后仍有余尾——画面
+        # 随行消失截断，但淡出包络完整走到低透明度而非中途被掐）。
+        snow_exit_window = min(
+            max(int(getattr(style, "exit_fade_ms", 0) or 0), 120), 3000
+        )
+        snow_exit_start = max(
             int(line_end_ms) if line_end_ms is not None else 0,
-            int(display_end_ms)
-            - int((RIPPLE_CHAR_STAGGER_MS + SNOW_LIFE_MS) * exit_scale),
+            int(display_end_ms) - snow_exit_window,
         )
-        if int(display_end_ms) - exit_start_snow < 120:
-            exit_start_snow = int(display_end_ms) - 120
-        tail_snow = (
-            int(display_end_ms) - exit_start_snow
-            - int(SNOW_LIFE_MS * exit_scale)
-        )
-        stagger_snow = min(
-            int(stagger * exit_scale),
-            max(0, tail_snow) // max(1, char_count - 1),
-        )
-        # 雪花飘散：每字自字框内错峰剥落、随机摇摆、终点向右缓漂、下探
-        # 行间隙淡出（与花瓣同款编排，行程更缓）。
+        snow_exit_end = int(display_end_ms) + int(300 * exit_scale)
         for char_index in range(char_count):
-            start = exit_start_snow + stagger_snow * char_index
             _variant_bursts({
                 "kind": "snow", "anchor": "char",
                 "char_index": int(char_index),
-                "start_ms": start,
-                "end_ms": start + int(SNOW_LIFE_MS * exit_scale),
+                "start_ms": snow_exit_start,
+                "end_ms": snow_exit_end,
                 "count": 3, "seed": (seed_base + 13 + char_index) & 0xFFFFFFFF,
                 "size_px": anim_size, "travel_px": 0.0,
                 "front": True, "sweep": -1,
@@ -1194,8 +1203,9 @@ def plan_line_bursts(
                 "front": True, "sweep": 0,
             }, _burst_paint(char_index, size, anim=False, petal=True))
     elif style.sing_fx == "snow":
-        # 雪花飘动：唱到的字上雪花轻摆缓沉（数量吃粒子旋钮，默认 4/字），
-        # 窗口不受唱字窗约束、自然播完（与花瓣同口径，摇摆更慢更宽）。
+        # 雪花飘动：唱到的字上自 ruby 锚出生的雪花匀速缓沉穿过字框
+        #（数量吃粒子旋钮，默认 4/字；尺寸随下落由大变小——轨迹口径），
+        # 窗口不受唱字窗约束、自然播完（与花瓣同口径）。
         per_char = max(3, count // 3)
         for char_index, (start_ms, end_ms) in enumerate(char_windows):
             duration = int(end_ms) - int(start_ms)
@@ -1516,12 +1526,14 @@ def burst_particles_at(
                     min(p * 5.0, 1.0) * math.sin(math.pi * p),
                 ))
         elif kind == "snow":
-            # 雪花飘落（AE CC Snowfall 运动签名，2026-10）：匀速下沉
-            #（终端速度感，ease=线性）+ 宽幅**低频**摇摆（不足一个整周期
-            # 的大漂移——雪的漂浮感，与花瓣的高频小摆相区分）+ 慢自转 +
-            # 柔包络。位置偏移全部 box 比例（星光/音符/花瓣同约定）。
-            # sweep>0 飘入、sweep<0 飘散（终点向右，同花瓣口径）、
-            # sweep==0 唱字飘动。随机出生延迟错峰。镜像 d2d_fx.cpp。
+            # 雪花飘落（AE CC Snowfall 运动签名 + 2026-10 用户口径）：
+            # 出生高度统一锚在 **ruby 盒中心-底部二分之一处**（主文字顶
+            # 上方 ≈0.68~0.90 box_h 窄随机带，窄到 ruby 盒下半部——出生
+            # 点比初版更高且更齐）；下沉 = 匀速（终端速度感，eased=线性）
+            # + 宽幅低频摇摆 + 慢自转；**尺寸随播放由大变小**（近大远小
+            # 的透视感，1.05→0.65 线性递减）。sweep>0 飘入、sweep<0 飘散
+            #（终点向右，同花瓣口径）、sweep==0 唱字飘动。位置偏移全部
+            # box 比例。镜像 d2d_fx.cpp snow 分支。
             u1 = fx_unit_hash(seed + i, 1)
             u2 = fx_unit_hash(seed + i, 2)
             u3 = fx_unit_hash(seed + i, 3)
@@ -1535,28 +1547,29 @@ def burst_particles_at(
                 math.sin((u2 + p * (0.35 + 0.45 * u5)) * 2.0 * math.pi)
                 * size * (0.75 + 0.65 * u4)
             )
-            size_i = size * (0.70 + 0.50 * u4)
+            size_i = size * (0.70 + 0.50 * u4) * (1.05 - 0.40 * p)
             spin = (
                 u3 * 360.0
                 + p * (80.0 + 140.0 * u5) * (1.0 if u4 >= 0.5 else -1.0)
             )
+            # 出生锚：ruby 盒中心-底部二分之一处（字形顶 -0.5 之上）。
+            birth_y = -(0.68 + 0.22 * u2) * box_h
             eased = p  # 匀速下沉（雪的终端速度感）
             if sweep > 0:
-                # 雪花飘入：自字形顶上方匀速缓降进字框。
+                # 雪花飘入：自 ruby 锚匀速缓降进字框。
                 land_x = (u1 - 0.5) * box_w * 0.85
                 land_y = (u4 - 0.5) * box_h * 0.55
                 start_x = land_x + (u5 - 0.5) * box_w * 0.6
-                start_y = -(0.60 + 0.30 * u2) * box_h
                 out.append(ParticleDraw(
                     origin_x + start_x + (land_x - start_x) * eased + sway,
-                    origin_y + start_y + (land_y - start_y) * eased,
+                    origin_y + birth_y + (land_y - birth_y) * eased,
                     spin,
-                    size_i * (0.85 + 0.15 * math.sin(math.pi * p)),
+                    size_i,
                     min(p * 4.0, 1.0) * (1.0 - p) * (1.0 - p * 0.4),
                 ))
             elif sweep < 0:
-                # 雪花飘散：随机摇摆、终点向右缓漂（幅度小于花瓣），
-                # 下探行间隙淡出。
+                # 雪花飘散：自字框内随机点起落（出生即字面处，退场语义），
+                # 随机摇摆、终点向右缓漂、下探行间隙淡出。
                 start_x = (u1 - 0.5) * box_w * 0.85
                 end_x = start_x + (0.35 + 0.6 * u5) * box_w
                 start_y = (u4 - 0.5) * box_h * 0.55
@@ -1564,17 +1577,18 @@ def burst_particles_at(
                     origin_x + start_x + (end_x - start_x) * eased + sway,
                     origin_y + start_y + (0.50 + 0.30 * u2) * box_h * eased,
                     spin,
-                    size_i * (0.90 + 0.10 * (1.0 - p)),
+                    size_i,
                     (1.0 - p) * (1.0 - p * 0.5),
                 ))
             else:
-                # 雪花飘动：字框上半出生、轻摆缓沉，sin 包络淡入淡出。
+                # 雪花飘动：同样自 ruby 锚出生，匀速缓沉穿过字框，
+                # sin 包络淡入淡出。
+                land_y = (u4 - 0.5) * box_h * 0.6
                 out.append(ParticleDraw(
                     origin_x + (u1 - 0.5) * box_w * 0.7 + sway,
-                    origin_y - (0.25 + 0.30 * u4) * box_h
-                    + (0.40 + 0.30 * u2) * box_h * eased,
+                    origin_y + birth_y + (land_y - birth_y) * eased,
                     spin,
-                    size_i * (0.85 + 0.15 * math.sin(math.pi * p)),
+                    size_i,
                     min(p * 4.0, 1.0) * math.sin(math.pi * p),
                 ))
     return out
