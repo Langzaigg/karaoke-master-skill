@@ -2527,19 +2527,23 @@ def test_snow_trajectory_windows_and_bounds():
         if sweep < 0:
             # 飘散终点向右：整簇随时间右移（摇摆是振荡项，按簇和判向）。
             assert sum(s.x for s in late) > sum(s.x for s in early)
-        else:
-            # ruby 锚出生：早期整簇都在字形顶（-0.5 box_h）之上。
-            top = burst_particles_at(burst, 150, 0.0, 0.0, 120.0, 100.0)
-            assert top and max(s.y for s in top) < -50.0
+        # ruby 锚出生：三档（含退场——雪统一从天上落到地上，2026-10
+        # 用户口径：不考虑与字面的连续性）早期整簇都在字形顶之上
+        #（-0.5 box_h；退场行程更长，阈值放宽到 -0.45）。
+        top = burst_particles_at(burst, 150, 0.0, 0.0, 120.0, 100.0)
+        assert top and max(s.y for s in top) < -45.0
         for states in (early, late):
             for state in states:
                 assert 0.0 < state.alpha <= 1.0
                 assert state.size_px > 0.0
                 if sweep < 0:
-                    assert -70.0 <= state.x <= 190.0
+                    assert -80.0 <= state.x <= 200.0
                 else:
                     assert abs(state.x) <= 140.0  # 字框 + 宽幅摇摆余量
                 assert -95.0 <= state.y <= 120.0
+        if sweep > 0:
+            # 飘入落到**字底部**：晚期整簇已沉过行中心（+0.2 box_h）。
+            assert min(s.y for s in late) > -20.0
 
 
 def test_snow_sprite_contract():

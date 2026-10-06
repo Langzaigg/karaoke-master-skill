@@ -1556,9 +1556,10 @@ def burst_particles_at(
             birth_y = -(0.68 + 0.22 * u2) * box_h
             eased = p  # 匀速下沉（雪的终端速度感）
             if sweep > 0:
-                # 雪花飘入：自 ruby 锚匀速缓降进字框。
+                # 雪花飘入：自 ruby 锚一路落到**字底部**（2026-10 用户
+                # 口径：雪从天上落到地上，不落在字中间）。
                 land_x = (u1 - 0.5) * box_w * 0.85
-                land_y = (u4 - 0.5) * box_h * 0.55
+                land_y = (0.35 + 0.20 * u4) * box_h
                 start_x = land_x + (u5 - 0.5) * box_w * 0.6
                 out.append(ParticleDraw(
                     origin_x + start_x + (land_x - start_x) * eased + sway,
@@ -1568,14 +1569,16 @@ def burst_particles_at(
                     min(p * 4.0, 1.0) * (1.0 - p) * (1.0 - p * 0.4),
                 ))
             elif sweep < 0:
-                # 雪花飘散：自字框内随机点起落（出生即字面处，退场语义），
-                # 随机摇摆、终点向右缓漂、下探行间隙淡出。
-                start_x = (u1 - 0.5) * box_w * 0.85
-                end_x = start_x + (0.35 + 0.6 * u5) * box_w
-                start_y = (u4 - 0.5) * box_h * 0.55
+                # 雪花飘散：同样**自 ruby 锚出生落到字底部**（2026-10
+                # 用户口径：不考虑与字面的连续性——雪就是从天上落到地上；
+                # 不再从字面中带剥落），横向随机摇摆、终点向右缓漂。
+                land_x = (u1 - 0.5) * box_w * 0.85
+                end_x = land_x + (0.35 + 0.6 * u5) * box_w
+                land_y = (0.45 + 0.30 * u2) * box_h
+                start_x = land_x + (u5 - 0.5) * box_w * 0.5
                 out.append(ParticleDraw(
                     origin_x + start_x + (end_x - start_x) * eased + sway,
-                    origin_y + start_y + (0.50 + 0.30 * u2) * box_h * eased,
+                    origin_y + birth_y + (land_y - birth_y) * eased,
                     spin,
                     size_i,
                     (1.0 - p) * (1.0 - p * 0.5),

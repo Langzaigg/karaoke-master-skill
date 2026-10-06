@@ -543,9 +543,10 @@ std::vector<FxParticle> burstParticlesAt(
             const float birthY = -(0.68f + 0.22f * u2) * boxH;
             const float eased = p;  // 匀速下沉（雪的终端速度感）
             if (burst.sweep > 0) {
-                // 雪花飘入：自 ruby 锚匀速缓降进字框。
+                // 雪花飘入：自 ruby 锚一路落到字底部（2026-10 用户口径：
+                // 雪从天上落到地上，不落在字中间）。
                 const float landX = (u1 - 0.5f) * boxW * 0.85f;
-                const float landY = (u4 - 0.5f) * boxH * 0.55f;
+                const float landY = (0.35f + 0.20f * u4) * boxH;
                 const float startX = landX + (u5 - 0.5f) * boxW * 0.6f;
                 out.push_back(FxParticle{
                     originX + startX + (landX - startX) * eased + sway,
@@ -555,15 +556,15 @@ std::vector<FxParticle> burstParticlesAt(
                     std::min(p * 4.0f, 1.0f) * (1.0f - p) * (1.0f - p * 0.4f),
                 });
             } else if (burst.sweep < 0) {
-                // 雪花飘散：自字框内随机点起落，随机摇摆、终点向右缓漂，
-                // 下探行间隙淡出。
-                const float startX = (u1 - 0.5f) * boxW * 0.85f;
-                const float endX = startX + (0.35f + 0.6f * u5) * boxW;
-                const float startY = (u4 - 0.5f) * boxH * 0.55f;
+                // 雪花飘散：同样自 ruby 锚出生落到字底部（不考虑与字面
+                // 的连续性——雪从天上落到地上），横向随机摇摆、终点向右。
+                const float landX = (u1 - 0.5f) * boxW * 0.85f;
+                const float endX = landX + (0.35f + 0.6f * u5) * boxW;
+                const float landY = (0.45f + 0.30f * u2) * boxH;
+                const float startX = landX + (u5 - 0.5f) * boxW * 0.5f;
                 out.push_back(FxParticle{
                     originX + startX + (endX - startX) * eased + sway,
-                    originY + startY
-                        + (0.50f + 0.30f * u2) * boxH * eased,
+                    originY + birthY + (landY - birthY) * eased,
                     spin,
                     sizeI,
                     (1.0f - p) * (1.0f - p * 0.5f),
