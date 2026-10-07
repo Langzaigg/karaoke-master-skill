@@ -1446,3 +1446,55 @@ def test_sug_keeps_trailing_space_with_pause_release_ts_only() -> None:
 
     assert [ch.text for ch in line.chars] == ["あ", " "]
     assert line.end_ms == 3000
+
+
+def test_sug_decomposed_dakuten_merges_into_base_cell() -> None:
+    main = Singer(
+        id="main",
+        name="主唱",
+        color="#ff0000",
+        is_default=True,
+        backend_number=1,
+    )
+    te = Character(
+        char="テ",
+        ruby=Ruby(parts=[RubyPart("て")]),
+        check_count=1,
+        timestamps=[1000],
+        singer_id=main.id,
+    )
+    dakuten = Character(
+        char="\u3099",
+        check_count=1,
+        timestamps=[1300],
+        singer_id=main.id,
+    )
+    ko = Character(
+        char="こ",
+        ruby=Ruby(parts=[RubyPart("こ")]),
+        check_count=1,
+        timestamps=[1800],
+        sentence_end_ts=2200,
+        is_sentence_end=True,
+        is_line_end=True,
+        singer_id=main.id,
+    )
+    project = Project(
+        singers=[main],
+        sentences=[Sentence(singer_id=main.id, characters=[te, dakuten, ko])],
+        audio_duration_ms=2500,
+    )
+
+    track = timing_track_from_sug_project(project)
+
+    line = track.lines[0]
+    # 分解形浊点并入基字并 NFC 组合：不再独立成格撑出空隙（issue #14）。
+    assert [ch.text for ch in line.chars] == ["デ", "こ"]
+    assert [ch.start_ms for ch in line.chars] == [1000, 1800]
+    assert line.end_ms == 2200
+    # こ 上的注音目标随合并从下标 [2,3) 平移到 [1,2)，基字注音仍在 [0,1)。
+    targets = sorted(
+        (r.target_char_start, r.target_char_end) for r in track.rubies
+    )
+    assert targets == [(0, 1), (1, 2)]
+    assert all(r.kanji in {"テ", "こ"} for r in track.rubies)

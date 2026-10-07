@@ -17,6 +17,7 @@ from krok_helper.subtitle_render.domain.models import (
     Style,
     TitleOverlay,
     title_fallback_layout,
+    title_line_units,
 )
 
 
@@ -209,11 +210,13 @@ def resolve_title_text(title: TitleOverlay, track: TimingTrack) -> str:
 
     任意标签占位符（``{title}`` / ``{artist}`` / 自定义 ``@Key`` → ``{Key}``）
     都按 :func:`title_available_tags` 的大小写不敏感查表替换；未知占位符
-    原样保留。
+    原样保留。返回值按 :func:`title_line_units` 组合规范化（テ+゙→デ，
+    issue #14）：占位符替换进来的元数据同样可能带分解形浊点，Painter 与
+    GPU 两条后端都以这里的输出为对位基。
     """
     template = title.text_template or ""
     if "{" not in template:
-        return template.strip("\n")
+        return _normalize_title_lines(template)
     lookup = {name.lower(): value for name, value in title_available_tags(track)}
     # 具名字段即使没值也按「已知但为空」替换成空串（沿用旧行为：缺 artist 时
     # ``{title} / {artist}`` 清成 ``曲名``）；只有文件里不存在的未知占位符才
@@ -231,9 +234,14 @@ def resolve_title_text(title: TitleOverlay, track: TimingTrack) -> str:
         return lookup.get(match.group(1).strip().lower(), match.group(0))
 
     text = _PLACEHOLDER_RE.sub(_substitute, template)
+    return _normalize_title_lines(text)
+
+
+def _normalize_title_lines(text: str) -> str:
+    """逐行组合规范化（单元格拼接）并清理孤儿分隔符 / 首尾空行。"""
     lines = [
-        raw.strip().strip(_TITLE_SEPARATOR_CHARS).strip()
-        for raw in text.split("\n")
+        "".join(title_line_units(raw.strip().strip(_TITLE_SEPARATOR_CHARS).strip()))
+        for raw in str(text).split("\n")
     ]
     return "\n".join(lines).strip("\n")
 

@@ -1229,13 +1229,25 @@ krok::subtitle::native::RenderScene gpuSceneFromConfig(const RenderConfig &confi
                     });
                 }
             }
-            for (int charIndex = 0; charIndex < row.size(); ++charIndex) {
-                const QString roleLabel = charIndex < roleLabels.size()
-                    ? roleLabels.at(charIndex).toString()
+            // Combining marks (decomposed dakuten etc.) join the preceding
+            // base character: the Python side sends role labels and inline
+            // guide keys on the same unit basis (title_line_units), and each
+            // unit must be one TextChar so both backends lay out identically.
+            for (int charIndex = 0, unitIndex = 0; charIndex < row.size();
+                 ++unitIndex) {
+                QString cell(row.at(charIndex));
+                ++charIndex;
+                while (charIndex < row.size()
+                       && row.at(charIndex).isMark()) {
+                    cell.append(row.at(charIndex));
+                    ++charIndex;
+                }
+                const QString roleLabel = unitIndex < roleLabels.size()
+                    ? roleLabels.at(unitIndex).toString()
                     : QString{};
                 const int styleIndex = titleRoleStyleIndices.value(roleLabel, -1);
                 TextChar titleChar{
-                    QString(row.at(charIndex)).toStdWString(),
+                    cell.toStdWString(),
                     1000000000,
                     1000000001,
                     styleIndex,
@@ -1245,7 +1257,7 @@ krok::subtitle::native::RenderScene gpuSceneFromConfig(const RenderConfig &confi
                 // 行内图片替换：与歌词 render line 同构——原字符槽位换成
                 // \uFFFC 虚拟字符 + 导唱符，角色沿用被替换字符自己的标签。
                 const auto inlineGuide = inlineGuides.find(
-                    std::make_pair(rowIndex, charIndex)
+                    std::make_pair(rowIndex, unitIndex)
                 );
                 if (inlineGuide != inlineGuides.end()) {
                     titleChar.text = std::wstring(L"\uFFFC");

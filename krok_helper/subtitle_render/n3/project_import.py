@@ -44,6 +44,7 @@ from __future__ import annotations
 
 import json
 import re
+import unicodedata
 import zipfile
 from copy import deepcopy
 from dataclasses import dataclass, fields as dataclass_fields, replace
@@ -1468,7 +1469,11 @@ def _raw_n3_non_ruby_text(line: dict) -> str:
         for char in _list(line.get("LyricsCharInfos"))
         if not _dict(char).get("IsRuby")
     ]
-    return "".join(str(char.get("Char") or "") for char in chars)
+    # NFC 与本模块解析行（组合浊点已合成 デ 等）的码点口径一致：
+    # emoji 触发词按拼接串 find 定位，书写形式不同会逐字漂移。
+    return unicodedata.normalize(
+        "NFC", "".join(str(char.get("Char") or "") for char in chars)
+    )
 
 
 def _is_synthetic_emoji_tag_char(text: str) -> bool:
@@ -1586,17 +1591,23 @@ def _animation_changes(
 
 def _n3_line_key_text(line: dict) -> str:
     """N3 行的对齐键：去 ruby、去 ``【…】`` 标签段后的可见正文。"""
-    return "".join(
-        str(char.get("Char") or "") for char in _stripped_n3_chars(line)
+    return unicodedata.normalize(
+        "NFC",
+        "".join(
+            str(char.get("Char") or "") for char in _stripped_n3_chars(line)
+        ),
     )
 
 
 def _our_line_key_text(line: TimingLine) -> str:
     """解析行的对齐键：去行内 emoji 头像插入的合成标签字符。"""
-    return "".join(
-        char.text
-        for char in line.chars
-        if not _is_synthetic_emoji_tag_char(char.text)
+    return unicodedata.normalize(
+        "NFC",
+        "".join(
+            char.text
+            for char in line.chars
+            if not _is_synthetic_emoji_tag_char(char.text)
+        ),
     )
 
 

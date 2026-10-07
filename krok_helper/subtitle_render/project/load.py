@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import unicodedata
 from copy import deepcopy
 from dataclasses import dataclass, replace
 from pathlib import Path
@@ -320,6 +321,25 @@ def _kept_singer_tag_positions(line: TimingLine) -> set[int]:
     return positions
 
 
+def _nfd_expanded_role_targets(
+    line: "TimingLine", label_count: int
+) -> Optional[list[tuple[int, int]]]:
+    """旧「按码点」标签序列对新单元格行的 ``(格下标, 标签下标)`` 对位。
+
+    仅当标签数多于当前字符数、且恰好等于逐格 NFD 码点数之和时成立——
+    这是「组合记号合并进基字」升级路径的特征指纹，普通长度不匹配不会
+    误触发。每格取其展开段首码点位置的标签。
+    """
+    if label_count <= len(line.chars):
+        return None
+    pairs: list[tuple[int, int]] = []
+    consumed = 0
+    for cell_index, char in enumerate(line.chars):
+        pairs.append((cell_index, consumed))
+        consumed += len(unicodedata.normalize("NFD", char.text))
+    return pairs if consumed == label_count else None
+
+
 def _apply_char_role_labels(track: TimingTrack, payload: object) -> bool:
     if not isinstance(payload, list):
         return False
@@ -346,6 +366,19 @@ def _apply_char_role_labels(track: TimingTrack, payload: object) -> bool:
             # 中间版本已固化的漂移行：跳过回放，保留源解析角色（下次存盘即修复）。
             continue
         else:
+            # 组合记号规范化之前的存量工程（SUG 源按码点存字符，テ+゙ 是两格）：
+            # 新解析把浊点并进基字后行变短。标签数恰好等于各格 NFD 码点数之和
+            # 时按展开量对位，每格取首码点的标签（角色边界切在 mora 中间没有
+            # 意义）；对不上则回落按位 zip（多余标签静默丢弃的历史行为）。
+            expanded = _nfd_expanded_role_targets(line, len(labels))
+            if expanded is not None:
+                for cell_index, label_index in expanded:
+                    char = line.chars[cell_index]
+                    new_label = str(labels[label_index]) if labels[label_index] else None
+                    if char.role_label != new_label:
+                        char.role_label = new_label
+                        changed = True
+                continue
             targets = list(range(len(line.chars)))
         for index, label in zip(targets, labels):
             char = line.chars[index]

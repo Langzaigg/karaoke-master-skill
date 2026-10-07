@@ -115,6 +115,7 @@ from krok_helper.subtitle_render.domain.models import (
     normalize_title_guide_symbols,
     layout_capacity,
     layout_display_name,
+    title_line_units,
 )
 from krok_helper.subtitle_render.frontend.widgets.theme import palette, themed
 
@@ -2090,8 +2091,8 @@ class LyricsPanel(DropPanel):
         lines = [
             TimingLine(
                 chars=[
-                    TimingChar(text=char, start_ms=0, role_label=labels[row][index])
-                    for index, char in enumerate(text)
+                    TimingChar(text=unit, start_ms=0, role_label=labels[row][index])
+                    for index, unit in enumerate(title_line_units(text))
                 ],
                 end_ms=0,
                 layout_index=int(title.layout_index or 0),

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import unicodedata
 from dataclasses import dataclass, field, replace
 from typing import Literal, Optional
 
@@ -721,6 +722,132 @@ def normalize_reversed_wipe_lines(track: "TimingTrack") -> None:
                 ch.pause_release_ms = mirror(int(ch.pause_release_ms))
         line.end_ms = axis_high
         line.wipe_reverse = True
+
+
+def _is_combining_lead(text: str) -> bool:
+    """文本是否以组合记号开头（需要并入前一个字符单元格）。"""
+    return bool(text) and unicodedata.category(text[0]) in {"Mn", "Mc", "Me"}
+
+
+def normalize_ruby_annotation_text(ruby: RubyAnnotation) -> None:
+    """对注音字段做 NFC 组合，与正文组合后的单元格保持同一书写形式。
+
+    ``reading_parts`` 的时间戳边界不可移动：逐 part 组合后按拼接结果重写
+    ``reading``，跨边界的分解序列（part 尾基字 + part 首浊点）在拼接串里
+    保持分解，``len(parts) == len(reading_part_ms) + 1`` 与
+    ``"".join(parts) == reading`` 两条一致性校验仍然成立。
+    """
+    kanji = unicodedata.normalize("NFC", ruby.kanji)
+    if ruby.reading_parts:
+        parts = [unicodedata.normalize("NFC", part) for part in ruby.reading_parts]
+        # reading 一律取拼接结果：NFC(reading) 会跨 part 边界组合而拼接不会，
+        # 只有拼接口径能保住 ``"".join(parts) == reading`` 的一致性校验。
+        reading = "".join(parts)
+    else:
+        parts = list(ruby.reading_parts)
+        reading = unicodedata.normalize("NFC", ruby.reading)
+    if (kanji, reading, parts) != (ruby.kanji, ruby.reading, ruby.reading_parts):
+        ruby.kanji = kanji
+        ruby.reading = reading
+        ruby.reading_parts = parts
+
+
+def _normalize_line_combining_chars(line: TimingLine) -> tuple[list[int], set[int]]:
+    """行内把组合记号单元格并入基字并做 NFC，返回 ``(旧下标→新单元格, 被吸收集)``。
+
+    日文歌词常见「テ + U+3099」分解形浊点：逐字排版把组合浊点当独立
+    单元格测量，孤立浊点的墨迹盒按自身极小 advance 放大后比全角假名还
+    宽，产生大片空隙还吃一份字间距（issue #14）。合并到基字单元格后，
+    对合并文本做 NFC 规范组合（テ+゙→デ、は+゚→ぱ），与直接输入合成形的
+    排版完全一致；无合成形的组合（な+゙ 等）保持分解但同格渲染。
+
+    被并入的单元格携带的行末语义（pause_release / explicit_end）与
+    checkpoint 移交基字（仅填补基字没有的部分）；起始时间以基字为准。
+    """
+    original = list(line.chars)
+    cell_of: list[int] = []
+    removed: set[int] = set()
+    kept: list[TimingChar] = []
+    for old_index, ch in enumerate(original):
+        text = unicodedata.normalize("NFC", ch.text)
+        if kept and _is_combining_lead(text):
+            base = kept[-1]
+            base.text = unicodedata.normalize("NFC", base.text + text)
+            if base.pause_release_ms is None and ch.pause_release_ms is not None:
+                base.pause_release_ms = ch.pause_release_ms
+            if not base.explicit_end and ch.explicit_end:
+                base.explicit_end = ch.explicit_end
+            if ch.checkpoint_ms:
+                merged_checkpoints = sorted(
+                    set((base.checkpoint_ms or [])) | set(ch.checkpoint_ms)
+                )
+                base.checkpoint_ms = merged_checkpoints or None
+            removed.add(old_index)
+            cell_of.append(len(kept) - 1)
+            continue
+        if text != ch.text:
+            ch.text = text
+        kept.append(ch)
+        cell_of.append(len(kept) - 1)
+    if removed:
+        line.chars[:] = kept
+        line.inline_guide_symbols = {
+            cell_of[index]: symbol
+            for index, symbol in sorted(line.inline_guide_symbols.items())
+            if 0 <= index < len(cell_of)
+        }
+        _shift_span_fields_after_merge(original, removed)
+    return cell_of, removed
+
+
+def _shift_span_fields_after_merge(original: list[TimingChar], removed: set[int]) -> None:
+    """共享时间块的 ``span_index`` / ``span_count`` 随合并收缩同步平移。"""
+    span_members: dict[tuple[Optional[int], Optional[int]], list[int]] = {}
+    for old_index, ch in enumerate(original):
+        if ch.source_span_start_ms is None or ch.source_span_end_ms is None:
+            continue
+        key = (ch.source_span_start_ms, ch.source_span_end_ms)
+        span_members.setdefault(key, []).append(old_index)
+    for members in span_members.values():
+        dropped = sorted(index for index in members if index in removed)
+        if not dropped:
+            continue
+        for index in members:
+            if index in removed:
+                continue
+            ch = original[index]
+            ch.source_span_index -= sum(1 for d in dropped if d < index)
+            ch.source_span_count -= len(dropped)
+
+
+def normalize_combining_chars_in_lines(lines: list[TimingLine]) -> None:
+    """逐行合并组合记号（调用方尚未构建注音，无 target 下标需要平移）。"""
+    for line in lines:
+        if line.chars:
+            _normalize_line_combining_chars(line)
+
+
+def normalize_combining_chars(track: TimingTrack) -> None:
+    """合并组合记号并平移注音目标下标，注音字段一并 NFC（见行级函数文档）。"""
+    for line_index, line in enumerate(track.lines):
+        if not line.chars:
+            continue
+        cell_of, removed = _normalize_line_combining_chars(line)
+        if not removed:
+            continue
+        for ruby in track.rubies:
+            if ruby.target_line_index != line_index:
+                continue
+            if ruby.target_char_start is None or ruby.target_char_end is None:
+                continue
+            start = int(ruby.target_char_start)
+            end = int(ruby.target_char_end)
+            if not (0 <= start < len(cell_of) and start < end <= len(cell_of)):
+                continue
+            ruby.target_char_start = cell_of[start]
+            ruby.target_char_end = cell_of[end - 1] + 1
+    for ruby in track.rubies:
+        normalize_ruby_annotation_text(ruby)
 
 
 def apply_head_offset(track: "TimingTrack") -> None:

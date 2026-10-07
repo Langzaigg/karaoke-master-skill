@@ -17,6 +17,7 @@
 
 from __future__ import annotations
 
+import unicodedata
 from copy import deepcopy
 from dataclasses import dataclass, field, fields, replace
 from difflib import SequenceMatcher
@@ -3312,6 +3313,31 @@ def title_overlay_from_dict(payload: object) -> Optional[TitleOverlay]:
     )
 
 
+def title_line_units(line: str) -> list[str]:
+    """把标题一行切成渲染单元格：组合记号并入基字并做 NFC 组合。
+
+    与轨道加载入口的 ``normalize_combining_chars`` 同一语义（issue #14）：
+    分解形浊点（テ+゙）单独成格会在逐字排版里撑出比全角假名还宽的空隙。
+    标题没有逐字计时，单元格只在渲染 / 逐字编辑时枚举，因此不改动存储的
+    ``text_template``，各消费点按本函数切分。可组合序列组合成合成形
+    （デ），无合成形的组合（な+゙）保持分解但同格渲染。
+    """
+    return _title_unit_index_map(line)[0]
+
+
+def _title_unit_index_map(line: str) -> tuple[list[str], list[int]]:
+    """返回 ``(单元格序列, 码点→单元格下标映射)``；见 :func:`title_line_units`。"""
+    units: list[str] = []
+    index_map: list[int] = []
+    for char in str(line):
+        if units and unicodedata.category(char) in {"Mn", "Mc", "Me"}:
+            units[-1] += char
+        else:
+            units.append(char)
+        index_map.append(len(units) - 1)
+    return [unicodedata.normalize("NFC", unit) for unit in units], index_map
+
+
 def title_row_role(values: object) -> Optional[str]:
     """整行同一个角色时返回该角色名，否则 ``None``（默认或逐字符混排）。"""
     if not isinstance(values, (list, tuple)) or not values:
@@ -3327,27 +3353,49 @@ def title_row_role(values: object) -> Optional[str]:
 def normalize_title_char_role_labels(
     text: str, payload: object
 ) -> list[list[Optional[str]]]:
-    """把持久化标题标签规范成与当前逐行文字严格等长的矩阵。
+    """把持久化标题标签规范成与当前逐行文字严格等长的单元格矩阵。
 
     整行同一个角色的行按「整行角色」处理：这种行与字符数无关，因此
     ``{title}`` / ``{artist}`` 展开成元数据、或标题文字改长改短之后，角色
     依然覆盖整行；只有逐字符混排的行才需要标签与文字严格对位。
+
+    对位基是 :func:`title_line_units` 的渲染单元格。存量数据按码点保存
+    （组合记号规范化之前）：标签数等于码点数时每格取首码点位置的标签，
+    与新基无缝衔接。
     """
     raw_rows = payload if isinstance(payload, list) else []
     normalized: list[list[Optional[str]]] = []
     for row_index, line in enumerate(str(text).split("\n")):
+        units, index_map = _title_unit_index_map(line)
         raw = raw_rows[row_index] if row_index < len(raw_rows) else []
         values = raw if isinstance(raw, (list, tuple)) else []
         row_role = title_row_role(values)
         if row_role is not None:
-            normalized.append([row_role] * len(line))
+            normalized.append([row_role] * len(units))
             continue
+        labels: list[Optional[str]] = []
+        if len(values) == len(index_map) and len(values) != len(units):
+            # 旧码点基：组合记号并入基字后行变短，每格取首码点位置的标签。
+            first_positions: dict[int, int] = {}
+            for position, unit_index in enumerate(index_map):
+                first_positions.setdefault(unit_index, position)
+            for unit_index in range(len(units)):
+                position = first_positions.get(unit_index)
+                value = (
+                    values[position]
+                    if position is not None and position < len(values)
+                    else None
+                )
+                labels.append(str(value).strip() or None if value else None)
+        else:
+            # 单元格基直接对位；长度不齐时按位截断 / 补 None（历史行为）。
+            for unit_index in range(len(units)):
+                value = values[unit_index] if unit_index < len(values) else None
+                labels.append(str(value).strip() or None if value else None)
         normalized.append(
             [
-                (str(values[index]).strip() or None)
-                if index < len(values) and values[index]
-                else None
-                for index in range(len(line))
+                labels[index] if index < len(labels) else None
+                for index in range(len(units))
             ]
         )
     return normalized
@@ -3482,7 +3530,7 @@ def assign_role_to_title_rows(
     )
     changed = False
     for row in valid_rows:
-        new_values = [label] * len(lines[row])
+        new_values = [label] * len(title_line_units(lines[row]))
         if labels[row] != new_values:
             labels[row] = new_values
             changed = True
@@ -3500,37 +3548,50 @@ def migrate_title_char_role_labels(
     old_labels: object,
     new_text: str,
 ) -> list[list[Optional[str]]]:
-    """按字符差异把标题角色迁移到新文字；新增/替换字符回到标题默认。"""
-    old_text = str(old_text)
-    new_text = str(new_text)
-    normalized = normalize_title_char_role_labels(old_text, old_labels)
-    flat_old_labels: list[Optional[str]] = []
-    for row_index, line in enumerate(old_text.split("\n")):
-        flat_old_labels.extend(normalized[row_index])
-        if row_index + 1 < len(old_text.split("\n")):
-            flat_old_labels.append(None)
+    """按单元格差异把标题角色迁移到新文字；新增/替换字符回到标题默认。
 
-    migrated_flat: list[Optional[str]] = [None] * len(new_text)
-    matcher = SequenceMatcher(a=old_text, b=new_text, autojunk=False)
+    对位基是 :func:`title_line_units` 的渲染单元格（组合记号并入基字），
+    与渲染 / 编辑器的枚举同基；换行作为分隔符参与扁平对位。
+    """
+    old_lines = str(old_text).split("\n")
+    new_lines = str(new_text).split("\n")
+    normalized = normalize_title_char_role_labels(old_text, old_labels)
+
+    def _flatten(lines: list[str]) -> tuple[list[str], list[Optional[str]]]:
+        units_flat: list[str] = []
+        labels_flat: list[Optional[str]] = []
+        for row_index, line in enumerate(lines):
+            unit_count = len(title_line_units(line))
+            units_flat.extend(title_line_units(line))
+            labels_flat.extend(normalized[row_index][:unit_count] if row_index < len(normalized) else [])
+            if row_index + 1 < len(lines):
+                units_flat.append("\n")
+                labels_flat.append(None)
+        return units_flat, labels_flat
+
+    old_flat, flat_old_labels = _flatten(old_lines)
+    new_flat, _ = _flatten(new_lines)
+
+    migrated_flat: list[Optional[str]] = [None] * len(new_flat)
+    matcher = SequenceMatcher(a=old_flat, b=new_flat, autojunk=False)
     for old_start, new_start, size in matcher.get_matching_blocks():
         for offset in range(size):
             if old_start + offset < len(flat_old_labels):
                 migrated_flat[new_start + offset] = flat_old_labels[old_start + offset]
 
     rows: list[list[Optional[str]]] = [[]]
-    for index, char in enumerate(new_text):
-        if char == "\n":
+    for position, unit in enumerate(new_flat):
+        if unit == "\n":
             rows.append([])
         else:
-            rows[-1].append(migrated_flat[index])
+            rows[-1].append(migrated_flat[position])
     # 整行角色跟着整行走：改字后新增的字符也留在同一个角色里，而不是逐字符
     # 对位后把没匹配上的部分退回标题默认。
-    new_lines = new_text.split("\n")
     if len(new_lines) == len(normalized):
         for row_index, values in enumerate(normalized):
             row_role = title_row_role(values)
             if row_role is not None:
-                rows[row_index] = [row_role] * len(new_lines[row_index])
+                rows[row_index] = [row_role] * len(title_line_units(new_lines[row_index]))
     return rows
 
 
@@ -3539,7 +3600,12 @@ def normalize_title_guide_symbols(
     row_symbols: object,
     inline_symbols: object,
 ) -> tuple[dict[int, GuideSymbol], dict[tuple[int, int], GuideSymbol]]:
-    """把持久化标题导唱符裁剪到当前文字范围内（越界 / 无视觉条目丢弃）。"""
+    """把持久化标题导唱符裁剪到当前文字范围内（越界 / 无视觉条目丢弃）。
+
+    行内键按 :func:`title_line_units` 的单元格基校验。组合记号规范化之前
+    按码点保存的键在含分解浊点的行上可能越界——这些条目丢弃（可在逐字
+    编辑器重新挂载）；无组合记号的行码点基与单元格基等长，不受影响。
+    """
     lines = str(text).split("\n")
     rows: dict[int, GuideSymbol] = {}
     if isinstance(row_symbols, dict):
@@ -3550,6 +3616,7 @@ def normalize_title_guide_symbols(
                 continue
             if 0 <= row < len(lines) and guide_symbol_has_visual(symbol):
                 rows[row] = symbol
+    unit_counts = [len(title_line_units(line)) for line in lines]
     inline: dict[tuple[int, int], GuideSymbol] = {}
     if isinstance(inline_symbols, dict):
         for raw_key, symbol in inline_symbols.items():
@@ -3561,7 +3628,7 @@ def normalize_title_guide_symbols(
                 continue
             if (
                 0 <= row < len(lines)
-                and 0 <= index < len(lines[row])
+                and 0 <= index < unit_counts[row]
                 and guide_symbol_has_visual(symbol)
             ):
                 inline[(row, index)] = symbol
@@ -3574,11 +3641,12 @@ def migrate_title_guide_symbols(
     old_inline_symbols: object,
     new_text: str,
 ) -> tuple[dict[int, GuideSymbol], dict[tuple[int, int], GuideSymbol]]:
-    """标题文字编辑后按字符 / 行差异迁移导唱符。
+    """标题文字编辑后按单元格 / 行差异迁移导唱符。
 
     行前导唱符跟着整行走（行级 ``SequenceMatcher`` 等价块平移行号）；
-    行内替换沿用角色标签同一套扁平字符对位——只有在新旧文字里都存活的
-    字符保得住自己的图片，新增 / 改写字符退回普通文字。
+    行内替换沿用角色标签同一套扁平单元格对位（:func:`title_line_units`，
+    组合记号并入基字）——只有在新旧文字里都存活的字符保得住自己的图片，
+    新增 / 改写字符退回普通文字。
     """
     old_text = str(old_text)
     new_text = str(new_text)
@@ -3590,30 +3658,43 @@ def migrate_title_guide_symbols(
 
     old_lines = old_text.split("\n")
     new_lines = new_text.split("\n")
-    if old_text == new_text:
-        return rows, inline
 
-    flat_old: list[Optional[GuideSymbol]] = []
+    old_flat: list[Optional[str]] = []
     old_row_starts: list[int] = []
+    old_units_by_row: list[list[str]] = []
+    flat_old_symbols: list[Optional[GuideSymbol]] = []
     for row_index, line in enumerate(old_lines):
-        old_row_starts.append(len(flat_old))
-        for index in range(len(line)):
-            flat_old.append(inline.get((row_index, index)))
+        units = title_line_units(line)
+        old_units_by_row.append(units)
+        old_row_starts.append(len(old_flat))
+        for index in range(len(units)):
+            old_flat.append(units[index])
+            flat_old_symbols.append(inline.get((row_index, index)))
         if row_index + 1 < len(old_lines):
-            flat_old.append(None)
-    migrated_flat: list[Optional[GuideSymbol]] = [None] * len(new_text)
+            old_flat.append("\n")
+            flat_old_symbols.append(None)
+    new_units_by_row: list[list[str]] = []
+    new_flat: list[str] = []
+    for row_index, line in enumerate(new_lines):
+        units = title_line_units(line)
+        new_units_by_row.append(units)
+        new_flat.extend(units)
+        if row_index + 1 < len(new_lines):
+            new_flat.append("\n")
+
+    migrated_flat: list[Optional[GuideSymbol]] = [None] * len(new_flat)
     old_to_new: dict[int, int] = {}
-    matcher = SequenceMatcher(a=old_text, b=new_text, autojunk=False)
+    matcher = SequenceMatcher(a=old_flat, b=new_flat, autojunk=False)
     for old_start, new_start, size in matcher.get_matching_blocks():
         for offset in range(size):
-            migrated_flat[new_start + offset] = flat_old[old_start + offset]
+            migrated_flat[new_start + offset] = flat_old_symbols[old_start + offset]
             old_to_new[old_start + offset] = new_start + offset
 
     new_row_starts: list[int] = []
     position = 0
-    for line in new_lines:
+    for units in new_units_by_row:
         new_row_starts.append(position)
-        position += len(line) + 1
+        position += len(units) + 1
 
     def _new_row_for(position: int) -> Optional[int]:
         for row_index in range(len(new_row_starts) - 1, -1, -1):
@@ -3628,7 +3709,7 @@ def migrate_title_guide_symbols(
         if row_index >= len(old_row_starts):
             continue
         start = old_row_starts[row_index]
-        for old_position in range(start, start + len(old_lines[row_index])):
+        for old_position in range(start, start + len(old_units_by_row[row_index])):
             new_position = old_to_new.get(old_position)
             if new_position is None:
                 continue
@@ -3644,7 +3725,7 @@ def migrate_title_guide_symbols(
     row_index = 0
     char_index = 0
     for position, symbol in enumerate(migrated_flat):
-        if new_text[position] == "\n":
+        if new_flat[position] == "\n":
             row_index += 1
             char_index = 0
             continue

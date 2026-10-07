@@ -38,7 +38,9 @@ from krok_helper.subtitle_render.domain.timing import (
     TimingTrack,
     TimingTrackMeta,
     apply_head_offset,
+    normalize_combining_chars_in_lines,
     normalize_reversed_wipe_lines,
+    normalize_ruby_annotation_text,
 )
 from krok_helper.subtitle_render.engine.timing.timeline import compute_char_intervals
 
@@ -114,6 +116,9 @@ def parse_nicokara_lrc(
         keep_singer_label_text=keep_singer_label_text,
         emoji_triggers=_emoji_trigger_labels(tail_lines),
     )
+    # 组合浊点（テ+゙ 等）并入基字再解析注音：目标下标按合并后的单元格计算，
+    # 注音基字文本已在 _parse_ruby_entry 内做同款 NFC，两侧书写形式一致。
+    normalize_combining_chars_in_lines(timing_lines)
     meta, ruby_entries = _parse_tail(tail_lines)
     rubies = _resolve_positioned_rubies(timing_lines, ruby_entries)
     _backfill_leader_checkpoint_ms(timing_lines, rubies)
@@ -984,15 +989,18 @@ def _parse_ruby_entry(payload: str) -> Optional[_ParsedRubyEntry]:
     stored_start_ms = position_start_ms or 0
     stored_end_ms = position_end_ms if position_end_ms is not None else stored_start_ms
 
+    ruby = RubyAnnotation(
+        kanji=kanji,
+        reading=reading,
+        reading_part_ms=reading_part_ms,
+        pos_start_ms=stored_start_ms,
+        pos_end_ms=stored_end_ms,
+        reading_parts=reading_parts,
+    )
+    # 基字与正文同一书写形式（分解浊点组合成 デ 等），位置驱动的文本匹配才对得上。
+    normalize_ruby_annotation_text(ruby)
     return _ParsedRubyEntry(
-        ruby=RubyAnnotation(
-            kanji=kanji,
-            reading=reading,
-            reading_part_ms=reading_part_ms,
-            pos_start_ms=stored_start_ms,
-            pos_end_ms=stored_end_ms,
-            reading_parts=reading_parts,
-        ),
+        ruby=ruby,
         position_start_ms=position_start_ms,
         position_end_ms=position_end_ms,
     )

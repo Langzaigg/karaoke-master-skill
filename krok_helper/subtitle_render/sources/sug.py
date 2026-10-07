@@ -27,6 +27,7 @@ from krok_helper.subtitle_render.domain.timing import (
     TimingTrack,
     TimingTrackMeta,
     apply_head_offset,
+    normalize_combining_chars,
     normalize_reversed_wipe_lines,
 )
 from krok_helper.subtitle_render.sources.subtitles import (
@@ -397,6 +398,10 @@ def timing_track_from_sug_project(
         rubies=rubies,
     )
     _apply_software_compensation(track, software_compensation_ms)
+    # 组合浊点（テ+゙ 分解形）并入基字单元格：SUG 按码点存字符，分解形浊点
+    # 会独立成格、逐字排版撑出大片空隙（issue #14）。注音目标下标与
+    # @Emoji 行内符号键随合并平移，注音文本同轮 NFC。
+    normalize_combining_chars(track)
     _apply_sug_emoji_guides(track, base_dir)
     # 整行时间戳严格逆序的行在此理顺为顺序并打 wipe_reverse 标记：
     # 下游一切时间计算按普通行处理，仅走字反向。

@@ -319,3 +319,97 @@ def test_lyrics_list_title_mode_carries_guide_symbols(qapp, tmp_path):
         assert _line_content_text(line) == "A◆"
     finally:
         panel.deleteLater()
+
+
+# ---------------------------------------------------------------------------
+# 组合记号（分解形浊点 U+3099/U+309A，issue #14）：标题单元格基
+# ---------------------------------------------------------------------------
+
+
+def test_title_line_units_composes_combining_marks():
+    from krok_helper.subtitle_render.domain.models import title_line_units
+
+    assert title_line_units("テ\u3099く\u3099れ") == ["デ", "ぐ", "れ"]
+    assert title_line_units("は\u309A") == ["ぱ"]
+    # 无合成形的组合保持分解但同格渲染
+    assert title_line_units("な\u3099こ") == ["な\u3099", "こ"]
+    assert title_line_units("で") == ["で"]
+
+
+def test_title_char_role_labels_align_to_units_with_legacy_basis():
+    from krok_helper.subtitle_render.domain.models import (
+        normalize_title_char_role_labels,
+    )
+
+    # 旧码点基（3 条）→ 单元格基取首码点标签
+    assert normalize_title_char_role_labels(
+        "て\u3099こ", [["主唱", "副唱", "主唱"]]
+    ) == [["主唱", "主唱"]]
+    # 新单元格基直接对上
+    assert normalize_title_char_role_labels(
+        "て\u3099こ", [["主唱", "主唱"]]
+    ) == [["主唱", "主唱"]]
+    # 整行统一角色与字符数无关
+    assert normalize_title_char_role_labels(
+        "て\u3099こ", [["副唱"] * 3]
+    ) == [["副唱", "副唱"]]
+
+
+def test_title_guide_symbols_keys_validate_on_unit_basis():
+    symbol = _bitmap_symbol("a.png")
+    # 单元格基键原样保留；旧码点基越界键丢弃（可在逐字编辑器重挂）
+    _rows, inline = normalize_title_guide_symbols(
+        "て\u3099こ", None, {(0, 1): symbol, (0, 2): symbol}
+    )
+    assert inline == {(0, 1): symbol}
+
+
+def test_title_role_labels_migrate_on_unit_basis():
+    from krok_helper.subtitle_render.domain.models import (
+        migrate_title_char_role_labels,
+    )
+
+    # 混排角色按单元格对位：浊点格并入「で」，新字符ま回到默认
+    assert migrate_title_char_role_labels(
+        "て\u3099こ", [["主唱", "副唱"]], "て\u3099こま"
+    ) == [["主唱", "副唱", None]]
+
+
+def test_title_guide_symbols_migrate_on_unit_basis():
+    inline_a = _bitmap_symbol("a.png")
+    rows, inline = migrate_title_guide_symbols(
+        "て\u3099こ",
+        None,
+        {(0, 1): inline_a},
+        "まて\u3099こ",
+    )
+    # 前插一个字符：こ 上的图片跟到单元格下标 2
+    assert inline == {(0, 2): inline_a}
+
+
+def test_resolve_title_text_composes_metadata_combining_marks():
+    from krok_helper.subtitle_render.engine.style.title_semantics import (
+        resolve_title_text,
+    )
+
+    track = _title_track()
+    track.meta = TimingTrackMeta(title="テ\u3099スト", artist="う\u3099")
+    title = TitleOverlay(enabled=True, text_template="{title} / {artist}")
+    text = resolve_title_text(title, track)
+    assert "デ" in text and "ゔ" in text
+
+
+def test_title_layout_combining_marks_matches_precomposed():
+    track = _title_track()
+    style = _plain_style(text_template="テ\u3099く\u3099れ")
+    pre_style = _plain_style(text_template="デぐれ")
+    decomposed = layout_title_overlay(1920, 1080, track, style.title_overlays[0])
+    precomposed = layout_title_overlay(1920, 1080, track, pre_style.title_overlays[0])
+
+    assert decomposed is not None and precomposed is not None
+    dec_glyphs = [g for row in decomposed.glyph_rows for g in row]
+    pre_glyphs = [g for row in precomposed.glyph_rows for g in row]
+    assert [g.text for g in dec_glyphs] == ["デ", "ぐ", "れ"]
+    assert decomposed.widths == precomposed.widths
+    assert [g.x for g in dec_glyphs] == [g.x for g in pre_glyphs]
+    assert [g.advance for g in dec_glyphs] == [g.advance for g in pre_glyphs]

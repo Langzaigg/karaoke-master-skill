@@ -63,6 +63,7 @@ from krok_helper.subtitle_render.domain.models import (
     TitleOverlay,
     normalize_title_char_role_labels,
     normalize_title_guide_symbols,
+    title_line_units,
 )
 from krok_helper.subtitle_render.n3.font_catalog import resolve_qt_font_family
 from krok_helper.subtitle_render.domain.paint import PaintFill
@@ -390,7 +391,7 @@ def layout_title_overlay(
                 labels[row_index][char_index],
                 inline_symbols.get((row_index, char_index)),
             )
-            for char_index, char in enumerate(text_line)
+            for char_index, char in enumerate(title_line_units(text_line))
         )
         glyphs: list[TitleGlyphLayout] = []
         cursor = 0.0

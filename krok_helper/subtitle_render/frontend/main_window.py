@@ -338,6 +338,7 @@ from krok_helper.subtitle_render.domain.models import (
     rescale_scheme_font_sizes,
     style_from_dict,
     style_to_dict,
+    title_line_units,
     TRACK_TIMING_FIELDS,
 )
 from krok_helper.subtitle_render.n3.font_catalog import (
@@ -7296,7 +7297,9 @@ class SubtitleRenderWindow(QWidget):
         fixed = replace(
             title,
             text_template=resolved,
-            char_role_labels=[[None] * len(line) for line in resolved.split("\n")],
+            char_role_labels=[
+                [None] * len(title_line_units(line)) for line in resolved.split("\n")
+            ],
             guide_symbols=row_symbols,
             inline_guide_symbols=inline_symbols,
         )
@@ -8155,7 +8158,9 @@ class SubtitleRenderWindow(QWidget):
             return
         rows = self._title_label_matrix(title)
         lines = title.text_template.split("\n")
-        if not 0 <= row < len(lines) or len(labels) != len(lines[row]):
+        if not 0 <= row < len(lines) or len(labels) != len(
+            title_line_units(lines[row])
+        ):
             return
         normalized = [str(label).strip() or None if label else None for label in labels]
         if rows[row] == normalized:
@@ -8168,11 +8173,15 @@ class SubtitleRenderWindow(QWidget):
 
     @staticmethod
     def _title_label_matrix(title: TitleOverlay) -> list[list]:
-        """按当前模板文字补齐到等长的角色标签矩阵（行数不足补 None）。"""
+        """按当前模板文字补齐到等长的角色标签矩阵（行数不足补 None）。
+
+        长度基是渲染单元格（``title_line_units``）：组合记号并入基字，
+        与编辑器表格、渲染路径同基。
+        """
         rows = [list(values) for values in title.char_role_labels]
         lines = title.text_template.split("\n")
         while len(rows) < len(lines):
-            rows.append([None] * len(lines[len(rows)]))
+            rows.append([None] * len(title_line_units(lines[len(rows)])))
         return rows
 
     def _set_title_guide_char_roles(
@@ -8189,7 +8198,7 @@ class SubtitleRenderWindow(QWidget):
         if (
             not isinstance(guide_labels, list)
             or len(guide_labels) != max(int(symbol.count), 1)
-            or len(labels) != len(lines[row])
+            or len(labels) != len(title_line_units(lines[row]))
         ):
             return
         normalized_guides = [
@@ -8247,9 +8256,9 @@ class SubtitleRenderWindow(QWidget):
             ]
             new_symbol = guide_symbol_with_role_labels(symbol, normalized_guides)
         if (
-            len(labels) != len(lines[row])
+            len(labels) != len(title_line_units(lines[row]))
             or not isinstance(vector_symbols, list)
-            or len(vector_symbols) != len(lines[row])
+            or len(vector_symbols) != len(title_line_units(lines[row]))
         ):
             return
         normalized = [str(label).strip() or None if label else None for label in labels]

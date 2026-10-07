@@ -783,7 +783,9 @@ def test_combining_sequence_is_one_n3_timed_text_element():
     track = parse_nicokara_lrc("[00:01:00]か\u3099き[00:02:00]\n")
     line = track.lines[0]
 
-    assert [ch.text for ch in line.chars] == ["か\u3099", "き"]
+    # 组合序列仍是一个 N3 计时元素；加载入口现在进一步把分解形 NFC 组合
+    # 成合成形（が），与直接输入合成形的排版/走字完全一致（issue #14）。
+    assert [ch.text for ch in line.chars] == ["が", "き"]
     assert [ch.start_ms for ch in line.chars] == [1_000, 1_500]
 
 
@@ -1245,3 +1247,66 @@ def test_kept_singer_tag_keeps_avatar_index_aligned(tmp_path):
     # B 标签保留为 3 个可见字符；A 标签按头像路径插入为 1 个合成字符
     assert texts == ["【", "B", "】", "あ", "【A】", "い"]
     assert track.lines[0].inline_guide_symbols[4].kind == "bitmap"
+
+
+# ---------------------------------------------------------------------------
+# 组合浊点（分解形 U+3099 / U+309A，issue #14）
+# ---------------------------------------------------------------------------
+
+
+def test_combining_dakuten_in_same_token_composes_to_precomposed():
+    text = "[00:01:00]て\u3099[00:02:00]こ[00:02:50]\n"
+    track = parse_nicokara_lrc(text)
+
+    assert [c.text for c in track.lines[0].chars] == ["で", "こ"]
+    assert [c.start_ms for c in track.lines[0].chars] == [1000, 2000]
+
+
+def test_combining_dakuten_after_own_timestamp_merges_into_base():
+    text = "[00:01:00]て[00:01:50]\u3099[00:02:00]こ[00:02:50]\n"
+    track = parse_nicokara_lrc(text)
+    line = track.lines[0]
+
+    # 浊点自己的时间戳（1500）被并入基字：整个 mora 以基字起点演唱。
+    assert [c.text for c in line.chars] == ["で", "こ"]
+    assert [c.start_ms for c in line.chars] == [1000, 2000]
+    assert line.end_ms == 2500
+
+
+def test_combining_handakuten_composes_across_timestamp():
+    text = "[00:01:00]は[00:01:50]\u309A[00:02:00]\n"
+    track = parse_nicokara_lrc(text)
+
+    assert [c.text for c in track.lines[0].chars] == ["ぱ"]
+    assert track.lines[0].end_ms == 2000
+
+
+def test_merged_dakuten_line_layout_matches_precomposed():
+    from krok_helper.subtitle_render.engine.text.layout import build_text_layout
+
+    decomposed = parse_nicokara_lrc("[00:01:00]て[00:01:50]\u3099[00:02:00]\n")
+    precomposed = parse_nicokara_lrc("[00:01:00]で[00:02:00]\n")
+    style = Style()
+
+    merged_layout = build_text_layout(
+        decomposed.lines[0], style, x0=0, baseline_y=100, inline_styles=False
+    )
+    plain_layout = build_text_layout(
+        precomposed.lines[0], style, x0=0, baseline_y=100, inline_styles=False
+    )
+
+    assert [g.text for g in merged_layout.glyphs] == ["で"]
+    assert merged_layout.total_width == plain_layout.total_width
+
+
+def test_ruby_kanji_decomposed_form_resolves_onto_composed_cell():
+    text = (
+        "[00:01:00]て\u3099[00:02:00]\n"
+        "@Ruby1=て\u3099,で,[00:01:00],[00:02:00]\n"
+    )
+    track = parse_nicokara_lrc(text)
+
+    assert len(track.rubies) == 1
+    ruby = track.rubies[0]
+    assert ruby.kanji == "で"
+    assert (ruby.target_char_start, ruby.target_char_end) == (0, 1)

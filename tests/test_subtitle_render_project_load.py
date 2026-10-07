@@ -672,3 +672,55 @@ def test_apply_track_project_data_applies_head_overrides() -> None:
     assert track.lines[1].volume_head_override is None
     assert track.lines[0].lit_head_override is False
     assert track.lines[1].lit_head_override is None
+
+
+def test_pre_merge_project_roles_align_via_nfd_expansion() -> None:
+    """组合记号规范化之前保存的工程：SUG 源按码点存字符，テ+゙ 是两格。
+
+    新解析把浊点并进基字后行变短；标签数恰好等于逐格 NFD 码点数之和时
+    按展开量对位，角色不错位（issue #14）。
+    """
+    track = TimingTrack(
+        lines=[
+            TimingLine(
+                chars=[
+                    TimingChar(text="デ", start_ms=0),
+                    TimingChar(text="こ", start_ms=500),
+                    TimingChar(text="ろ", start_ms=900),
+                ],
+                end_ms=1200,
+            )
+        ]
+    )
+
+    apply_track_project_data(
+        track,
+        Style(),
+        {"char_role_labels": [["主唱", "副唱", "主唱", "主唱"]]},
+    )
+
+    assert [ch.role_label for ch in track.lines[0].chars] == ["主唱", "主唱", "主唱"]
+
+
+def test_role_replay_length_mismatch_without_nfd_fingerprint_keeps_zip() -> None:
+    """长度不匹配但不是合并指纹时保持旧的按位 zip 行为。"""
+    track = TimingTrack(
+        lines=[
+            TimingLine(
+                chars=[
+                    TimingChar(text="あ", start_ms=0),
+                    TimingChar(text="い", start_ms=500),
+                ],
+                end_ms=900,
+            )
+        ]
+    )
+
+    apply_track_project_data(
+        track,
+        Style(),
+        {"char_role_labels": [["主唱", "副唱", "主唱"]]},
+    )
+
+    # 3 条标签对 2 格：多余标签静默丢弃（历史行为）
+    assert [ch.role_label for ch in track.lines[0].chars] == ["主唱", "副唱"]
