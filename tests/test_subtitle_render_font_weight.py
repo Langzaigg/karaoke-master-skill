@@ -36,8 +36,15 @@ def _cleanup_application_fonts():
     from krok_helper.subtitle_render.engine.text.font_weight import (
         clear_font_weight_cache,
     )
+    from krok_helper.subtitle_render.n3.font_catalog import (
+        invalidate_n3_font_caches,
+    )
 
     clear_font_weight_cache()
+    # N3 字体目录两级缓存同样按进程字体登记快照：不清会让后续模块（如
+    # property_panel）的 font_family 解析读到污染后的目录，把显式设置的
+    # 英数字体（如 Arial）误判为「跟随主文字」。
+    invalidate_n3_font_caches()
 
 
 @pytest.mark.parametrize(
