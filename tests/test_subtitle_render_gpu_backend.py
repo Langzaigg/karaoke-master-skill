@@ -414,6 +414,25 @@ def _g1_style(**changes) -> Style:
         line_lead_in_ms=0,
         line_tail_ms=0,
     )
+    if "custom_style_schemes" not in changes:
+        # 默认「标题」方案的 UD 教科书体不在 fixture 字体集里：offscreen
+        # painter 只能替换渲染、而 sidecar 用系统真字体——两侧实际字体
+        # 不同，CPU/GPU 边界对齐必然超差。统一钉到 fixture 注册的 Meiryo。
+        schemes = dict(style.custom_style_schemes)
+        if "标题" in schemes and schemes["标题"].font_family not in (
+            "Meiryo",
+            "Times New Roman",
+            "Arial",
+            "Comic Sans MS",
+            "MS Gothic",
+            "Segoe UI Symbol",
+        ):
+            schemes["标题"] = replace(
+                schemes["标题"],
+                font_family="Meiryo",
+                font_family_latin="Meiryo",
+            )
+            style = replace(style, custom_style_schemes=schemes)
     return replace(style, **changes)
 
 
