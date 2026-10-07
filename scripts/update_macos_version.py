@@ -1,4 +1,4 @@
-"""Write macOS bundle versions derived from APP_VERSION."""
+"""Write macOS bundle versions derived from APP_VERSION and declare Chinese localization."""
 
 from __future__ import annotations
 
@@ -40,6 +40,9 @@ def update_version_metadata(plist_path: Path, version: str) -> tuple[str, str]:
         metadata = plistlib.load(stream)
     metadata["CFBundleShortVersionString"] = display_version
     metadata["CFBundleVersion"] = build_version
+    # Native file dialogs use the bundle's declared languages, not Qt translation files.
+    metadata["CFBundleDevelopmentRegion"] = "zh-Hans"
+    metadata["CFBundleLocalizations"] = ["zh-Hans"]
     with plist_path.open("wb") as stream:
         plistlib.dump(metadata, stream)
     return display_version, build_version
