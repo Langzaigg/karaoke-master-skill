@@ -2335,6 +2335,8 @@ def test_crash_recovery_restores_dirty_project(qapp, monkeypatch, tmp_path):
 
     assert win.has_pending_crash_recovery() is True
     assert win.check_crash_recovery(dialog_parent=win) is True
+    # 装配延后到恢复对话框嵌套循环退出后的主循环执行（QTimer.singleShot(0)）。
+    qapp.processEvents()
 
     assert win._style.font_size_px == 93
     assert win._project_path is None

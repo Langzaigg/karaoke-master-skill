@@ -40,6 +40,7 @@ if TYPE_CHECKING:  # 只为类型标注，运行时不引入宿主包，保持�
     from krok_helper.workflow_host import SubtitleVideoSink
 
 from PyQt6.QtCore import (
+    QEventLoop,
     QObject,
     QThread,
     QTimer,
@@ -457,6 +458,63 @@ def _tracks_window_async_refresh_supported() -> bool:
     验证后把本函数改为恒 ``True`` 即全平台异步，调用点无需再动。
     """
     return sys.platform == "win32"
+
+
+def _subtitle_prefetch_key(
+    path: Path,
+    *,
+    form: str,
+    compensation_ms: int,
+    singer_filter: Optional[frozenset[str]],
+    keep_singer_label_text: bool,
+) -> Optional[tuple]:
+    """字幕源预取缓存键；文件不可读（消失/占用）返回 ``None`` 不预取。"""
+    try:
+        stat = Path(path).stat()
+        stamp = (stat.st_mtime_ns, stat.st_size)
+    except OSError:
+        return None
+    return (
+        form,
+        subtitle_source_key(Path(path)),
+        stamp,
+        int(compensation_ms),
+        tuple(sorted(singer_filter)) if singer_filter is not None else None,
+        bool(keep_singer_label_text),
+    )
+
+
+def _trim_prefetch_map(cache: dict, limit: int = 8) -> None:
+    """预取缓存保留最近写入的 ``limit`` 条，防止长期会话无限增长。"""
+    while len(cache) > limit:
+        cache.pop(next(iter(cache)))
+
+
+class _PrefetchPending:
+    """预取进行中的占位哨兵（消费点泵事件等待其完成，GUI 保持响应）。"""
+
+
+_PREFETCH_PENDING = _PrefetchPending()
+
+
+def _await_pending_prefetch(cache: dict, key: object, timeout_s: float = 120.0) -> object:
+    """等待进行中的预取条目落定；期间泵事件保持界面响应。
+
+    返回最终条目（解析结果/异常），键消失或超时返回 ``None``（消费点回退
+    同步计算）。注意不能带 ``ExcludeUserInputEvents``：Qt6 该标志会连
+    timer 事件一起排除，QTimer 心跳/窗口刷新全部停摆，GUI 反而被判
+    「未响应」（2026-10 实测）。用户在等待段的重入由调用侧的代际校验
+    兜底。
+    """
+    deadline = time.monotonic() + timeout_s
+    while time.monotonic() < deadline:
+        if QApplication.instance() is not None:
+            QApplication.processEvents()
+        time.sleep(0.005)
+        entry = cache.get(key)
+        if entry is None or not isinstance(entry, _PrefetchPending):
+            return entry
+    return None
 
 
 #: 标题里跟着"用户习惯"走的字段。除条目名、标题文字、逐字角色、自定义
@@ -1018,6 +1076,11 @@ class SubtitleRenderWindow(QWidget):
         self._settings_store = SubtitleRenderSettingsStore(settings_provider)
         self._project_controller = SubtitleProjectController()
         self._subtitle_source_loader = SubtitleSourceLoader()
+        # 打开/恢复工程的输入预取缓存：后台线程预解析的字幕源与 ffprobe
+        # 结果，按（路径 + mtime/size + 解析参数）命中。后台写一次、GUI 读，
+        # CPython dict 单操作原子，无需加锁。
+        self._source_parse_prefetch: dict[tuple, object] = {}
+        self._probe_prefetch: dict[tuple, object] = {}
         self._n3_import_controller = N3ProjectImportController()
         self._export_job_controller = ExportJobController()
         self._export_runtime_controller = ExportRuntimeController()
@@ -2349,6 +2412,10 @@ class SubtitleRenderWindow(QWidget):
             return False
         data = loaded.data
         missing_resources = loaded.missing_resources
+        # 装配序列开始前先在后台预解析主字幕源与媒体探测（重活：.sug 解析
+        # 与 ffprobe 均为纯计算/子进程，无需 GUI 线程），装配走到消费点时
+        # 按（路径 + mtime/size + 参数）命中即免同步等待。
+        self._prefetch_project_sources(data)
         self._begin_project_generation()
         self._clear_loaded_media()
         self._apply_project_data(data, defer_assets=True)
@@ -2371,6 +2438,104 @@ class SubtitleRenderWindow(QWidget):
                 copyable=True,
             )
         return True
+
+    def _prefetch_project_sources(self, data: dict) -> None:
+        """后台预解析主字幕源并预取媒体探测结果，供装配序列命中。
+
+        打开/恢复工程的耗时主体是 ``.sug`` 解析（大工程十几秒）与 ffprobe
+        （外置进程，杀软/冷盘下秒级到几十秒级），两者都不需要 GUI 线程；
+        装配序列（字体目录、面板 UI）与预取并行，走到 :meth:`load_from_sug`
+        / :meth:`_probe` 消费点时按（路径 + mtime/size + 解析参数）命中缓存
+        即免同步等待。参数在预取与消费两次调用间一致（同一装载会话内的
+        设置不变），键含全部影响结果的参数，不会误用。
+        """
+        if not isinstance(data, dict):
+            return
+        subtitle_raw = data.get("subtitle_path")
+        subtitle_path = Path(str(subtitle_raw)) if subtitle_raw else None
+        media_paths: list[Path] = []
+        background = data.get("background")
+        if isinstance(background, dict) and background.get("path"):
+            media_paths.append(Path(str(background["path"])))
+        for key in ("video_path", "audio_path"):
+            raw = data.get(key)
+            if raw:
+                media_paths.append(Path(str(raw)))
+
+        if subtitle_path is not None:
+            suffix = subtitle_path.suffix.lower()
+            if suffix not in {".sug", ".lrc"}:
+                subtitle_path = None
+        media_paths = [p for p in media_paths if p.is_file()]
+        if subtitle_path is None and not media_paths:
+            return
+
+        compensation = self._sug_compensation_value()
+        keep_labels = self._subtitle_loading_defaults.keep_singer_label_text
+        raw_filter = data.get("subtitle_sug_axis_singer_ids")
+        singer_filter = (
+            frozenset(str(item).strip() for item in raw_filter if str(item).strip())
+            if isinstance(raw_filter, list)
+            else None
+        )
+        try:
+            ffprobe_path = self._resolve_ffprobe_path()
+        except Exception:  # noqa: BLE001 — 预取失败退回消费点同步探测
+            ffprobe_path = None
+
+        def work() -> None:
+            if subtitle_path is not None and subtitle_path.is_file():
+                key = _subtitle_prefetch_key(
+                    subtitle_path,
+                    form="sug" if subtitle_path.suffix.lower() == ".sug" else "lrc",
+                    compensation_ms=compensation,
+                    singer_filter=singer_filter,
+                    keep_singer_label_text=keep_labels,
+                )
+                if key is not None and key not in self._source_parse_prefetch:
+                    # 先占位再计算：消费点看到 PENDING 即泵事件等待，GUI 不卡。
+                    self._source_parse_prefetch[key] = _PREFETCH_PENDING
+                    try:
+                        if subtitle_path.suffix.lower() == ".sug":
+                            result: object = self._subtitle_source_loader.load_sug(
+                                subtitle_path,
+                                software_compensation_ms=compensation,
+                                singer_filter=singer_filter,
+                            )
+                        else:
+                            result = self._subtitle_source_loader.load_lrc(
+                                subtitle_path,
+                                keep_singer_label_text=keep_labels,
+                            )
+                    except Exception as exc:  # noqa: BLE001 — 异常也缓存，消费点回放
+                        result = exc
+                    self._source_parse_prefetch[key] = result
+                    _trim_prefetch_map(self._source_parse_prefetch)
+            if ffprobe_path is None:
+                return
+            for media_path in media_paths:
+                try:
+                    stat = media_path.stat()
+                    probe_key = (
+                        subtitle_source_key(media_path),
+                        stat.st_mtime_ns,
+                        stat.st_size,
+                    )
+                except OSError:
+                    continue
+                if probe_key in self._probe_prefetch:
+                    continue
+                self._probe_prefetch[probe_key] = _PREFETCH_PENDING
+                try:
+                    info: object = probe_media(ffprobe_path, media_path)
+                except Exception as exc:  # noqa: BLE001
+                    info = exc
+                self._probe_prefetch[probe_key] = info
+                _trim_prefetch_map(self._probe_prefetch)
+
+        threading.Thread(
+            target=work, name="project-open-prefetch", daemon=True
+        ).start()
 
     @staticmethod
     def _missing_project_resources(data: dict) -> list[tuple[str, Path]]:
@@ -3310,18 +3475,41 @@ class SubtitleRenderWindow(QWidget):
 
     def load_from_lrc(self, path: Path) -> Optional[TimingTrack]:
         """加载 Nicokara 逐字 LRC 文件。返回解析结果（失败返回 None 并弹错）。"""
-        try:
-            track = self._subtitle_source_loader.load_lrc(
-                path,
-                keep_singer_label_text=(
-                    self._subtitle_loading_defaults.keep_singer_label_text
-                ),
-            )
-        except Exception as exc:  # noqa: BLE001 — 暴露给用户的统一错误处理
+        keep_labels = self._subtitle_loading_defaults.keep_singer_label_text
+        prefetch_key = _subtitle_prefetch_key(
+            Path(path),
+            form="lrc",
+            compensation_ms=0,
+            singer_filter=None,
+            keep_singer_label_text=keep_labels,
+        )
+        prefetch = (
+            _await_pending_prefetch(self._source_parse_prefetch, prefetch_key)
+            if prefetch_key is not None
+            else None
+        )
+        if isinstance(prefetch, TimingTrack):
+            track = prefetch
+        elif isinstance(prefetch, Exception):
             fluent_error(
-                self, "加载字幕失败", f"无法解析字幕文件：\n{path}\n\n错误：{exc}"
+                self,
+                "加载字幕失败",
+                f"无法解析字幕文件：\n{path}\n\n错误：{prefetch}",
             )
             return None
+        else:
+            try:
+                track = self._subtitle_source_loader.load_lrc(
+                    path,
+                    keep_singer_label_text=keep_labels,
+                )
+            except Exception as exc:  # noqa: BLE001 — 暴露给用户的统一错误处理
+                fluent_error(
+                    self,
+                    "加载字幕失败",
+                    f"无法解析字幕文件：\n{path}\n\n错误：{exc}",
+                )
+                return None
         self._apply_timing_track(track, path, watch_source=True)
         return track
 
@@ -3350,11 +3538,29 @@ class SubtitleRenderWindow(QWidget):
                     persisted_filter = frozenset(
                         str(value) for value in axis_singer_ids
                     )
-                track = self._subtitle_source_loader.load_sug(
-                    path,
-                    software_compensation_ms=self._sug_compensation_value(),
+                compensation = self._sug_compensation_value()
+                prefetch_key = _subtitle_prefetch_key(
+                    Path(path),
+                    form="sug",
+                    compensation_ms=compensation,
                     singer_filter=persisted_filter,
+                    keep_singer_label_text=False,
                 )
+                prefetch = (
+                    _await_pending_prefetch(self._source_parse_prefetch, prefetch_key)
+                    if prefetch_key is not None
+                    else None
+                )
+                if isinstance(prefetch, TimingTrack):
+                    track = prefetch
+                elif isinstance(prefetch, Exception):
+                    raise prefetch
+                else:
+                    track = self._subtitle_source_loader.load_sug(
+                        path,
+                        software_compensation_ms=compensation,
+                        singer_filter=persisted_filter,
+                    )
             else:
                 axes = self._subtitle_source_loader.load_sug_axes(
                     path,
@@ -4458,6 +4664,18 @@ class SubtitleRenderWindow(QWidget):
     # ------------------------------------------------------------------ helpers
 
     def _probe(self, path: Path, label: str) -> Optional[MediaInfo]:
+        # 打开/恢复工程的预取线程可能已探测（或正在探测）同一文件：进行中
+        # 则泵事件等待完成，GUI 不因 ffprobe 子进程阻塞进入「未响应」。
+        try:
+            stat = Path(path).stat()
+            probe_key = (subtitle_source_key(Path(path)), stat.st_mtime_ns, stat.st_size)
+            cached = self._probe_prefetch.get(probe_key)
+            if isinstance(cached, _PrefetchPending):
+                cached = _await_pending_prefetch(self._probe_prefetch, probe_key)
+        except OSError:
+            cached = None
+        if isinstance(cached, MediaInfo):
+            return cached
         try:
             ffprobe_path = self._resolve_ffprobe_path()
             return probe_media(ffprobe_path, path)
@@ -9649,33 +9867,49 @@ class SubtitleRenderWindow(QWidget):
             return False
         data = loaded.data
         missing_resources = loaded.missing_resources
-        self._begin_project_generation()
-        self._clear_loaded_media()
-        self._apply_project_data(data)
-        self._project_session.adopt_project_identity(
-            path=loaded.source_project_path,
-            disk_revision=loaded.source_disk_revision,
-            missing_resources=missing_resources,
-            source_data=data,
-        )
-        self._set_project_dirty(True)
-        if missing_resources:
-            fluent_warning(
-                self,
-                "项目已恢复，但部分素材未找到",
-                "以下素材路径无效，已跳过加载：\n\n"
-                + "\n".join(
-                    f"• {label}：{path}" for label, path in missing_resources
-                ),
-                copyable=True,
+        # 装配延后到恢复对话框的嵌套事件循环退出之后（QTimer.singleShot(0)
+        # 落回主循环再执行）。本方法作为 restore 回调运行在 fluent_choice 的
+        # 嵌套循环里：就地同步装配（含 .sug 解析与 ffprobe 的十几秒级等待）
+        # 会与该循环就地处理的排队事件（自动保存、文件 watcher、SUG 侧恢复
+        # 弹窗等）重入，是「点确定后未响应」的接线雷区（2026-10 定位）。
+        # 预取线程先行解析/探测，延迟装配段大概率直接命中缓存。
+        self._prefetch_project_sources(data)
+        # 等待段泵事件允许用户输入：期间再开新工程/丢弃改动会推进代际，
+        # 过期装配按代际放弃，避免旧数据覆盖新会话。
+        assembly_generation = self._project_generation
+
+        def apply_loaded_recovery() -> None:
+            if self._project_generation != assembly_generation:
+                return
+            self._begin_project_generation()
+            self._clear_loaded_media()
+            self._apply_project_data(data)
+            self._project_session.adopt_project_identity(
+                path=loaded.source_project_path,
+                disk_revision=loaded.source_disk_revision,
+                missing_resources=missing_resources,
+                source_data=data,
             )
-        InfoBar.success(
-            title="字幕项目已恢复",
-            content="恢复内容尚未写入正式项目，请及时保存。",
-            parent=self,
-            position=InfoBarPosition.BOTTOM_RIGHT,
-            duration=5000,
-        )
+            self._set_project_dirty(True)
+            if missing_resources:
+                fluent_warning(
+                    self,
+                    "项目已恢复，但部分素材未找到",
+                    "以下素材路径无效，已跳过加载：\n\n"
+                    + "\n".join(
+                        f"• {label}：{path}" for label, path in missing_resources
+                    ),
+                    copyable=True,
+                )
+            InfoBar.success(
+                title="字幕项目已恢复",
+                content="恢复内容尚未写入正式项目，请及时保存。",
+                parent=self,
+                position=InfoBarPosition.BOTTOM_RIGHT,
+                duration=5000,
+            )
+
+        QTimer.singleShot(0, apply_loaded_recovery)
         return True
 
     @staticmethod

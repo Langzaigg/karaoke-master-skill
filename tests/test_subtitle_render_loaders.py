@@ -3185,3 +3185,104 @@ def test_preview_workspace_background_actions_reach_coordinator(qapp, monkeypatc
         ]
     finally:
         win.close()
+
+
+def test_prefetched_sug_parse_is_reused_by_loading_assembly(
+    qapp, monkeypatch, tmp_path
+):
+    """打开/恢复的预取解析结果被装载序列复用：消费点不再同步重解析。"""
+    sug = tmp_path / "song.sug"
+    _save_timing_sug(sug, [("君", 1000, 1400), ("遥", 2000, 2600)])
+    win = _make_window(qapp, monkeypatch)
+
+    win._prefetch_project_sources({"subtitle_path": str(sug)})
+    deadline = time.monotonic() + 5.0
+    while time.monotonic() < deadline and not win._source_parse_prefetch:
+        qapp.processEvents()
+        time.sleep(0.01)
+    assert win._source_parse_prefetch, "预取线程应在后台完成 .sug 解析"
+
+    # 消费点命中缓存：loader 不得再被同步调用。
+    def _unexpected_parse(*_args, **_kwargs):
+        raise AssertionError("预取命中后不应再同步解析")
+
+    monkeypatch.setattr(win._subtitle_source_loader, "load_sug", _unexpected_parse)
+    win._loading_project = True
+    try:
+        track = win.load_from_sug(sug)
+    finally:
+        win._loading_project = False
+    assert track is not None
+    assert ["".join(c.text for c in line.chars) for line in track.lines] == [
+        "君", "遥",
+    ]
+    win.close()
+    win.deleteLater()
+    qapp.processEvents()
+
+
+def test_prefetched_probe_result_short_circuits_sync_ffprobe(
+    qapp, monkeypatch, tmp_path
+):
+    """预取的 ffprobe 结果命中时 _probe 直接返回，不再起子进程。"""
+    from krok_helper.models import MediaInfo
+
+    media = tmp_path / "bg.mp4"
+    media.write_bytes(b"stub")
+    stat = media.stat()
+    win = _make_window(qapp, monkeypatch)
+    expected = MediaInfo(
+        path=media, duration=12.5, video_streams=1,
+        audio_streams=1, subtitle_streams=0,
+    )
+    win._probe_prefetch[
+        (subtitle_source_key(media), stat.st_mtime_ns, stat.st_size)
+    ] = expected
+
+    def _unexpected_probe(*_args, **_kwargs):
+        raise AssertionError("缓存命中后不应再同步探测")
+
+    monkeypatch.setattr(mw, "probe_media", _unexpected_probe)
+    assert win._probe(media, "背景视频") is expected
+    win.close()
+    win.deleteLater()
+    qapp.processEvents()
+
+
+def test_recovery_restore_defers_assembly_until_main_loop(
+    qapp, monkeypatch, tmp_path
+):
+    """恢复装配延后到嵌套循环退出后：restore 返回时未装配，主循环一拍后完成。"""
+    monkeypatch.setenv("KARAOKE_STUDIO_SETTINGS_DIR", str(tmp_path / "settings"))
+    from krok_helper.subtitle_render.project.store import (
+        RecoveryCandidate, save_recovery_project,
+    )
+
+    recovery_path = (
+        tmp_path / "settings" / "subtitle_render_recovery" / "untitled.yurika.recovery"
+    )
+    save_recovery_project(
+        recovery_path,
+        {
+            "style": style_to_dict(Style(font_size_px=77)),
+            "recovery": {
+                "created_at_unix": 2.0, "snapshot_id": 2,
+                "source_project_path": None,
+            },
+        },
+    )
+    win = _make_window(qapp, monkeypatch)
+    monkeypatch.setattr(mw, "fluent_choice", lambda *_a, **_k: 0)
+    candidate = RecoveryCandidate(
+        path=recovery_path, source_project_path=None,
+        created_at_unix=2.0, snapshot_id=2,
+    )
+
+    assert win._restore_recovery_candidate(candidate) is True
+    assert win._style.font_size_px != 77, "restore 返回时不应已完成装配（仍在嵌套循环内）"
+    qapp.processEvents()
+    assert win._style.font_size_px == 77
+    assert win._project_dirty is True
+    win.close()
+    win.deleteLater()
+    qapp.processEvents()
