@@ -14,13 +14,17 @@ unified weight resolution 逐条对应（改动任一侧必须同步另一侧）
    渲染**真实轴值插值实例**（``QFont.setVariableAxis`` 优先级高于
    setWeight/setStyleName）。轴上限之上的请求在轴端点之上继续**膨胀
    放大**（见下）；轴下限之下钳制到端点并标「越界」。
-2. **静态字体**：``E = bucket_weight(W)``（标准整百桶化）；
-   a. E 命中真实 face 字重 → 钉住该 face；
-   b. E 比可用的基 face 重（2026-10-07 用户拍板：**凡能放大皆模拟
-      放大，取消"就近"语义**）→ 基 face 取 E 之下最重的真实 face，
-      Δ = E − 基 face 字重，两后端按统一公式（字号×Δ/3000 圆形
-      膨胀轮廓）自绘加粗，UI 标「模拟」；
-   c. E 比族内最轻 face 还轻 → 渲染最轻 face（放大无法变轻）。
+2. **静态字体**（v7，2026-10-07 用户拍板：**比例严格按 v4.2.x 旧版
+   一致，并按基 face 字重平移（转化）**——NK-B@700~800 的变化比例
+   与 400 基础字体 @700~800 相同）：
+   a. E = bucket_weight(W) 命中真实 face 字重 → 钉住该 face；
+   b. E ∉ R 且 **E ≥ 600 且基 face（E 之下最重的真实 face）字重
+      < 600** → 基 face + **固定一档轻度膨胀（字号×2%，即旧版
+      引擎合成粗体的实测强度）**，600~900 渲染完全相同（旧版阶跃），
+      UI 标「模拟」；
+   c. 其余缺档（E<600，或基 face 已是粗体）→ 渲染基 face，无膨胀
+      ——NK-B 这类粗体单 face 族任何字重都不变化，与旧版逐档一致；
+   d. E 比族内最轻 face 还轻 → 渲染最轻 face。
 3. **拿不到 face 元数据**（字体缺失 / headless 枚举为空）：退回旧行为
    （仅按桶化值 setWeight），不钉扎。
 
@@ -46,6 +50,11 @@ from PyQt6.QtGui import (
 )
 
 _AXIS_TAG_WEIGHT = b"wght"
+
+# v7 阶跃膨胀档：激活时 embolden_delta 取该值，膨胀宽度 = 字号×2%
+# （v4.2.x 引擎合成粗体的实测强度：楷体 1.9%em、MS Gothic 2.3%em）。
+_EMBOLDEN_TRIGGER_DELTA = 200
+_EMBOLDEN_EM_RATIO = 0.02
 
 # 与 metrics.clamp_weight / native 侧 weightBucket 同表的整百桶化。
 _WEIGHT_BUCKETS: tuple[tuple[int, int], ...] = (
@@ -92,8 +101,8 @@ class FontWeightPlan:
     synthetic_bold: bool = False
     enum_weight: int = 0
     italic: bool = False
-    # 粗上加粗：请求字重超过粗体基 face（≥600）且引擎无法合成时，两后端
-    # 按同一公式（字号×Δ/3000 圆形膨胀轮廓）自绘加粗的重量差。
+    # 连续膨胀的重量差（桶化值 − 基 face 字重），膨胀宽度 =
+    # 字号 × Δ / 10000（锚点 Δ=200→2%em=旧版合成粗体实测强度）。
     embolden_delta: int = 0
     mark: str | None = None
 
@@ -326,8 +335,10 @@ def _compute_weight_plan(
         embolden = 0
         mark: str | None = None
         if float(requested) > axis.maximum:
-            # 轴上限之上继续膨胀放大（凡能放大皆模拟放大）。
-            embolden = bucket_weight(requested) - int(round(axis.maximum))
+            # 轴上限之上继续连续膨胀（Δ=桶化值−轴上限，同公式）。
+            embolden = max(
+                bucket_weight(requested) - int(round(axis.maximum)), 0
+            )
             mark = "模拟" if embolden > 0 else None
         elif float(requested) < axis.minimum:
             mark = "越界"
@@ -375,10 +386,22 @@ def _compute_weight_plan(
             enum_weight=bucket,
             italic=bool(italic),
         )
+    # v7 阶跃（2026-10-07 用户拍板，严格按 v4.2.x 比例并按基 face 平移）：
+    # 旧版引擎合成触发 = 「请求 ≥600 且匹配 face 非粗（<600）」，强度
+    # 固定一档（≈2% em），600~900 完全相同。基 face 取 E 之下最重真实
+    # face（替代 Qt 匹配保证 CPU/GPU 一致）：楷体（基 400）@600~900 同
+    # 一档轻度加粗；Yu Gothic@600 = Medium+2%；NK-B（基 700，已粗）
+    # 任何字重都不变化——即「NK-B@700~800 的变化 = 400 基 @700~800
+    # （都为 0）」。
+    # v7 阶跃膨胀（2026-10-07 用户拍板）：严格复刻 v4.2.x 的阶跃曲线
+    # 并按基 face 平移锚定。旧版（400 基）：500(Δ=100) 无变化、600
+    # (Δ=200) 触发合成粗体、600~900 同档不再递增。NK-B（基 700）：
+    # 800(Δ=100) 无变化、900(Δ=200) 触发 +2%em——对应 400 基 500/600。
     floors = [value for value in weights if value < bucket]
     if floors:
         base_weight = max(floors)
         base_weight, style_name, _face_italic = selected[weights.index(base_weight)]
+        delta = bucket - base_weight
         return FontWeightPlan(
             family=family,
             requested_weight=requested,
@@ -386,8 +409,8 @@ def _compute_weight_plan(
             base_weight=base_weight,
             enum_weight=bucket,
             italic=bool(italic),
-            embolden_delta=bucket - base_weight,
-            mark="模拟",
+            embolden_delta=delta if delta >= _EMBOLDEN_TRIGGER_DELTA else 0,
+            mark="模拟" if delta >= _EMBOLDEN_TRIGGER_DELTA else None,
         )
     # 比族内最轻 face 还轻：放大无法变轻，渲染最轻 face（不标「就近」，
     # v6 起该概念取消）。
@@ -404,11 +427,11 @@ def _compute_weight_plan(
 
 
 def embolden_width_px(font_size_px: int, delta: int) -> float:
-    """粗上加粗的膨胀描边宽：字号 × 重量差 / 3000（两后端同一公式，
-    native 侧 d2d_backend_configure.cpp 的 textRealizationFor）。"""
-    if delta <= 0 or font_size_px <= 0:
+    """阶跃膨胀的描边宽：Δ≥200（触发距离）→ 字号×2%（旧版引擎合成
+    粗体实测强度），否则 0。两后端同一公式（native 侧 textRealizationFor）。"""
+    if delta < _EMBOLDEN_TRIGGER_DELTA or font_size_px <= 0:
         return 0.0
-    return float(font_size_px) * float(delta) / 3000.0
+    return float(font_size_px) * _EMBOLDEN_EM_RATIO
 
 
 def font_signature(font: QFont) -> tuple:

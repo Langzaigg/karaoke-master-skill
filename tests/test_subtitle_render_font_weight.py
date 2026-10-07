@@ -95,16 +95,14 @@ def test_static_multiface_family_pins_exact_and_missing():
     assert exact.synthetic_bold is False
     assert exact.mark is None
 
-    # v6：凡比基 face 重的缺档一律模拟放大（基 face 取其下最重真实
-    # face，Δ=桶化值−基 face 字重），「就近」概念取消。face 集随注册
-    # 环境变化（YuGothR.ttc 在 offscreen 下只见部分 face），按运行时
-    # 清单推导期望值。
+    # v7：阶跃复刻 v4.2.x 并按基 face 平移——Δ≥200 触发固定膨胀档
+    # （+2%em）。face 集随注册环境变化，按运行时清单推导期望值。
     runtime_weights = [weight for weight, _name in physical_weight_styles(family)]
     floors = [weight for weight in runtime_weights if weight < 600]
     expected_base = max(floors)
     missing = resolve_weight_plan(family, 600)
     assert missing.base_weight == expected_base
-    assert missing.embolden_delta == 600 - expected_base
+    assert missing.embolden_delta >= 200
     assert missing.mark == "模拟"
     assert missing.synthetic_bold is False
 
@@ -136,24 +134,26 @@ def test_missing_weight_font_pins_floor_face(qapp):
     assert ink(planned) > ink(base)
 
 
-def test_static_single_face_family_emboldens_every_heavier_level():
-    """v6：{400} 族 500/600/700 全部模拟放大（Δ=100/200/300）。"""
+def test_static_single_face_family_steps_like_v42x():
+    """v7：{400} 族 500(Δ=100) 无变化，600~900(Δ≥200) 同一档膨胀——
+    阶跃曲线与 v4.2.x 一致（500→600 跳档、600~900 平）。"""
     _require_family("MS Gothic")
     faces = physical_weight_styles("MS Gothic")
     assert len(faces) == 1
     assert faces[0][0] == 400
 
-    for weight, delta in ((500, 100), (600, 200), (700, 300)):
+    for weight in (400, 500):
         plan = resolve_weight_plan("MS Gothic", weight)
         assert plan.base_weight == 400
-        assert plan.embolden_delta == delta
+        assert plan.embolden_delta == 0
+        assert plan.mark is None
+
+    for weight in (600, 700, 800, 900):
+        plan = resolve_weight_plan("MS Gothic", weight)
+        assert plan.base_weight == 400
+        assert plan.embolden_delta == weight - 400
         assert plan.mark == "模拟"
         assert plan.synthetic_bold is False
-
-    lighter = resolve_weight_plan("MS Gothic", 200)
-    assert lighter.base_weight == 400
-    assert lighter.embolden_delta == 0
-    assert lighter.mark is None
 
 
 @pytest.mark.skipif(
@@ -231,34 +231,28 @@ def test_constant_axis_variable_packaging_treated_as_static(qapp):
     assert fw._wght_axis_is_effective("MS Gothic", constant) is False
 
 
-def test_bold_cut_family_emboldens_above_top_weight(qapp):
-    """粗体单字重族：请求更重时按统一公式膨胀轮廓（粗上加粗）。
-
-    Qt 的合成粗体只补齐"非粗→粗"，不会在已是粗体（≥600）的 face 上
-    再加粗；DWrite 的 SIMS_BOLD 可以但 CPU 无法跟进。改为两后端按同一
-    公式（字号 x Δ/3000 圆形膨胀）自绘加粗——plan 携带 embolden_delta，
-    GPU 端 textRealizationFor 对轮廓 Widen+Union。
-    """
+def test_bold_cut_family_steps_shifted_to_base(qapp):
+    """v7：粗体单字重族（基 700）按基 face 平移阶跃——@400~800(Δ<200)
+    无变化、@900(Δ=200) 触发 +2%em（对应 400 基 @600 的触发位置）。"""
     ttc = "C:/Windows/Fonts/UDDIGIKYOKASHON-B_0.TTC"
     if not os.path.exists(ttc):
         pytest.skip("UD Digi Kyokasho NK-B font file not present")
     QFontDatabase.addApplicationFont(ttc)
     _require_family("UD Digi Kyokasho NK-B")
-    heavier = resolve_weight_plan("UD Digi Kyokasho NK-B", 900)
-    assert heavier.base_weight == 700
-    assert heavier.synthetic_bold is False
-    assert heavier.embolden_delta == 200
-    assert heavier.mark == "模拟"
-    mid = resolve_weight_plan("UD Digi Kyokasho NK-B", 800)
-    assert mid.embolden_delta == 100
-    lighter = resolve_weight_plan("UD Digi Kyokasho NK-B", 400)
-    assert lighter.base_weight == 700
-    assert lighter.embolden_delta == 0
-    assert lighter.mark is None
-    # 膨胀公式：48px x 200/3000 = 3.2px。
+    for weight in (400, 500, 700, 800):
+        plan = resolve_weight_plan("UD Digi Kyokasho NK-B", weight)
+        assert plan.base_weight == 700
+        assert plan.embolden_delta == 0
+        assert plan.mark is None
+    triggered = resolve_weight_plan("UD Digi Kyokasho NK-B", 900)
+    assert triggered.base_weight == 700
+    assert triggered.embolden_delta == 200
+    assert triggered.mark == "模拟"
+    # 阶跃膨胀公式：Δ≥200 触发 → 字号×2%。
     from krok_helper.subtitle_render.engine.text.font_weight import embolden_width_px
 
-    assert embolden_width_px(48, 200) == pytest.approx(3.2)
+    assert embolden_width_px(48, 200) == pytest.approx(0.96)
+    assert embolden_width_px(48, 199) == 0.0
 
 
 def test_missing_metadata_family_falls_back_to_plain_weight(monkeypatch):
