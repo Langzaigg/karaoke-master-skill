@@ -165,3 +165,24 @@ def test_resolve_display_lines_reports_measure_ticks_and_clears_slot():
     with render_progress_scope(lambda *event: after.append(event)):
         report_display_measure_progress(1, 4)
     assert after == []
+
+
+def test_yield_to_gui_really_sleeps_past_throttle_window():
+    """越过节流窗的让出必须真睡（≥1ms），节流窗内保持零开销。
+
+    sleep(0) 在 Windows 上不构成真让出：多后台排版线程并行时等 GIL 的
+    GUI 线程仍抢不到调度（2026-10 饿死现场，见函数 docstring）。
+    """
+    import time as _time
+
+    from krok_helper.subtitle_render.engine import render_progress as rp
+
+    rp._YIELD_STATE.last_yield = _time.perf_counter() - 0.001  # 节流窗内
+    t0 = _time.perf_counter()
+    rp.yield_to_gui()
+    assert _time.perf_counter() - t0 < 0.0008  # 未到间隔：纯检查，不睡
+
+    rp._YIELD_STATE.last_yield = _time.perf_counter() - 1.0  # 越窗
+    t0 = _time.perf_counter()
+    rp.yield_to_gui()
+    assert _time.perf_counter() - t0 >= 0.0008  # 真让出 ≥1ms

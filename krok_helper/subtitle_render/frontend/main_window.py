@@ -1155,6 +1155,7 @@ class SubtitleRenderWindow(QWidget):
         self._margin_check_generation = 0
         self._margin_check_busy = False
         self._margin_check_rerun_pending = False
+        self._margin_check_waiting_for_tracks = False
         self._layout_check_tooltip: Optional[StateToolTip] = None
         self._layout_check_tooltip_timer = QTimer(self)
         self._layout_check_tooltip_timer.setSingleShot(True)
@@ -5270,6 +5271,10 @@ class SubtitleRenderWindow(QWidget):
             self._tracks_window_rerun_pending = False
             self._refresh_tracks_view_windows_async()
             return
+        if self._margin_check_waiting_for_tracks:
+            # 轨道窗口重算让位后释放等待中的余白检查（错峰，见 _check_layout_margins）。
+            self._margin_check_waiting_for_tracks = False
+            self._margin_check_timer.start(0)
         if generation != self._tracks_window_generation or windows is None:
             return
         if self._timing_track is None or self._loading_project:
@@ -6633,6 +6638,14 @@ class SubtitleRenderWindow(QWidget):
             return
         if self._margin_check_busy:
             self._margin_check_rerun_pending = True
+            return
+        if self._tracks_window_worker_busy:
+            # 错峰：余白检查与轨道窗口重算、GPU configure 各自都是整轨排版，
+            # 三路并行时 GIL 竞争会饿死 GUI 线程的事件循环（2026-10 打开/
+            # 恢复工程「未响应」家族：py-spy 现场为 PyGILState_Ensure 等
+            # GIL）。等轨道窗口重算完成（_on_tracks_view_windows_ready）再
+            # 启动本检查，把并发排版降为串行 + GPU 一路。
+            self._margin_check_waiting_for_tracks = True
             return
         self._margin_check_generation += 1
         generation = self._margin_check_generation

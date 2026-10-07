@@ -187,6 +187,58 @@ def test_project_load_routes_tracks_window_refresh_by_platform(
     qapp.processEvents()
 
 
+def test_margin_check_waits_for_tracks_window_refresh(qapp, monkeypatch):
+    """错峰：轨道窗口后台重算占用时余白检查让位排队，完成后立即释放。"""
+    win = _make_window(qapp, monkeypatch)
+    win._timing_track = TimingTrack(
+        lines=[TimingLine(chars=[TimingChar("A", 1000)], end_ms=2000)]
+    )
+
+    win._tracks_window_worker_busy = True
+    win._check_layout_margins()
+    assert win._margin_check_waiting_for_tracks is True
+    assert win._margin_check_busy is False, "占用中不得启动并行的余白检查线程"
+
+    started: list[object] = []
+    monkeypatch.setattr(
+        win._margin_check_timer, "start", lambda *a, **k: started.append(a)
+    )
+    win._on_tracks_view_windows_ready(win._tracks_window_generation, None)
+    assert win._margin_check_waiting_for_tracks is False
+    assert started == [(0,)], "完成后应立即排程等待中的余白检查"
+
+    # 无等待时的完成回调不得再触发余白检查。
+    win._on_tracks_view_windows_ready(win._tracks_window_generation, None)
+    assert started == [(0,)]
+    win.close()
+    win.deleteLater()
+    qapp.processEvents()
+
+
+def test_margin_check_runs_when_tracks_window_idle(qapp, monkeypatch):
+    """无占用（macOS 同步路径 / 空闲）时余白检查照常直启。"""
+    win = _make_window(qapp, monkeypatch)
+    win._timing_track = TimingTrack(
+        lines=[TimingLine(chars=[TimingChar("A", 1000)], end_ms=2000)]
+    )
+    assert win._tracks_window_worker_busy is False
+
+    win._check_layout_margins()
+    assert win._margin_check_busy is True
+    assert win._margin_check_waiting_for_tracks is False
+
+    deadline = time.monotonic() + 5.0
+    while time.monotonic() < deadline:
+        qapp.processEvents()
+        if not win._margin_check_busy:
+            break
+        time.sleep(0.01)
+    assert not win._margin_check_busy, "小轨道的后台余白检查应能正常完成"
+    win.close()
+    win.deleteLater()
+    qapp.processEvents()
+
+
 def test_drag_assembly_routes_tracks_window_refresh_by_platform(qapp, monkeypatch):
     """拖入/装配路径的轨道窗口重算按平台路由：Windows 后台线程，其余同步。
 
@@ -2546,7 +2598,11 @@ def _drain_margin_check(win, qapp, timeout_s: float = 5.0) -> None:
     断言的旧写法拿不到刚算完的结果。
     """
     deadline = time.perf_counter() + timeout_s
-    while win._margin_check_busy and time.perf_counter() < deadline:
+    while time.perf_counter() < deadline and (
+        win._margin_check_busy
+        or win._margin_check_waiting_for_tracks
+        or win._tracks_window_worker_busy
+    ):
         qapp.processEvents()
         time.sleep(0.01)
     qapp.processEvents()
@@ -2789,10 +2845,11 @@ def test_show_layout_issues_uses_background_results(qapp, monkeypatch):
     monkeypatch.setattr(win, "_collect_layout_issues", fake_collect)
 
     # 未跑过后台检查时打开对话框：不在 GUI 线程同步重算，展示后由后台回填。
+    # （错峰下诊断可能先排队等轨道窗口重算完成，等待真实结果而非 busy 标志。）
     assert win._layout_issues_ready is False
     win._show_layout_issues()
     deadline = time.perf_counter() + 5.0
-    while win._margin_check_busy and time.perf_counter() < deadline:
+    while time.perf_counter() < deadline and not collect_threads:
         qapp.processEvents()
         time.sleep(0.01)
     qapp.processEvents()

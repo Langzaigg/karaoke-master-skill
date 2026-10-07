@@ -32,14 +32,21 @@ def yield_to_gui() -> None:
 
     后台线程的整轨排版是纯 Python CPU 密集段：长段执行不释放 GIL 时，
     GUI 线程的事件循环会被饿到掉帧。在逐行/逐趟热点循环里调用本函数，
-    至多每 ``_GIL_YIELD_INTERVAL_S`` 秒 ``sleep(0)`` 让出一次时间片；
-    未到间隔时调用只是一次属性查找 + ``perf_counter``，热路径开销可忽略。
+    至多每 ``_GIL_YIELD_INTERVAL_S`` 秒真让出一次（1ms 睡眠）；未到间隔
+    时调用只是一次属性查找 + ``perf_counter``，热路径开销可忽略。
+
+    ``time.sleep(0)`` 在 Windows 上只放弃剩余时间片并立即重新排队——多
+    个后台排版线程并行时（tracks-window / margin-check / GPU configure），
+    正在 ``PyGILState_Ensure`` 上等 GIL 的 GUI 线程仍抢不到调度（2026-10
+    py-spy 现场：主线程栈顶 SleepConditionVariableSRW，GUI 饿死数十秒）。
+    1ms 睡眠让调度器真正切换走本线程，等 GIL 的线程得以插队；代价是后台
+    排版总时长约 +6%（1ms/15ms 节流间隔）。
     """
     now = time.perf_counter()
     if now - getattr(_YIELD_STATE, "last_yield", 0.0) < _GIL_YIELD_INTERVAL_S:
         return
     _YIELD_STATE.last_yield = now
-    time.sleep(0)
+    time.sleep(0.001)
 
 ProgressReporter = Callable[[str, int, int], None]
 
