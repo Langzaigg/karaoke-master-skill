@@ -761,6 +761,7 @@ void Direct2DGpuBackend::configure(const RenderScene &scene) {
                 "Open embolden widened geometry",
                 device_
             );
+            widenedSink->SetFillMode(D2D1_FILL_MODE_WINDING);
             checkHr(
                 resource.path->Widen(
                     emboldenWidth,
@@ -791,6 +792,7 @@ void Direct2DGpuBackend::configure(const RenderScene &scene) {
                 "Open embolden united geometry",
                 device_
             );
+            unitedSink->SetFillMode(D2D1_FILL_MODE_WINDING);
             checkHr(
                 resource.path->CombineWithGeometry(
                     widened.Get(),

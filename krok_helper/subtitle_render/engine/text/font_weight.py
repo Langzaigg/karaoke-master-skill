@@ -470,6 +470,11 @@ def embolden_glyph_path(path: QPainterPath, font: QFont) -> QPainterPath:
     在 addText 之后、进入任何绘制/度量之前应用——填充、描边、走字、
     墨迹盒等全部下游管线自动消费膨胀后的轮廓，CPU/GPU 一致由构造保证。
     """
+    # OpenType 轮廓规范要求 NonZero(Winding) 填充；Qt addText() 默认
+    # OddEvenFill，可变字体 gvar 插值导致轮廓重叠时 OddEven 会在笔画
+    # 交叉处产生空洞（2026-10-07 用户报「单个字内两笔画相交处镂空」）。
+    # 静态字体两种规则结果相同，统一设 Winding 无副作用。
+    path.setFillRule(Qt.FillRule.WindingFill)
     if path.isEmpty():
         return path
     width = embolden_width_px(font.pixelSize(), embolden_delta_of_font(font))
