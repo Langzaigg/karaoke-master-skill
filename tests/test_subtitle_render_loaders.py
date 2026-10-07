@@ -142,6 +142,65 @@ def test_legacy_project_load_migrates_spacing_to_used_layouts(qapp, monkeypatch,
     assert win._style.custom_style_schemes["标题"].space_width_percent == 80
 
 
+def test_drag_assembly_routes_tracks_window_refresh_by_platform(qapp, monkeypatch):
+    """拖入/装配路径的轨道窗口重算按平台路由：Windows 后台线程，其余同步。
+
+    大工程（≥300 内容句）拖入时同步整轨排版会把 UI 线程卡 6-95s，Windows
+    直接标注「未响应」（2026-10 探针）。异步化只对已验证的 Windows 打开；
+    macOS 预留接口走同步旧路径，真机验证后翻转开关即全平台异步。
+    """
+    win = _make_window(qapp, monkeypatch)
+    win._timing_track = TimingTrack(
+        lines=[TimingLine(chars=[TimingChar("A", 1000)], end_ms=2000)]
+    )
+    async_calls: list[bool] = []
+    sync_calls: list[bool] = []
+    monkeypatch.setattr(
+        win, "_refresh_tracks_view_windows_async", lambda: async_calls.append(True)
+    )
+    monkeypatch.setattr(
+        win, "_refresh_tracks_view_windows", lambda: sync_calls.append(True)
+    )
+
+    # 平台开关两个方向都验证：路由只看开关，不重复计算（每次恰好一条路径）。
+    monkeypatch.setattr(mw, "_tracks_window_async_refresh_supported", lambda: True)
+    win._sync_tracks_view()
+    assert async_calls == [True]
+    assert sync_calls == []
+
+    monkeypatch.setattr(mw, "_tracks_window_async_refresh_supported", lambda: False)
+    win._sync_tracks_view()
+    assert sync_calls == [True]
+    assert async_calls == [True]
+    win.close()
+    win.deleteLater()
+    qapp.processEvents()
+
+
+def test_drag_assembly_async_window_result_reaches_tracks_view(qapp, monkeypatch):
+    """Windows 方向的端到端冒烟：异步重算结果最终推到轨道视图。"""
+    if sys.platform != "win32":
+        pytest.skip("异步拖入装配路由当前仅 Windows 启用")
+    win = _make_window(qapp, monkeypatch)
+    win._timing_track = TimingTrack(
+        lines=[TimingLine(chars=[TimingChar("A", 1000)], end_ms=2000)]
+    )
+    win._sync_tracks_view()
+
+    deadline = time.monotonic() + 5.0
+    while time.monotonic() < deadline:
+        qapp.processEvents()
+        if not win._tracks_window_worker_busy:
+            break
+        time.sleep(0.01)
+    qapp.processEvents()
+    assert not win._tracks_window_worker_busy
+    assert win._tracks_view._windows, "异步窗口数据应经队列信号回到轨道视图"
+    win.close()
+    win.deleteLater()
+    qapp.processEvents()
+
+
 def test_load_subtitle_wires_preview_and_transport(qapp, monkeypatch, tmp_path):
     """A4：加载字幕后预览面板 / 时间轴滑块都应该联动起来。"""
     win = _make_window(qapp, monkeypatch)

@@ -443,6 +443,22 @@ RENDER_WORKER_OPTIONS = (0, 4, 8, 12, 16)
 """0 = 自动（最多 8）；其余值为用户显式选择的渲染进程数。"""
 
 
+def _tracks_window_async_refresh_supported() -> bool:
+    """拖入/装配路径（``_sync_tracks_view``）的轨道窗口重算平台开关。
+
+    样式修改路径早已全平台走 :meth:`_refresh_tracks_view_windows_async`；
+    拖入 ``.sug`` 的装配路径原先在 GUI 线程同步整轨排版，大工程（≥300
+    内容句）一次拖入就把 UI 线程卡 6-95s，Windows 直接标注「未响应」
+    （2026-10 探针：1200 句串烧同步卡 95s，异步化后剩解析耗时）。本开
+    关把该路径也切到既有后台重算。
+
+    macOS 暂走同步旧路径：后台线程整轨排版在 mac 的 Qt 字体栈上未做真
+    机验证，mac 构建也刚落地，不在未验证平台上引入新的线程行为。真机
+    验证后把本函数改为恒 ``True`` 即全平台异步，调用点无需再动。
+    """
+    return sys.platform == "win32"
+
+
 #: 标题里跟着"用户习惯"走的字段。除条目名、标题文字、逐字角色、自定义
 #: 时间段的时间（逐曲）和字体/颜色/锚点（渲染时由 ``scheme_name`` +
 #: ``layout_index`` 推导的解析结果）之外，剩下的全部记忆 —— 改一次就该一直
@@ -5163,7 +5179,13 @@ class SubtitleRenderWindow(QWidget):
         named = [("主字幕", self._timing_track)]
         named.extend((source.name, source.track) for source in self._extra_sources)
         self._tracks_view.set_tracks(named)
-        self._refresh_tracks_view_windows()
+        # 拖入/装配路径的整轨窗口重算按平台路由（见开关 docstring）；把手数据
+        # 本就允许延迟到达，set_tracks 已清空旧窗口，异步结果迟到期间只是
+        # 把手暂不可见，GUI 线程保持响应。
+        if _tracks_window_async_refresh_supported():
+            self._refresh_tracks_view_windows_async()
+        else:
+            self._refresh_tracks_view_windows()
 
     def _refresh_tracks_view_windows(self) -> None:
         """按当前样式重算各轨行显示窗口，推给字幕轨道（把手条数据源）。
