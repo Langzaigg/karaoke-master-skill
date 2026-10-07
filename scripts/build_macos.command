@@ -398,7 +398,7 @@ if [ -n "$warn_file" ]; then
 fi
 echo "Package content validation passed."
 
-echo "Updating macOS package version metadata..."
+echo "Updating macOS package version and language metadata..."
 "$PYTHON_BIN" "$PROJECT_ROOT/scripts/update_macos_version.py" "$APP_DIST/Contents/Info.plist"
 
 # Re-sign after all package contents and metadata have been finalized.
