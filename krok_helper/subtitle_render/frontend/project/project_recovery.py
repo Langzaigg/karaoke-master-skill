@@ -4,10 +4,15 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Any, Callable, Protocol
+from pathlib import Path
+from typing import Any, Callable, Optional, Protocol
 
 from krok_helper.subtitle_render.project.recovery import RecoveryScan
-from krok_helper.subtitle_render.project.store import RecoveryCandidate
+from krok_helper.subtitle_render.project.store import (
+    RecoveryCandidate,
+    load_render_project,
+    save_discarded_project_backup,
+)
 
 
 class RecoveryScanner(Protocol):
@@ -39,8 +44,16 @@ class ProjectRecoveryController:
         choose: ChoicePrompt,
         show_error: ErrorPrompt,
         restore: RestoreCandidate,
+        discard_backup_root: Optional[Path] = None,
     ) -> bool:
-        """Prompt over corrupt and valid snapshots; report a successful restore."""
+        """Prompt over corrupt and valid snapshots; report a successful restore.
+
+        ``discard_backup_root`` 传入备份根目录时，「放弃」的快照先落一份
+        ``discarded-backup`` 再删除——挂死/崩溃类缺陷的现场往往只存在于引发
+        问题的那份快照里，直接删除后无法定向复现（2026-10 4.3.7 更新后
+        恢复快照挂死即因快照被删而无法追因）。备份写失败时保留原文件并提示
+        （现场保全优先）；快照本身解析失败（已损坏）则照删，无可备份内容。
+        """
         scan = self.scanner.scan()
         for path in scan.invalid_paths:
             choice = choose(
@@ -70,6 +83,27 @@ class ProjectRecoveryController:
                 default=2,
             )
             if choice == 1:
+                if discard_backup_root is not None:
+                    try:
+                        payload = load_render_project(candidate.path)
+                    except ValueError:
+                        payload = None  # 快照已损坏，无可备份内容
+                    if payload is not None:
+                        payload.pop("recovery", None)
+                        try:
+                            save_discarded_project_backup(
+                                discard_backup_root,
+                                payload,
+                                source_project_path=source,
+                            )
+                        except OSError as exc:
+                            show_error(
+                                parent,
+                                "备份恢复文件失败",
+                                "未能为放弃的快照创建备份，原文件已保留，"
+                                f"可手动复制后再处理：\n{candidate.path}\n\n{exc}",
+                            )
+                            continue
                 try:
                     candidate.path.unlink(missing_ok=True)
                 except OSError as exc:

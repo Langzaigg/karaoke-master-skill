@@ -142,6 +142,51 @@ def test_legacy_project_load_migrates_spacing_to_used_layouts(qapp, monkeypatch,
     assert win._style.custom_style_schemes["标题"].space_width_percent == 80
 
 
+def test_project_load_routes_tracks_window_refresh_by_platform(
+    qapp, monkeypatch, tmp_path
+):
+    """打开/恢复工程的装配尾部按平台路由窗口重算：Windows 防抖转后台，其余同步。
+
+    与拖入路径同款开关（2026-10 定位的「打开/恢复工程未响应」家族）：
+    装载尾部与余白检查、GPU configure 并行竞争会饿死 GUI 线程。
+    """
+    win = _make_window(qapp, monkeypatch)
+    lrc = tmp_path / "demo.lrc"
+    lrc.write_text("[00:01:00]a[00:02:00]b\n", encoding="utf-8")
+    data = {
+        "schema_version": 4,
+        "subtitle_path": str(lrc),
+        "style": style_to_dict(Style()),
+    }
+
+    scheduled: list[object] = []
+    sync_calls: list[bool] = []
+    monkeypatch.setattr(
+        win._tracks_window_refresh_timer, "start", lambda *a, **k: scheduled.append(a)
+    )
+
+    def _sync_spy() -> None:
+        # 复刻真实守卫：装载中（_loading_project=True）的调用是空转，不计数。
+        if not win._loading_project:
+            sync_calls.append(True)
+
+    monkeypatch.setattr(win, "_refresh_tracks_view_windows", _sync_spy)
+
+    monkeypatch.setattr(mw, "_tracks_window_async_refresh_supported", lambda: True)
+    win._apply_project_data(data)
+    assert scheduled == [(250,)]
+    assert sync_calls == []
+
+    scheduled.clear()
+    monkeypatch.setattr(mw, "_tracks_window_async_refresh_supported", lambda: False)
+    win._apply_project_data(data)
+    assert sync_calls == [True]
+    assert scheduled == []
+    win.close()
+    win.deleteLater()
+    qapp.processEvents()
+
+
 def test_drag_assembly_routes_tracks_window_refresh_by_platform(qapp, monkeypatch):
     """拖入/装配路径的轨道窗口重算按平台路由：Windows 后台线程，其余同步。
 

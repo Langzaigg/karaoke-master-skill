@@ -1872,7 +1872,12 @@ class SubtitleRenderWindow(QWidget):
             self._loading_project = False
             self._defer_project_assets = False
         if applied and self._timing_track is not None:
-            if defer_assets:
+            # 平台开关与拖入路径同款（见 _tracks_window_async_refresh_supported）：
+            # 工程打开/恢复装配尾部的整轨窗口重算同样不该占 GUI 线程——恢复
+            # 大工程时它与余白检查、GPU configure 并行竞争会饿死事件循环
+            # （4.3.6/4.3.7 均有「打开/恢复工程未响应」报障，2026-10 探针定位
+            # 为同族）。macOS 仍走同步旧路径，与拖入路径的预留口径一致。
+            if defer_assets or _tracks_window_async_refresh_supported():
                 self._tracks_window_refresh_timer.start(250)
             else:
                 self._refresh_tracks_view_windows()
@@ -9616,6 +9621,7 @@ class SubtitleRenderWindow(QWidget):
             choose=fluent_choice,
             show_error=fluent_error,
             restore=self._restore_recovery_candidate,
+            discard_backup_root=self._backup_root(),
         )
 
     def _restore_recovery_candidate(self, candidate: RecoveryCandidate) -> bool:
