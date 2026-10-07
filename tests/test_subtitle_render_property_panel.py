@@ -9217,15 +9217,124 @@ def test_preview_player_idle_timeout_hides_controls_even_with_mouse_inside(qapp,
     qapp.processEvents()
     preview.show_controls()
     monkeypatch.setattr(preview, "underMouse", lambda: True)
+    # 光标按「停在视频区」口径模拟（不在控制栏上），否则下面的控制栏保活
+    # 逻辑会续期定时器、无法验证「空闲即隐藏」本身。
+    monkeypatch.setattr(preview, "_cursor_over_control_bars", lambda: False)
 
     preview._on_controls_idle_timeout()
 
     # 2026-10 起空闲即隐藏，不再因「光标停在窗口内」续期：G6 输入转发
     # 修复后光标悬停也持续有 mouse move，underMouse 恒真会让控件永不隐藏。
-    # 顶栏（标题栏）保留，底栏隐藏；任何移动经 eventFilter 重新唤出。
+    # 顶栏（标题栏）保留，底栏隐藏；任何真实移动经 eventFilter 重新唤出。
     assert preview._top_controls.isVisible() is True
     assert preview._bottom_controls.isVisible() is False
     assert preview._hide_controls_timer.isActive() is False
+
+
+def _preview_video_mouse_move(qapp, preview: QWidget, offset: int) -> QPoint:
+    """向画布 viewport 发送一次 mouse move，返回其全局坐标。
+
+    G5/CPU 形态下鼠标移动落在 QGraphicsView 的 viewport 上并被场景机制
+    吃掉、不会冒泡到窗口层，唤出依赖 PreviewPlayerWindow 的 eventFilter。
+    """
+    canvas = preview.preview_panel.canvas
+    viewport = canvas.viewport() if hasattr(canvas, "viewport") else canvas
+    local = QPoint(viewport.width() // 2 + offset, viewport.height() // 2)
+    global_pos = viewport.mapToGlobal(local)
+    event = QMouseEvent(
+        QEvent.Type.MouseMove,
+        QPointF(local),
+        QPointF(global_pos),
+        QPointF(global_pos),
+        Qt.MouseButton.NoButton,
+        Qt.MouseButton.NoButton,
+        Qt.KeyboardModifier.NoModifier,
+    )
+    QApplication.sendEvent(viewport, event)
+    qapp.processEvents()
+    return global_pos
+
+
+def test_preview_player_mouse_move_over_video_reshows_controls(qapp):
+    # 回归（2026-10 用户实测）：空闲强制隐藏（G6 修复 e52eb49e）之后，
+    # G5/CPU 形态下悬停视频区弹不出进度条——mouse move 被 viewport 吃掉、
+    # 不冒泡到窗口层；必须由 eventFilter 唤出。
+    win = mw.SubtitleRenderWindow(embedded=False)
+    win.resize(1600, 900)
+    preview = win._preview_window
+    preview._preview_panel.set_populated(True)
+    preview.show()
+    preview.apply_workspace_geometry()
+    qapp.processEvents()
+
+    preview.show_controls()
+    preview.hide_controls(force=True)
+    qapp.processEvents()
+    assert preview._bottom_controls.isVisible() is False
+
+    _preview_video_mouse_move(qapp, preview, 0)
+
+    assert preview._bottom_controls.isVisible() is True
+    assert preview._hide_controls_timer.isActive() is True
+
+
+def test_preview_player_mouse_move_reshow_requires_position_change(qapp):
+    # G6 直画时呈现中的 DComp 子窗口会让系统对停住的光标持续重发
+    # mouse move（空闲超时改 force=True 的根因）——唤出去重按全局坐标：
+    # 坐标不变的重复事件不唤出，真实移动才唤出，两条诉求同时成立。
+    win = mw.SubtitleRenderWindow(embedded=False)
+    win.resize(1600, 900)
+    preview = win._preview_window
+    preview._preview_panel.set_populated(True)
+    preview.show()
+    preview.apply_workspace_geometry()
+    qapp.processEvents()
+    preview.show_controls()
+    preview.hide_controls(force=True)
+
+    first = _preview_video_mouse_move(qapp, preview, 0)
+    assert preview._bottom_controls.isVisible() is True
+
+    preview.hide_controls(force=True)
+    # 同坐标合成重发（G6 停住光标）：不唤出
+    _preview_video_mouse_move(qapp, preview, 0)
+    assert preview._bottom_controls.isVisible() is False
+
+    # 真实移动到新坐标：唤出
+    second = _preview_video_mouse_move(qapp, preview, 4)
+    assert second != first
+    assert preview._bottom_controls.isVisible() is True
+
+
+def test_preview_player_idle_timeout_keeps_controls_under_cursor_on_bars(qapp, monkeypatch):
+    win = mw.SubtitleRenderWindow(embedded=False)
+    win.resize(1600, 900)
+    preview = win._preview_window
+    preview._preview_panel.set_populated(True)
+    preview.show()
+    preview.apply_workspace_geometry()
+    qapp.processEvents()
+    preview.show_controls()
+
+    # 光标停在底部传输条上：空闲不隐藏（用户在瞄准按钮/拖进度条）
+    bar_point = preview.mapToGlobal(
+        QPoint(preview.width() // 2, preview.height() - 10)
+    )
+    monkeypatch.setattr(QCursor, "pos", staticmethod(lambda: bar_point))
+    preview._on_controls_idle_timeout()
+    assert preview._bottom_controls.isVisible() is True
+    assert preview._hide_controls_timer.isActive() is True
+
+    # 光标停在视频区（窗口中部）：空闲即隐藏
+    video_point = preview.mapToGlobal(
+        QPoint(
+            preview.width() // 2,
+            (preview._TITLE_BAR_HEIGHT + preview.height()) // 2,
+        )
+    )
+    monkeypatch.setattr(QCursor, "pos", staticmethod(lambda: video_point))
+    preview._on_controls_idle_timeout()
+    assert preview._bottom_controls.isVisible() is False
 
 
 def test_preview_player_transport_bar_uses_overlay_style(qapp):

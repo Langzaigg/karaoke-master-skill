@@ -15,7 +15,7 @@ from PyQt6.QtCore import (
     Qt,
     pyqtSignal as Signal,
 )
-from PyQt6.QtGui import QKeySequence, QShortcut
+from PyQt6.QtGui import QCursor, QKeySequence, QShortcut
 from PyQt6.QtWidgets import (
     QHBoxLayout,
     QLabel,
@@ -175,6 +175,8 @@ class PreviewPlayerWindow(QWidget):
         self._owner = owner
         self._drag_origin: Optional[QPoint] = None
         self._suppress_control_show = False
+        # 视频区唤出去重：记录最近一次触发 show_controls 的 move 全局坐标。
+        self._last_control_move_pos: Optional[QPoint] = None
         self._collapsed = False
         self._output_aspect = 16 / 9
         self._media_title = "字幕视频预览"
@@ -371,7 +373,20 @@ class PreviewPlayerWindow(QWidget):
 
     def eventFilter(self, watched: QObject, event: QEvent) -> bool:  # noqa: N802
         if self._video_interaction_target(watched):
-            if event.type() == QEvent.Type.MouseButtonRelease:
+            if event.type() == QEvent.Type.MouseMove:
+                # 空闲超时无条件隐藏（force=True）后，唤出必须在这里做：
+                # 画布是 QGraphicsView，viewport/场景会吃掉 mouse move，事件
+                # 不会冒泡到窗口层 mouseMoveEvent——G5/CPU 形态下悬停视频区
+                # 弹不出进度条（2026-10 用户实测），只能点暂停或移出再入。
+                # 按全局坐标去重：G6 直画时呈现中的 DComp 子窗口会让系统对
+                # 停住的光标持续重发 mouse move（空闲超时改 force=True 的
+                # 根因），坐标未变视为无操作，只有真实移动才唤出控制栏。
+                if self._video_area_contains(watched, event.position().toPoint()):
+                    global_pos = event.globalPosition().toPoint()
+                    if global_pos != self._last_control_move_pos:
+                        self._last_control_move_pos = global_pos
+                        self.show_controls()
+            elif event.type() == QEvent.Type.MouseButtonRelease:
                 if (
                     event.button() == Qt.MouseButton.LeftButton
                     and self._video_area_contains(watched, event.position().toPoint())
@@ -541,11 +556,30 @@ class PreviewPlayerWindow(QWidget):
         if self._collapsed:
             self._top_controls.show()
             return
+        # 光标正停在控制栏（标题栏/底部传输条）上时不隐藏：用户在瞄准按钮
+        # 或拖动进度条，此时消失只能靠再动一下唤回。用真实光标的几何位置
+        # 判断而不是 underMouse()——G6 转发会持续产生合成 mouse move，
+        # underMouse 恒真（2026-10 用户实测），位置判断不受合成事件影响。
+        if self._cursor_over_control_bars():
+            self._hide_controls_timer.start()
+            return
         # 空闲即隐藏，不再因「光标停在窗口内」（underMouse）而续期：
         # G6 直画的输入转发修复后，光标悬停在视频上也持续有 mouse move
         # 事件到达，underMouse 恒真会导致控件永不自动隐藏（2026-10 用户
-        # 实测）。任何移动都会经 eventFilter → show_controls 重新唤出。
+        # 实测）。任何真实移动都会经 eventFilter → show_controls 重新唤出。
         self.hide_controls(force=True)
+
+    def _cursor_over_control_bars(self) -> bool:
+        """真实光标是否停在控制栏矩形上（标题栏 / 底部传输条）。"""
+        if not self.isVisible():
+            return False
+        pos = self.mapFromGlobal(QCursor.pos())
+        if not QRect(QPoint(0, 0), self.size()).contains(pos):
+            return False
+        return (
+            pos.y() < self._TITLE_BAR_HEIGHT
+            or pos.y() >= self.height() - self._bottom_controls.height()
+        )
 
     def hide_controls(self, *, force: bool = False) -> None:
         if self._collapsed:
