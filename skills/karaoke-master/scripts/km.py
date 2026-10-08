@@ -181,6 +181,15 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--credits", action="store_true", help="列出出处 / 署名")
     p.add_argument("--plan", action="store_true", help="按当前 MV 设计计算节拍剪辑计划（需要多少张图）")
 
+    p = sub.add_parser("mv-video", help="网络 MV 背景：搜索 / 下载 YouTube·B站 MV 并对齐到歌曲（下载前须征得用户同意）")
+    p.add_argument("job")
+    p.add_argument("--search", help="搜索关键词（YouTube），如「歌手 歌名 MV」")
+    p.add_argument("--n", type=int, default=8, help="搜索结果数量")
+    p.add_argument("--info", metavar="URL|#k", help="查看视频信息（标题 / 频道 / 时长 / 将下载的格式与大小）")
+    p.add_argument("--use", metavar="URL|#k", help="下载并设为背景（自动对齐到歌曲）")
+    p.add_argument("--local", metavar="PATH", help="改用本机视频文件作 MV 背景（同样自动对齐）")
+    p.add_argument("--max-height", type=int, default=1080)
+
     p = sub.add_parser("versions", help="on vocal / off vocal 双版本（复制视频流，只换音轨）")
     p.add_argument("job")
     p.add_argument("--video", help="母版视频（缺省：已导出的成品 MP4）")
@@ -220,6 +229,8 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("job")
     p.add_argument("--kinds", default="sug,yurika,mp4,onoff", help="sug,yurika,lrc,mp4,onoff,mv,hires")
     p.add_argument("--clip", type=float, help="只渲染开头 N 秒的试看版（<名称> (preview).mp4）")
+    p.add_argument("--cast-delay", type=int, metavar="MS",
+                   help="投屏延迟：画面比声音提前的毫秒数（缺省 +200，保存到工程设置）")
 
     p = sub.add_parser("hires", help="Hi-Res 混流：成品视频 + 无损原唱/伴奏 → MKV")
     p.add_argument("job")

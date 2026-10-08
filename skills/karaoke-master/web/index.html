@@ -145,6 +145,10 @@
               <select id="out-res"><option value="1920x1080">1920 × 1080</option><option value="1280x720">1280 × 720</option><option value="2560x1440">2560 × 1440</option><option value="3840x2160">3840 × 2160</option></select>
             </div>
             <div class="field">
+              <span>投屏延迟</span>
+              <div class="cast-row"><input type="number" id="out-cast" step="50" min="-2000" max="2000"> <span class="muted small">毫秒：画面比声音提前，补偿投屏 / 电视的画面延迟（默认 +200）</span></div>
+            </div>
+            <div class="field">
               <span>帧率</span>
               <div class="seg-ctl" id="out-fps"><button data-v="30">30 fps</button><button data-v="60" class="on">60 fps</button></div>
             </div>

@@ -243,6 +243,7 @@ function ensureDraft1() {
       background: opts.background || { type: hasVideo ? "source" : "mv" },
       resolution: opts.resolution || "1920x1080",
       fps: [30, 60].includes(+opts.fps) ? +opts.fps : 60,
+      cast_delay_ms: opts.cast_delay_ms === undefined || opts.cast_delay_ms === null ? 200 : +opts.cast_delay_ms,
       outputs: opts.outputs || ["mp4", "sug", "yurika", "onoff"],
       ruby: opts.ruby !== false,
       title: opts.title !== false,
@@ -303,7 +304,8 @@ function renderStage1() {
   memo("lyrics", JSON.stringify([j.lyrics, d.lines, d.singers.map((s) => [s.id, s.name, s.color])]), renderLyrics);
   memo("galleries", JSON.stringify([j.previews, d.options.template, d.options.effect]), renderGalleries);
   memo("singers", JSON.stringify([d.singers, (j.previews || {}).singers, d.lines]), renderSingers);
-  memo("output", JSON.stringify([d.options, j.media.design_still, j.media.hires]), renderOutput);
+  memo("output", JSON.stringify([d.options, j.media.design_still, j.media.hires, j.media.mv_video,
+    (j.previews || {}).mv_video_candidates]), renderOutput);
   memo("mv", JSON.stringify([d.options.background, (j.previews || {}).designs, (j.previews || {}).design_gallery,
     (j.previews || {}).mv_catalog, (j.previews || {}).montage, (j.previews || {}).mv_assets, (j.options || {}).montage_source,
     (j.segment || {}), d.segment || null]), renderMV);
@@ -326,7 +328,7 @@ function renderMedia1() {
     else if (src.has_video) box.append(el("video", { id: "s1-media", src: fileUrl(want), controls: true, preload: "metadata", poster: m.thumb ? fileUrl(m.thumb) : null }));
     else {
       const ds = m.design_still || {};
-      const still = ds[designKind() || "mv"] || ds.mv || ds.montage || m.cover;
+      const still = (bgKind(S.d1.options.background.type) === "video" && (m.mv_video || {}).still) || ds[designKind() || "mv"] || ds.mv || ds.montage || m.cover;
       box.append(still ? el("img", { src: fileUrl(still) }) : el("div", { class: "audio-only" }, "♪ 纯音频素材 · 将自动生成频谱动画背景"));
       box.append(el("audio", { id: "s1-media", src: fileUrl(want), controls: true, preload: "metadata" }));
     }
@@ -576,22 +578,16 @@ function renderOutput() {
   const j = S.job; const o = S.d1.options; const hasVideo = !!(j.media.source && j.media.source.has_video);
   const cur = bgKind(o.background.type);
   const ctl = $("#bg-type"); ctl.innerHTML = "";
-  for (const [v, label] of BG_TYPES) ctl.append(el("button", { class: cur === v ? "on" : "", onclick: () => {
+  for (const [v, label0] of BG_TYPES) { const label = v === "video" && !hasVideo ? "MV 视频" : label0; ctl.append(el("button", { class: cur === v ? "on" : "", onclick: () => {
     if (v === "video") {
       if (hasVideo) setBackground({ type: "source" });
       else { o.background = { type: "video", path: o.background.path || "" }; touch("options"); renderOutput(); renderMV(); }
     } else if (v === "subs") setBackground({ type: "subs", color: o.background.type === "subs" ? o.background.color : "#000000" });
     else setBackground({ type: v });
-  } }, label));
+  } }, label)); }
   const extra = $("#bg-extra"); extra.innerHTML = "";
   if (cur === "video" && hasVideo) extra.append(el("span", { class: "muted small" }, "使用素材原视频作为背景"));
-  if (cur === "video" && !hasVideo) {
-    const inp = el("input", { type: "text", class: "grow", value: o.background.path || "", placeholder: "背景视频的本机路径，如 D:\\video\\bg.mp4（只取画面，音频仍用歌曲）" });
-    extra.append(inp, el("button", { class: "btn ghost sm", onclick: () => {
-      const p = inp.value.trim().replace(/^"|"$/g, ""); if (!p) return;
-      setBackground({ type: "video", path: p }); toast("已设置背景视频");
-    } }, "使用"));
-  }
+  if (cur === "video" && !hasVideo) extra.append(renderMvVideo());
   if (cur === "mv") extra.append(el("span", { class: "muted small" }, "Agent 按歌曲主题设计画面 + 频谱 / 音频可视化，见下方「AMV 设计」"));
   if (cur === "montage") extra.append(el("span", { class: "muted small" }, "图片按节拍剪辑（网上搜集 / 你的图包 / 混合），见下方「图片混剪」"));
   if (cur === "subs") {
@@ -606,6 +602,7 @@ function renderOutput() {
   $("#out-kind-mv").hidden = !(cur === "mv" || cur === "montage");
   $("#out-kind-mv-label").textContent = cur === "montage" ? "图片混剪（无字幕版）" : "AMV（无字幕版）";
   $("#out-res").value = o.resolution;
+  if (document.activeElement !== $("#out-cast")) $("#out-cast").value = o.cast_delay_ms === undefined ? 200 : o.cast_delay_ms;
   if (![30, 60].includes(+o.fps)) o.fps = 60;
   $$("#out-fps button").forEach((b) => b.classList.toggle("on", +b.dataset.v === +o.fps));
   $$("#out-kinds input").forEach((c) => (c.checked = o.outputs.includes(c.value)));
@@ -618,6 +615,43 @@ function renderOutput() {
   if (document.activeElement !== $("#s1-hires-on")) $("#s1-hires-on").value = hr.on || "";
   if (document.activeElement !== $("#s1-hires-off")) $("#s1-hires-off").value = (hr.off || []).join("; ");
 }
+// "MV 视频" background for audio projects: search + download (Lin-K Lyrics' video downloader) or a local file
+function renderMvVideo() {
+  const j = S.job; const mvv = (j.media || {}).mv_video || null;
+  const cands = ((j.previews || {}).mv_video_candidates || {});
+  const song = j.song || {};
+  const box = el("div", { class: "mvv" });
+  if (mvv) {
+    box.append(el("div", { class: "mvv-cur" },
+      mvv.still ? el("img", { src: fileUrl(mvv.still) }) : null,
+      el("div", {}, el("b", {}, mvv.title || "背景视频"),
+        el("div", { class: "muted small" }, [mvv.uploader, mvv.source, mvv.format].filter(Boolean).join(" · ")),
+        el("div", { class: "small mvv-notes" + ((mvv.notes || []).some((n) => n.startsWith("⚠")) ? " warn" : "") }, (mvv.notes || []).join("\n")))));
+  }
+  const q = el("input", { type: "text", class: "grow", value: cands.query || [song.artist, song.title, "MV"].filter(Boolean).join(" "), placeholder: "搜索 YouTube，如「歌手 歌名 MV」" });
+  box.append(el("div", { class: "row gap" }, q, el("button", { class: "btn ghost sm", onclick: () => {
+    if (!q.value.trim()) return; act("mv_video_search", { query: q.value.trim() }); toast("正在搜索 MV…");
+  } }, "搜索 MV")));
+  const list = el("div", { class: "mvv-list" });
+  for (const c of cands.items || []) {
+    list.append(el("div", { class: "mvv-item" + (mvv && mvv.url && mvv.url.includes(c.id) ? " on" : "") },
+      el("img", { src: c.thumb_local ? fileUrl(c.thumb_local) : c.thumb, referrerpolicy: "no-referrer" }),
+      el("div", { class: "mvv-meta" }, el("b", {}, c.title || c.id),
+        el("span", { class: "muted small" }, [c.uploader, c.duration ? fmtT(c.duration, false) : "", c.views ? c.views.toLocaleString() + " 次播放" : ""].filter(Boolean).join(" · "))),
+      el("button", { class: "btn ghost sm", onclick: () => {
+        if (!confirm(`下载「${c.title}」（${c.uploader || ""}，${c.duration ? fmtT(c.duration, false) : ""}）并设为背景？\n只用它的画面，会自动对齐到歌曲。`)) return;
+        act("mv_video_use", { url: c.url }); toast("正在下载 MV 并对齐到歌曲…");
+      } }, "使用")));
+  }
+  if ((cands.items || []).length) box.append(list);
+  const loc = el("input", { type: "text", class: "grow", placeholder: "或使用本机视频文件路径，如 D:\\video\\mv.mp4" });
+  box.append(el("div", { class: "row gap" }, loc, el("button", { class: "btn ghost sm", onclick: () => {
+    const p = loc.value.trim().replace(/^"|"$/g, ""); if (!p) return; act("mv_video_local", { path: p }); toast("正在对齐本机视频…");
+  } }, "使用本机视频")));
+  box.append(el("span", { class: "muted small" }, "只取视频画面，音频始终用你的歌曲文件（无损时 on / off vocal 都是无损源）。"));
+  return box;
+}
+
 function splitPaths(v) { return String(v || "").split(/[;\r\n]+/).map((x) => x.trim().replace(/^"|"$/g, "")).filter(Boolean); }
 
 function designKind() { const t = S.d1 && bgKind(S.d1.options.background.type); return t === "mv" || t === "montage" ? t : null; }
@@ -765,6 +799,10 @@ function bindStage1() {
   });
   $("#singer-refresh").addEventListener("click", () => { act("preview_styles", { only: ["singers"], singers: S.d1.singers, options: { template: S.d1.options.template } }); toast("正在用渲染引擎刷新歌手样式预览"); });
   $("#out-res").addEventListener("change", (ev) => { S.d1.options.resolution = ev.target.value; touch("options"); });
+  $("#out-cast").addEventListener("change", (ev) => {
+    const v = Math.round(+ev.target.value || 0); S.d1.options.cast_delay_ms = v; touch("options");
+    act("set_option", { cast_delay_ms: v });
+  });
   $$("#out-fps button").forEach((b) => b.addEventListener("click", () => { S.d1.options.fps = +b.dataset.v; touch("options"); renderOutput(); }));
   $$("#out-kinds input").forEach((c) => c.addEventListener("change", () => { S.d1.options.outputs = $$("#out-kinds input").filter((x) => x.checked).map((x) => x.value); touch("options"); renderOutput(); }));
   const regHires = () => {
@@ -894,6 +932,10 @@ function renderExports() {
   row.append(el("button", { class: "btn ghost", disabled: running || !hasMaster, title: hasMaster ? "复制视频流，只替换音轨" : "请先导出成品 MP4", onclick: () => {
     act("export", { kinds: ["onoff"], hires: hiresPayload() }); toast("正在生成 on / off vocal 版本");
   } }, "on / off vocal"));
+  const cd = (j.options || {}).cast_delay_ms;
+  const cast = el("input", { type: "number", step: 50, value: cd === undefined || cd === null ? 200 : cd, class: "cast-in",
+    title: "投屏延迟：画面比声音提前的毫秒数，导出时生效", onchange: (ev) => { act("set_option", { cast_delay_ms: Math.round(+ev.target.value || 0) }); toast("投屏延迟已更新，下次导出生效"); } });
+  row.append(el("label", { class: "cast-label muted small" }, "投屏延迟", cast, "ms"));
   row.append(el("button", { class: "btn ghost", disabled: running, title: "只有字幕、带透明通道的 ProRes 4444 MOV，导入剪辑软件叠加使用", onclick: () => {
     act("export", { kinds: ["alpha"] }); toast("正在渲染透明字幕层（整首歌，体积较大）");
   } }, "透明字幕层 MOV"));

@@ -67,6 +67,13 @@ def cmd_versions(store: JobStore, *, video: str | None = None, on: str | None = 
     t0 = time.time()
     tracks = resolve_tracks(store, master, on=on, offs=offs, align=align,
                             separate_from_on=opts.get("separate_from_on", True), progress=say)
+    from .tracks import cast_delay_ms, delayed_audio
+
+    delay = cast_delay_ms(st)
+    if delay:  # 投屏延迟: same picture, the sound `delay` ms later
+        tracks.on = delayed_audio(store, tracks.on, delay) if tracks.on is not None else None
+        tracks.offs = [delayed_audio(store, p, delay) for p in tracks.offs]
+        tracks.notes.append(f"投屏延迟 {delay:+d} ms：画面比声音提前 {delay / 1000:.2f} 秒")
     duration = probe(master)["duration"]
     outputs: list[Path] = []
     on_out = _versioned(master, "on vocal")

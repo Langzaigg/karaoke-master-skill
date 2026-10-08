@@ -86,9 +86,13 @@ TOOL_ACTIONS = {
     "set_background",   # stage-1 background choice: video / AMV / image montage / subtitles only
     "montage_source",   # where montage images come from: web / user packs / mixed
     "mv_assets_import", # import an uploaded image pack (files, folders, .zip)
+    "mv_video_search",  # search YouTube for the song's MV (no download)
+    "mv_video_use",     # download the chosen MV and align it to the song (the user clicked it)
+    "mv_video_local",   # use a local video file as the MV background (aligned)
 }
 # Tool actions the agent must also react to.
-NOTIFY_AGENT = {"confirm_stage1", "set_background", "montage_source", "mv_assets_import"}
+NOTIFY_AGENT = {"confirm_stage1", "set_background", "montage_source", "mv_assets_import", "mv_video_use",
+                "mv_video_local"}
 # Actions that only touch drafts or the OS.
 LOCAL_ACTIONS = {"save_draft", "open_folder", "open_file", "open_app", "close_page"}
 

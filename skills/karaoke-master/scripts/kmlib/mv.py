@@ -1741,8 +1741,10 @@ def design_sig(store: JobStore, st: dict, kind: str, spec: dict | None = None) -
         from . import mv_assets
 
         parts.append(",".join(a["id"] for a in mv_assets.load_pool(store)))
-        timed = store.dir / "timing" / "timed.json"
-        parts.append(str(timed.stat().st_mtime) if timed.is_file() else "")
+        view = read_json(store.dir / "timing" / "timed.json") or {}
+        # the cut plan follows the lyric times / repeats, not singer colours or styling
+        parts.append(json.dumps([(round(l.get("start") or 0, 2), round(l.get("end") or 0, 2), l.get("text"))
+                                 for l in view.get("lines") or []], ensure_ascii=False))
     return hashlib.sha1("|".join(parts).encode("utf-8")).hexdigest()[:16]
 
 

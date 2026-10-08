@@ -1,0 +1,345 @@
+from __future__ import annotations
+
+import re
+from dataclasses import replace
+from typing import Any
+from urllib.parse import unquote, urlsplit
+
+from .download_task import FormatOption
+
+
+QUALITY_LABEL_PATTERN = re.compile(r"(\d{3,4})p(?:\d{2})?", flags=re.IGNORECASE)
+FPS_LABEL_PATTERN = re.compile(r"(\d{2,3})帧")
+
+
+def format_bytes(size: int | None, *, estimated: bool = False) -> str:
+    if size is None or size <= 0:
+        return "-"
+
+    units = ["B", "KB", "MB", "GB", "TB"]
+    value = float(size)
+    for unit in units:
+        if value < 1024 or unit == units[-1]:
+            if unit == "B":
+                return f"{'约 ' if estimated else ''}{int(value)} {unit}"
+            return f"{'约 ' if estimated else ''}{value:.1f} {unit}"
+        value /= 1024
+    return "-"
+
+
+class FormatParser:
+    def parse_formats(
+        self,
+        raw_formats: list[dict[str, Any]] | None,
+        *,
+        preferred_audio_ext: str = "",
+        duration: float | None = None,
+    ) -> list[FormatOption]:
+        formats = list(raw_formats or [])
+        if not formats:
+            return []
+
+        best_audio = self._pick_best_audio(formats, preferred_ext=preferred_audio_ext)
+        candidates: dict[str, tuple[tuple[float, float, int], FormatOption]] = {}
+
+        for item in formats:
+            vcodec = str(item.get("vcodec") or "none")
+            if vcodec == "none":
+                continue
+
+            height = int(item.get("height") or 0)
+            width = int(item.get("width") or 0)
+            if height <= 0 and width <= 0:
+                continue
+
+            resolution = self._build_resolution_label(item, width, height)
+            acodec = str(item.get("acodec") or "none")
+            ext = str(item.get("ext") or "").lower()
+            format_id = str(item.get("format_id") or "")
+            if not format_id:
+                continue
+
+            # 真实体积用于排序，估算体积只用于显示：不能让「估出来的数」把无体积的
+            # HLS 变体重新顶回各档清晰度的代表位。
+            video_size = self._coalesce_size(item)
+            filesize = video_size or self._estimate_size(item, duration)
+            filesize_is_estimate = not self._has_exact_size(item)
+            requires_merge = acodec == "none" and best_audio is not None
+            if requires_merge:
+                audio_id = str(best_audio.get("format_id") or "")
+                if not audio_id:
+                    continue
+                download_format = f"{format_id}+{audio_id}"
+                # 两轨都能确定或估算体积时才相加，避免把单轨体积当成总大小。
+                audio_size = self._coalesce_size(best_audio) or self._estimate_size(best_audio, duration)
+                filesize = filesize + audio_size if filesize and audio_size else None
+                filesize_is_estimate = filesize_is_estimate or not self._has_exact_size(best_audio)
+                audio_codec = str(best_audio.get("acodec") or "unknown")
+                format_label = f"{ext.upper() or '视频'} + 音频"
+            else:
+                download_format = format_id
+                audio_codec = acodec
+                format_label = ext.upper() or "默认"
+
+            fps = self._coalesce_fps(item)
+            note = self._clean_note(str(item.get("format_note") or ""))
+            option = FormatOption(
+                option_id=f"{format_id}:{resolution}",
+                download_format=download_format,
+                format_label=format_label,
+                resolution=resolution,
+                video_codec=self._normalize_codec(vcodec),
+                audio_codec=self._normalize_codec(audio_codec),
+                filesize=filesize,
+                ext=ext,
+                note=note,
+                height=height,
+                width=width,
+                requires_merge=requires_merge,
+                filesize_is_estimate=bool(filesize and filesize_is_estimate),
+            )
+
+            # 同一档清晰度里选谁当代表：**能报出体积的优先**。
+            # YouTube 从 2026-08 起在格式表里混进了 HLS（``m3u8_native``）变体，
+            # 它们的 ``tbr`` 普遍比同画质的 DASH 条目高（1080p: 4684 vs 1859），
+            # 却完全没有 filesize/filesize_approx。只按 tbr 排的话每档都会被这些
+            # 无体积条目占据，界面上全部清晰度都显示不出真实大小。
+            score = (
+                1 if video_size else 0,
+                float(item.get("tbr") or item.get("vbr") or 0),
+                fps,
+                filesize or 0,
+            )
+            variant_key = self._build_variant_key(item, resolution, note, fps)
+            current = candidates.get(variant_key)
+            if current is None or score >= current[0]:
+                candidates[variant_key] = (score, option)
+
+        ordered = sorted(
+            (entry[1] for entry in candidates.values()),
+            key=lambda option: (
+                self._resolution_rank(option),
+                self._resolution_fps_rank(option),
+                self._note_priority(option.note),
+                option.filesize or 0,
+            ),
+            reverse=True,
+        )
+        if not ordered:
+            return []
+
+        recommended = self.build_recommended_option(ordered)
+        result = [recommended]
+        for option in ordered:
+            if option.resolution == recommended.resolution and option.download_format == recommended.download_format:
+                continue
+            result.append(option)
+        return result
+
+    def build_recommended_option(self, options: list[FormatOption]) -> FormatOption:
+        if not options:
+            raise ValueError("formats cannot be empty")
+
+        best = options[0]
+        return replace(
+            best,
+            option_id=f"recommended:{best.option_id}",
+            format_label="最佳质量",
+            is_recommended=True,
+        )
+
+    def _pick_best_audio(self, formats: list[dict[str, Any]], *, preferred_ext: str = "") -> dict[str, Any] | None:
+        audio_only = [
+            item
+            for item in formats
+            if str(item.get("vcodec") or "none") == "none" and str(item.get("acodec") or "none") != "none"
+        ]
+        if not audio_only:
+            return None
+        preferred_ext = preferred_ext.lower().strip()
+        if preferred_ext:
+            preferred_audio = [item for item in audio_only if str(item.get("ext") or "").lower() == preferred_ext]
+            if preferred_audio:
+                audio_only = preferred_audio
+        return max(
+            audio_only,
+            key=lambda item: (
+                float(item.get("abr") or 0),
+                float(item.get("tbr") or 0),
+                self._coalesce_size(item) or 0,
+            ),
+        )
+
+    def _build_resolution_label(self, item: dict[str, Any], width: int, height: int) -> str:
+        base_label = self._extract_quality_label(item)
+        if not base_label:
+            if width > 0 and height > 0:
+                base_label = f"{min(width, height)}p"
+            elif height > 0:
+                base_label = f"{height}p"
+            elif width > 0:
+                base_label = f"{width}px"
+            else:
+                base_label = "未知"
+
+        suffixes: list[str] = []
+        fps = self._coalesce_fps(item)
+        if fps >= 49 and "60" not in base_label and "50" not in base_label:
+            suffixes.append(f"{int(round(fps))}帧")
+
+        note = self._clean_note(str(item.get("format_note") or ""))
+        if note and not self._note_redundant(note, base_label):
+            suffixes.append(note)
+
+        dynamic_range = str(item.get("dynamic_range") or "").strip().upper()
+        if dynamic_range and dynamic_range != "SDR" and dynamic_range not in suffixes:
+            suffixes.append(dynamic_range)
+
+        return " ".join([base_label, *suffixes]).strip()
+
+    def _extract_quality_label(self, item: dict[str, Any]) -> str:
+        quality_label = str(item.get("quality_label") or "").strip()
+        if quality_label:
+            return quality_label
+
+        for text in (
+            str(item.get("format_note") or "").strip(),
+            str(item.get("format") or "").strip(),
+            str(item.get("resolution") or "").strip(),
+        ):
+            match = QUALITY_LABEL_PATTERN.search(text)
+            if match:
+                return f"{match.group(1)}p"
+
+        width = int(item.get("width") or 0)
+        height = int(item.get("height") or 0)
+        if width > 0 and height > 0:
+            return f"{min(width, height)}p"
+        return ""
+
+    def _build_variant_key(self, item: dict[str, Any], resolution: str, note: str, fps: float) -> str:
+        dynamic_range = str(item.get("dynamic_range") or "").strip().upper()
+        parts = [resolution]
+        if fps >= 49 and "帧" not in resolution:
+            parts.append(f"{int(round(fps))}fps")
+        if note and not self._note_redundant(note, resolution):
+            parts.append(note.lower())
+        if dynamic_range and dynamic_range != "SDR":
+            parts.append(dynamic_range)
+        return "|".join(parts)
+
+    def _note_redundant(self, note: str, resolution: str) -> bool:
+        note_lower = note.lower().strip()
+        resolution_lower = resolution.lower().strip()
+        if not note_lower:
+            return True
+        if note_lower in resolution_lower or resolution_lower in note_lower:
+            return True
+        simplified_note = re.sub(r"[\s_/-]+", "", note_lower)
+        simplified_resolution = re.sub(r"[\s_/-]+", "", resolution_lower)
+        return simplified_note == simplified_resolution
+
+    def _clean_note(self, note: str) -> str:
+        if not note:
+            return ""
+        cleaned = note.strip()
+        cleaned = QUALITY_LABEL_PATTERN.sub("", cleaned)
+        cleaned = re.sub(r"\bDASH\b", "", cleaned, flags=re.IGNORECASE)
+        cleaned = re.sub(r"\bvideo only\b", "", cleaned, flags=re.IGNORECASE)
+        cleaned = re.sub(r"\baudio only\b", "", cleaned, flags=re.IGNORECASE)
+        cleaned = re.sub(r"\bHLS\b", "", cleaned, flags=re.IGNORECASE)
+        cleaned = re.sub(r"\s+", " ", cleaned).strip(" -_/")
+        return cleaned
+
+    def _coalesce_fps(self, item: dict[str, Any]) -> float:
+        value = item.get("fps")
+        if isinstance(value, (int, float)) and value > 0:
+            return float(value)
+        return 0.0
+
+    def _resolution_rank(self, option: FormatOption) -> int:
+        match = QUALITY_LABEL_PATTERN.search(option.resolution)
+        if match:
+            return int(match.group(1))
+        return min(value for value in (option.height, option.width) if value > 0) if (option.height > 0 or option.width > 0) else 0
+
+    def _resolution_fps_rank(self, option: FormatOption) -> int:
+        match = FPS_LABEL_PATTERN.search(option.resolution)
+        if match:
+            return int(match.group(1))
+        return 0
+
+    def _note_priority(self, note: str) -> int:
+        lower = (note or "").lower()
+        score = 0
+        for keyword, weight in (
+            ("premium", 5),
+            ("hdr", 4),
+            ("dolby", 4),
+            ("高码率", 3),
+            ("高帧率", 3),
+            ("会员", 2),
+        ):
+            if keyword in lower:
+                score += weight
+        return score
+
+    def _normalize_codec(self, codec: str) -> str:
+        if not codec or codec == "none":
+            return "-"
+        return codec.split(".")[0]
+
+    def _coalesce_size(self, item: dict[str, Any]) -> int | None:
+        for key in ("filesize", "filesize_approx"):
+            value = item.get(key)
+            if isinstance(value, (int, float)) and value > 0:
+                return int(value)
+        return None
+
+    def _has_exact_size(self, item: dict[str, Any]) -> bool:
+        value = item.get("filesize")
+        return isinstance(value, (int, float)) and value > 0
+
+    def _youtube_hls_source_size(self, item: dict[str, Any]) -> int | None:
+        """YouTube HLS URL 中的源轨 clen；重新封装会有少量开销差异。"""
+        try:
+            url = urlsplit(str(item.get("url") or ""))
+        except ValueError:
+            return None
+        host = (url.hostname or "").lower()
+        if host != "googlevideo.com" and not host.endswith(".googlevideo.com"):
+            return None
+        parts = url.path.split("/")
+        keys = []
+        if str(item.get("vcodec") or "none") != "none":
+            keys.append("sgovp")
+        if str(item.get("acodec") or "none") != "none":
+            keys.append("sgoap")
+        if not keys:
+            return None
+        total = 0
+        for key in keys:
+            try:
+                metadata = unquote(parts[parts.index(key) + 1])
+            except (ValueError, IndexError):
+                return None
+            match = re.search(r"(?:^|;)clen=([0-9]{1,20})(?:;|$)", metadata)
+            if not match or int(match.group(1)) <= 0:
+                return None
+            total += int(match.group(1))
+        return total
+
+    def _estimate_size(self, item: dict[str, Any], duration: float | None) -> int | None:
+        """优先读取 HLS 源轨长度；普通格式可按码率 × 时长估体积。"""
+
+        if str(item.get("protocol") or "").startswith("m3u8"):
+            # HLS tbr 可能来自 BANDWIDTH（峰值且可能含外置音频），不能当
+            # 平均视频码率。取不到源轨长度就保持未知，不再制造成倍虚高的值。
+            return self._youtube_hls_source_size(item)
+
+        if not duration or duration <= 0:
+            return None
+        tbr = item.get("tbr") or item.get("vbr")
+        if not isinstance(tbr, (int, float)) or tbr <= 0:
+            return None
+        return int(float(tbr) * 1000 / 8 * float(duration))

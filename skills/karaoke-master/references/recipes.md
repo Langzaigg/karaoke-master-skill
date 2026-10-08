@@ -15,7 +15,8 @@ milliseconds (`ms`). Several ops can go in one list; checkpoints are kept monoto
 | `set_char` | `line, char, cp?, t` | move one checkpoint (char 0-based, cp = mora index) |
 | `set_line_end` | `line, t` | when the last syllable is released |
 | `set_pause` | `line, char, t` (`t: "auto"` = last voiced moment from the vocal stem; `t: null` removes) | breath / release after a syllable inside the line |
-| `set_singer` | `lines`, `singer` (SUG singer id from `timing/timed.json → singers`) | duet re-assignment after timing |
+| `set_singer` | `lines`, `singer` (SUG singer id or name from `timing/timed.json → singers`), optional `chars: [first, last]` (0-based, inclusive) | duet re-assignment after timing; part of a line (a trio entering mid-line) |
+| `add_singer` | `name`, `color` | a new singer, e.g. 「A＆B」 for parts sung together (also add it to `song.singers` with `set --song` so it gets its colour) |
 | `set_ruby` | `line, ruby: [[start, end, "かな"]]` | fix a reading; then `KM realign <job> --lines i+1` |
 
 Payload of a page `prompt` includes `t` (playhead seconds) and `active_line` (0-based line being
@@ -29,6 +30,8 @@ sung at the playhead) — use them for "这句 / 这里 / 刚才那句".
 | 副歌第二句走字太快 | find the line, `realign --lines N` with a wider `--window` |
 | 「明日」应该读 あした | `set_ruby` on that line, then `realign` |
 | 第 3–6 行是美雲唱的 | before timing: `lines --singer 3-6=mikumo`; after: `set_singer` with the SUG id |
+| 这句后半是三个人合唱 | `add_singer` (once) + `[{"op":"set_singer","lines":[11],"singer":"A＆B＆C","chars":[2,7]}]` |
+| 投屏看着字幕慢半拍 | `KM export <job> --cast-delay 300 …` (picture leads by 300 ms; default 200) |
 
 ## Style patch (`KM style <job> @patch.json`)
 
@@ -64,7 +67,7 @@ are at 1080p and rescaled to the output height):
 | `vertical` | vertical (縦書き) layout |
 
 Colours per state live in the template; for a one-off colour change prefer switching template or
-`singer_styles`. Background types: `source` (the job's video), `video` (`path`: another local
+`singer_styles`. `cast_delay_ms` (投屏延迟, default 200) is an export option. Background types: `source` (the job's video), `video` (`path`: another local
 video, picture only), `mv` (the AMV design; audio-only default — `spectrum` is an old alias),
 `montage` (the image montage design), `subs` (subtitles only, `color`), plus `color` and `image`
 (`path` relative to the job, e.g. an upload). `fps`: 30 or 60.

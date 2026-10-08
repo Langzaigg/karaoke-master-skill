@@ -531,7 +531,9 @@ def apply_edits(project, edits: list[dict]) -> list[str]:
 
     ops: shift_lines {lines, ms} · shift_all {ms} · set_line_span {line, start, end}
     (seconds; rescales the line linearly) · set_char {line, char, cp?, t} ·
-    set_line_end {line, t} · set_pause {line, char, t|None} · set_singer {lines, singer} ·
+    set_line_end {line, t} · set_pause {line, char, t|None} ·
+    set_singer {lines, singer (id or name), chars?: [first, last]} (chars = 0-based, inclusive:
+    only that part of the line, e.g. a trio entering mid-line) · add_singer {name, color} ·
     set_ruby {line, ruby: [[start, end, reading]]} (rebuilds the line; realign it afterwards)
     """
     log = []
@@ -604,13 +606,31 @@ def apply_edits(project, edits: list[dict]) -> list[str]:
             rebuilt.id = old.id
             sentences[li] = rebuilt
             log.append(f"第 {li + 1} 行读音已更新（需运行 realign --lines {li + 1}）")
+        elif op == "add_singer":
+            if not any(sg.name == ed["name"] for sg in project.singers):
+                from strange_uta_game.backend.domain.entities import Singer
+
+                project.add_singer(Singer(name=ed["name"], color=ed.get("color") or "#FF6B6B", is_default=False))
+                log.append(f"新增演唱者 {ed['name']}")
         elif op == "set_singer":
-            target = ed["singer"]
+            target = str(ed["singer"])
+            by_name = {sg.name: sg.id for sg in project.singers}
+            target = by_name.get(target, target)
+            if target not in {sg.id for sg in project.singers}:
+                raise ValueError(f"没有这个演唱者：{ed['singer']}（先用 add_singer 添加）")
+            rng = ed.get("chars")
             for li in _line_list(ed, len(sentences)):
-                sentences[li].singer_id = target
-                for ch in sentences[li].characters:
-                    ch.singer_id = target
-            log.append(f"第 {_fmt_lines(ed)} 行演唱者改为 {target}")
+                chars = sentences[li].characters
+                if rng:  # part of the line
+                    a, b = int(rng[0]), min(len(chars) - 1, int(rng[1]))
+                    for ch in chars[a:b + 1]:
+                        ch.singer_id = target
+                else:
+                    sentences[li].singer_id = target
+                    for ch in chars:
+                        ch.singer_id = target
+            part = f"第 {rng[0] + 1}–{rng[1] + 1} 字" if rng else ""
+            log.append(f"第 {_fmt_lines(ed)} 行{part}演唱者改为 {ed['singer']}")
         else:
             raise ValueError(f"未知编辑操作：{op}")
     _enforce_monotonic(project)

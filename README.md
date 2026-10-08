@@ -11,9 +11,9 @@
 ![Platform](https://img.shields.io/badge/Windows-主要验证平台-0078D6)
 ![Agent Skill](https://img.shields.io/badge/Agent-Skill-ff5fa2)
 
-<img src="images/hero.jpg" width="100%" alt="三种背景模式的成品画面：原视频、AMV 频谱、图片混剪">
+<img src="images/hero.jpg" width="100%" alt="四种背景模式的成品画面：原视频、网络 MV、AMV 频谱、图片混剪">
 
-<sub>样例：ワルキューレ「ALIVE～祈りの唄～」三种背景模式的成品画面（左起：原视频 / AMV 频谱 / 图片混剪）。为避免转载歌词，文档中所有图片的歌词均已模糊处理。</sub>
+<sub>样例成品画面（左起：原视频 / 网络下载的 MV / AMV 频谱 / 图片混剪）。为避免转载歌词，文档中所有图片的歌词均已模糊处理。</sub>
 
 </div>
 
@@ -23,25 +23,28 @@
 
 | 你给 Agent 的 | 它交还给你的 |
 |---|---|
-| 歌名 / 音频文件 / 视频（MV、MAD、切片） | 逐字走字的卡拉OK MP4（30 / 60 fps，1080p 起） |
+| 歌名 / 音频文件 / 视频（MV、MAD、切片） | 逐字走字的卡拉OK MP4（30 / 60 fps，1080p 起，按歌割り给每位歌手上色） |
 | 可选：无损原唱 FLAC（Hi-Res 音源） | **on vocal** 与 **off vocal**（伴奏）两个版本，伴奏由人声分离自动生成 |
 | 可选：你自己的图包 | Hi-Res 混流 MKV（FLAC 32bit 无损原唱 / 伴奏轨） |
 | 一句话的修改意见 | `.sug` 打轴工程、`.yurika` 字幕工程，可在 Lin-K Lyrics 桌面版里继续精修 |
 | | 透明字幕层 MOV（ProRes 4444，叠加到 PR / AE / 达芬奇） |
+| | 投屏延迟补偿：导出时画面比声音提前（默认 +200 ms，可调） |
 
 Agent 自己完成：识别歌曲（作词 / 作曲 / 演唱者）、检索带振假名的歌词与参考时间轴、判断视频里实际唱了哪几句、
 人声分离、强制对齐打轴、质检修正、按歌曲主题设计 MV 画面、按节拍剪辑图片……你只需要在网页里确认和提意见。
 
-## 三种背景，三种成品
+## 四种背景，四种成品
 
 <table>
 <tr>
-<td width="33%"><img src="images/mode_video.jpg" alt="视频模式"></td>
-<td width="33%"><img src="images/mode_amv.jpg" alt="AMV 频谱模式"></td>
-<td width="33%"><img src="images/mode_montage.jpg" alt="图片混剪模式"></td>
+<td width="25%"><img src="images/mode_video.jpg" alt="视频模式"></td>
+<td width="25%"><img src="images/mode_mvvideo.jpg" alt="网络 MV 模式"></td>
+<td width="25%"><img src="images/mode_amv.jpg" alt="AMV 频谱模式"></td>
+<td width="25%"><img src="images/mode_montage.jpg" alt="图片混剪模式"></td>
 </tr>
 <tr>
 <td><b>视频</b><br>直接用素材视频作背景；登记无损原唱后，打轴、伴奏分离与 Hi-Res 混流都基于无损音源。</td>
+<td><b>网络 MV</b><br>只有歌曲文件时，Agent 用 Lin-K Lyrics 的下载模块（yt-dlp）从 YouTube / B 站找来这首歌的 MV 或动画 OP·ED，自动按波形对齐到你的音频，只取画面。</td>
 <td><b>AMV（频谱可视化）</b><br>只有音频时，Agent 读懂歌曲主题后设计一套画面：配色、意象、封面唱片、环形频谱、粒子与光效，随低 / 中 / 高频律动。</td>
 <td><b>图片混剪</b><br>官方宣传图 / 你的图包 / 两者混合，按检测到的节拍在小节强拍上切换；除重复段落外不重复用图；默认交叉淡化 + 缓慢推拉，画面平稳（想要燃向的鼓点冲击可以让 Agent 打开）。</td>
 </tr>
@@ -75,6 +78,10 @@ Agent 自己完成：识别歌曲（作词 / 作曲 / 演唱者）、检索带�
 
 网页预览与渲染引擎逐像素一致；逐行 ±0.02 / 0.1 秒微调、拖动时间轴、一键「引擎帧预览」；
 也可以直接用自然语言告诉 Agent：「第 12 行晚了 0.2 秒」「副歌换成红色描边」「把美雲的颜色改成蓝紫色」。
+
+<img src="images/mv_video.jpg" width="100%" alt="网络 MV：搜索结果、对齐结果与本地视频">
+
+网络 MV：搜索结果附缩略图、时长与播放量，选中「使用」后下载并对齐（这里 -4.84 秒、置信 100%）；也可以改用本机视频。
 
 <table>
 <tr>
@@ -119,6 +126,8 @@ git clone -b skill https://github.com/Langzaigg/karaoke-master-skill.git
 > 只有这首歌的 FLAC，帮我做一个星空主题的频谱 MV 版卡拉OK，30 fps。
 
 > 用我这个图包 `D:\pics\delta.zip` 做混剪背景，不够的再去网上找官方图。
+
+> 我只有 `RTB.flac`，去油管找这首歌的片尾动画当背景，导出 on / off vocal，投屏延迟设成 400 ms。
 
 Agent 会创建工程、打开网页，并在每个阶段等你确认。所有命令都在 `km.py` 里，完整说明见 [`skills/karaoke-master/SKILL.md`](skills/karaoke-master/SKILL.md)，常用操作与图层参数见 [`references/recipes.md`](skills/karaoke-master/references/recipes.md)。
 
@@ -169,6 +178,9 @@ Lin-K Lyrics 由 [Myosotis11037](https://github.com/Myosotis11037)（原 [karaok
 **内容版权**：歌词、歌曲、画面等素材的版权归各自权利人所有。技能检索到的歌词与网络图片仅供个人学习、非商业的卡拉OK制作使用，
 请勿将成品用于商业用途或公开分发受版权保护的内容；使用网络图片时 Agent 会记录出处（`km.py mv-assets --credits`）。
 
+**下载的视频**：网络 MV 模式通过 yt-dlp 下载公开视频，仅供个人制作卡拉OK使用；视频版权归原权利人所有，Agent 下载前会说明视频来源并征得你同意。
+
 **文档样例素材**：本文截图使用ワルキューレ「ALIVE～祈りの唄～」（作词：唐沢美帆，作曲·编曲：加藤裕介；
-《劇場版マクロスΔ 絶対LIVE!!!!!!》插入歌）制作，画面与图片 ©2021 BIGWEST/MACROSS DELTA PROJECT，仅作功能演示；
+《劇場版マクロスΔ 絶対LIVE!!!!!!》插入歌；画面与图片 ©2021 BIGWEST/MACROSS DELTA PROJECT）与ムッシュかまやつ「RTB」
+（作词：横山武・多田由美，作曲：Clara・三柴理；OVA《戦闘妖精・雪風》片尾曲，画面版权归该作品权利人所有）制作，仅作功能演示；
 截图中的歌词均已模糊处理，样例成品不包含在仓库中。

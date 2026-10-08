@@ -918,8 +918,11 @@ def cmd_frame(args) -> int:
 def cmd_export(args) -> int:
     from . import render
 
-    return render.cmd_export(JobStore(args.job), [k.strip() for k in args.kinds.split(",") if k.strip()],
-                             clip=args.clip)
+    store = JobStore(args.job)
+    if args.cast_delay is not None:  # persisted: on / off vocal and Hi-Res redone later use it too
+        store.update(lambda s: s.setdefault("options", {}).update(cast_delay_ms=int(args.cast_delay)))
+        store.log(f"投屏延迟设为 {int(args.cast_delay):+d} ms（画面比声音提前）")
+    return render.cmd_export(store, [k.strip() for k in args.kinds.split(",") if k.strip()], clip=args.clip)
 
 
 def cmd_mv(args) -> int:
@@ -1049,6 +1052,35 @@ def cmd_mv_assets(args) -> int:
         out["pool"] = [{"origin": mv_assets.origin_of(a), **{k: a.get(k) for k in ("id", "name", "w", "h", "credit",
                                                                                   "source", "tags")}}
                        for a in mv_assets.load_pool(store)]
+    _p(out)
+    return 0
+
+
+def cmd_mv_video(args) -> int:
+    """MV background downloaded from YouTube / Bilibili (Lin-K Lyrics' video downloader)."""
+    from . import mvvideo
+
+    store = JobStore(args.job)
+    out: dict = {}
+    if args.search:
+        items = mvvideo.search(args.search, args.n)
+        mvvideo.set_candidates(store, args.search, items)
+        out["candidates"] = [{"k": k + 1, **{x: it[x] for x in ("title", "uploader", "duration", "views", "url")}}
+                             for k, it in enumerate(items)]
+    target = args.info or args.use
+    if target and target.startswith("#"):  # "#2" = second search result
+        items = ((store.load().get("previews") or {}).get("mv_video_candidates") or {}).get("items") or []
+        target = items[int(target[1:]) - 1]["url"]
+    if args.info:
+        out["info"] = mvvideo.info(target, args.max_height)
+    if args.use:
+        out["use"] = mvvideo.use(store, target, max_height=args.max_height)
+    if args.local:
+        p = Path(args.local.strip().strip('"'))
+        if not p.is_file():
+            raise SystemExit(f"找不到视频文件：{p}")
+        store.update(lambda s: s["media"].update(mv_video={"file": str(p), "title": p.stem, "source": "本地文件"}))
+        out["use"] = mvvideo.align(store, p)
     _p(out)
     return 0
 
@@ -1209,6 +1241,30 @@ def cmd_ui_action(args) -> int:
             mv.render_gallery(store, payload.get("kind"))
         elif kind == "set_background":
             set_background(store, payload.get("background") or {})
+        elif kind == "mv_video_search":
+            from . import mvvideo
+
+            q = str(payload.get("query") or "").strip()
+            if q:
+                store.set_status("正在搜索 MV", "working")
+                mvvideo.set_candidates(store, q, mvvideo.search(q, 8))
+                store.set_status(f"找到 MV 候选：{q}", None)
+        elif kind == "mv_video_use":
+            from . import mvvideo
+
+            res = mvvideo.use(store, str(payload["url"]))
+            from . import render
+
+            render.cmd_previews(store, ["templates"])  # galleries now show the MV frame
+            store.log("MV 背景：" + "；".join(res.get("notes") or []))
+        elif kind == "mv_video_local":
+            from . import mvvideo
+
+            p = Path(str(payload.get("path") or "").strip().strip('"'))
+            if not p.is_file():
+                raise SystemExit(f"找不到视频文件：{p}")
+            store.update(lambda s: s["media"].update(mv_video={"file": str(p), "title": p.stem, "source": "本地文件"}))
+            mvvideo.align(store, p)
         elif kind == "montage_source":
             src = payload.get("source") if payload.get("source") in ("web", "user", "mixed") else "mixed"
             store.update(lambda st: st.setdefault("options", {}).update(montage_source=src))
@@ -1288,6 +1344,7 @@ DISPATCH = {
     "versions": cmd_versions,
     "hires-source": cmd_hires_source,
     "mv-assets": cmd_mv_assets,
+    "mv-video": cmd_mv_video,
     "timing": cmd_timing,
     "realign": cmd_realign,
     "edit": cmd_edit,

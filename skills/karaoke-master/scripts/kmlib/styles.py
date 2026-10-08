@@ -217,8 +217,18 @@ def apply_template(style, tpl: dict):
     return replace(style, **fields)
 
 
+# karaoke animations that scale the glyphs (engine: Utopia intro 130 % / wipe 115 %, zoom pulse);
+# the furigana does not move with them, so give it room or the popping glyph runs into it
+POP_ANIMS = {"utopia", "zoom_pulse"}
+POP_RUBY_GAP = 0.16  # x font size: clears the 130 % intro pop of a full-height glyph
+
+
 def apply_effect(style, eff: dict):
-    return replace(style, **eff["fields"])
+    style = replace(style, **eff["fields"])
+    if style.karaoke_anim in POP_ANIMS:
+        gap = round(style.font_size_px * POP_RUBY_GAP)
+        style = replace(style, ruby_gap_px=max(int(style.ruby_gap_px or 0), gap))
+    return style
 
 
 def singer_scheme(tpl: dict, color: str):

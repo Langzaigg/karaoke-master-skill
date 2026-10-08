@@ -84,6 +84,43 @@ def estimate_shift(video: Path, audio: Path, log=print) -> dict:
 
 
 # ------------------------------------------------------------------ sources
+DEFAULT_CAST_DELAY_MS = 200
+
+
+def cast_delay_ms(st: dict) -> int:
+    """投屏延迟: how far the picture leads the sound in exported videos (ms).
+    Screen casting / TVs show the picture late; exporting the audio this much
+    later keeps the karaoke wipe on the beat there. Default +200 ms."""
+    value = (st.get("options") or {}).get("cast_delay_ms")
+    return DEFAULT_CAST_DELAY_MS if value is None else int(value)
+
+
+def delayed_audio(store: JobStore, src: Path, ms: int) -> Path:
+    """``src`` played ``ms`` later (silence in front; negative = start earlier),
+    as a lossless WAV next to the other export tracks (cached)."""
+    src = Path(src)
+    if not ms:
+        return src
+    out = store.path("render", "tracks", f"{src.stem}_cast{ms:+d}ms.wav")
+    if out.is_file() and out.stat().st_mtime >= src.stat().st_mtime:
+        return out
+    from .media import probe, run
+    from .paths import ffmpeg_exe
+
+    info = probe(src)
+    cmd = [ffmpeg_exe(), "-y", "-v", "error"]
+    if ms < 0:
+        cmd += ["-ss", f"{-ms / 1000:.3f}"]
+    cmd += ["-i", str(src), "-map", "0:a:0"]
+    if ms > 0:
+        cmd += ["-af", f"adelay={ms}:all=1"]
+    cmd += ["-c:a", "pcm_s32le", "-ar", str(int(info.get("sample_rate") or 48000)), str(out)]
+    res = run(cmd)
+    if res.returncode != 0:
+        raise RuntimeError(f"生成投屏延迟音轨失败：{res.stderr.strip()[-300:]}")
+    return out
+
+
 def master_mp4(store: JobStore, st: dict) -> Path | None:
     """The rendered karaoke video (its own audio is the on-vocal mix)."""
     for e in st.get("exports", []):

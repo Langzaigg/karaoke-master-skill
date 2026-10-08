@@ -8,7 +8,8 @@ description: >-
   ② auto-time the lyrics (vocal separation + ASR + forced alignment) with live progress;
   ③ review in the browser, apply natural-language tweaks, export .sug / .yurika / LRC / MP4,
   on vocal + off vocal versions, a transparent subtitle MOV and optional Hi-Res (lossless FLAC)
-  MKVs, at 30 or 60 fps. Backgrounds: the source video, an AMV designed for the song (themed scene
+  MKVs, at 30 or 60 fps. Backgrounds: the source video, the song's MV downloaded from YouTube /
+  Bilibili and aligned to the user's audio, an AMV designed for the song (themed scene
   + audio visualizers), a beat-synced montage of images (found online, the user's image packs, or
   both), or subtitles only. Use whenever the user wants 卡拉OK字幕、
   打轴、歌词时间轴、走字视频、伴奏版 / off vocal、歌曲 MV / AMV, karaoke subtitles, or to turn a
@@ -164,11 +165,19 @@ Run these in this order; start the slow one first.
    - A run of consecutive missing lines in the middle = the MAD cut that part. Repeated chorus in
      the edit = `lines --dup N` then re-run `match --apply`.
    - Check the printed song region; fix with `KM set <job> --segment start,end` if needed.
-5. **Singers:** with 歌割り data, `KM lines <job> --singer 1-4=<id> --singer 5-8=<id>`. Without it,
-   keep everything on the default singer and say that the user can assign singers in the page.
+5. **Singers (歌割り):** for groups / duets, look up the part distribution (official booklet, fan
+   パート分け pages — they usually colour-code members; markers like `F&M&K` mean those members
+   together) and give **every member their own colour** (use the members' official image colours).
+   Parts sung together get their own singer (e.g. 「フレイア＆美雲＆カナメ」). Before timing:
+   `KM lines <job> --singer 1-4=<id> …`; after timing (or when a line switches singer mid-way) use
+   `edit` ops `add_singer` and `set_singer` with `chars: [first, last]` (character ranges — no lyric
+   text needed). Pure vocalisation backing lines such as "(ha～)" stay excluded; mention them.
+   Without 歌割り data keep the default singer and say the user can assign singers in the page.
 6. **Background and output format** (page card "输出设置"; you set defaults, the user changes them):
-   - **视频** — the source video (default for video jobs). Audio-only jobs can use another local
-     video as picture only: `{"type": "video", "path": "D:\\…\\bg.mp4"}` (the song audio is kept).
+   - **视频** — the source video (default for video jobs).
+   - **MV 视频**（audio projects）— the song's MV downloaded from YouTube / Bilibili with Lin-K
+     Lyrics' video downloader, or a local video; only its picture is used, aligned to the song (see
+     "MV from the web" below). Typical for "I have the lossless song, use the official MV / anime OP·ED".
    - **AMV** — a themed scene you design for the song (default for audio-only jobs), see
      "AMV design" below.
    - **图片混剪** — a beat-synced montage of images: found online, the user's image packs, or both;
@@ -196,8 +205,28 @@ Run these in this order; start the slow one first.
 | `set_background` `{background}` | user picked a background (already applied; default stills rendered) | AMV not designed for this song yet → design it; 图片混剪 → ask where the images should come from unless `montage_source` is set; `previews`, `say` |
 | `montage_source` `{source: web\|user\|mixed}` | where montage images come from (saved in `options.montage_source`) | `web` / `mixed`: search and import images (the choice is the user's go-ahead to download; still say which sites); `user`: wait for the pack, say how many images the plan wants |
 | `mv_assets_import` `{paths}` | the user uploaded an image pack (already imported, stills re-rendered) | check `mv-assets --plan`; say how many were used; top up with web images if `mixed` and short |
+| `mv_video_use` / `mv_video_local` `{url}` / `{path}` | the user picked an MV in the page (already downloaded, aligned, previews refreshed) | read `media.mv_video.notes` (`KM status --full`); a bad alignment → suggest another candidate; `say` |
 | `prompt` `{text, stage, t, active_line}` | free-text request | interpret, act, reply with `say` |
 | `handled_by: "server"` items | nudges, previews, exports, Hi-Res registration, preset / stills / gallery, image removal / re-plan — already done | context only (react if the user's choices change your plan) |
+
+### MV from the web (audio projects)
+
+`KM mv-video <job> --search "<artist> <title> MV"` lists YouTube results (also stored for the page).
+Pick the real MV: an official channel or the anime OP / ED footage, duration close to the song,
+**motion video** — "… - Topic" uploads and many fan uploads are a still cover (tiny file for its
+length is a hint). `KM mv-video <job> --info "#k"` prints title / channel / duration / format / size:
+**ask the user before downloading**, naming that video (a click on 「使用」 in the page is the user's
+own choice). Then `KM mv-video <job> --use "#k"` (or a URL; Bilibili URLs work too):
+
+- downloads ≤1080p through `krok_helper.video_download` (yt-dlp, the desktop app's step 1; proxy
+  from `HTTPS_PROXY` / `KM_PROXY`) into `media/mv_download/`;
+- aligns the MV's audio to the song and renders `media/mv_bg.mp4` — picture only, start trimmed or
+  padded with black, cut to the song length — and sets `background: {"type": "video", "path": …}`;
+- prints notes: confidence < 20 % = a different version (live, TV size, cover) → pick another;
+  "无法用单一偏移对齐" = an edited MV whose picture will drift in places → tell the user.
+
+All audio (karaoke MP4, on / off vocal, Hi-Res) still comes from the song file. `--local <path>`
+does the same alignment for a video the user already has.
 
 ### AMV design (static MV for a song without a video)
 
@@ -296,7 +325,15 @@ and export buttons. Those are handled by the server. You run the wait loop and h
   offer it before a long full render (the page has "试看 25 秒").
 - `alpha` = `<name> (透明字幕).mov`: subtitles only, ProRes 4444 with alpha + PCM audio, for PR / AE /
   DaVinci (a whole song is several GB; ordinary players may show it on black — that is normal).
+- **投屏延迟** (`options.cast_delay_ms`, default **+200 ms**): how far the picture leads the sound in
+  every exported video — karaoke MP4, on / off vocal, Hi-Res MKV, transparent MOV (the audio is
+  delayed, the frames are unchanged). Casting to a TV shows the picture late; ask the user if they
+  watch that way and adjust. `KM export <job> --cast-delay 400 …` (saved with the project) or the
+  page fields (stage 1 输出设置 / stage 3 导出). `0` = no offset.
 - Back to stage 1: `KM set <job> --stage 1 --await-user`.
+
+Effects whose animation enlarges the sung characters (Utopia 柔光擦色 / 辉光 / 跳动放大) get extra
+furigana spacing automatically, so the popping glyph never runs into the reading above it.
 
 Always confirm what you changed with `say` (e.g. "已将第 12 行整体提前 0.2 秒"). Prompt patterns,
 Style fields and edit-op schemas: [references/recipes.md](references/recipes.md).
@@ -348,11 +385,12 @@ with the skill venv and loads the exported project.
 | `match JOB [--apply] [--ref ID]` | locate lines via ASR + synced reference |
 | `hires-source JOB [--on F] [--off F …] [--no-align] [--clear]` | stage-1 lossless source → timing audio |
 | `mv JOB [--kind mv\|montage] [--list-presets] [--preset ID] [--spec @f] [--show] [--stills] [--gallery] [--video] [--seconds N]` | AMV / montage designer (alias `spectrum`) |
+| `mv-video JOB [--search Q] [--n N] [--info URL\|#k] [--use URL\|#k] [--local PATH] [--max-height H]` | MV background from YouTube / Bilibili or a local video, aligned to the song |
 | `mv-assets JOB [--add URL\|IMAGE\|FOLDER\|ZIP …] [--origin user\|web\|video] [--source U] [--credit C] [--tags a,b] [--from-video N] [--remove ID] [--list] [--credits] [--plan]` | montage image pool / cut plan |
 | `previews JOB [--only templates\|effects\|singers]` | engine-rendered galleries |
 | `timing JOB [--device DEV] [--no-chunk]` · `realign JOB --lines R [--window a,b]` | alignment |
 | `edit JOB @ops.json` · `style JOB @patch.json` · `frame JOB T` | review |
-| `export JOB [--kinds sug,yurika,lrc,mp4,alpha,onoff,mv,hires] [--clip N]` | output (default `sug,yurika,mp4,onoff`) |
+| `export JOB [--kinds sug,yurika,lrc,mp4,alpha,onoff,mv,hires] [--clip N] [--cast-delay MS]` | output (default `sug,yurika,mp4,onoff`; 投屏延迟 default +200 ms) |
 | `versions JOB [--video V] [--on F] [--off F …] [--no-align]` | on / off vocal versions |
 | `hires JOB [--on F] [--off F …] [--video V] [--no-align]` · `open-app JOB [--file yurika\|sug] [--exe EXE]` | optional extras |
 

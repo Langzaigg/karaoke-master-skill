@@ -40,6 +40,13 @@ def cmd_hires(store: JobStore, *, on: str | None = None, offs: list[str] | None 
                             separate_from_on=opts.get("separate_from_on", True), progress=say)
     if tracks.on is None and not tracks.offs:
         raise SystemExit("没有可用的原唱或伴奏音轨")
+    from .tracks import cast_delay_ms, delayed_audio
+
+    delay = cast_delay_ms(st)
+    if delay:  # 投屏延迟 (lossless WAV copies; the pipeline turns them into FLAC as usual)
+        tracks.on = delayed_audio(store, tracks.on, delay) if tracks.on is not None else None
+        tracks.offs = [delayed_audio(store, p, delay) for p in tracks.offs]
+        tracks.notes.append(f"投屏延迟 {delay:+d} ms：画面比声音提前 {delay / 1000:.2f} 秒")
     say("FLAC 32bit 无损混流")
     t0 = time.time()
     from .versions import base_name

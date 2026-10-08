@@ -575,6 +575,10 @@ def _export_alpha(store, st, out: Path, track, extras, style, w, h, fps, *, clip
     if clip:
         duration = min(duration, float(clip))
     audio = timing_audio(store, st) if st["media"].get("audio") else None
+    from . import tracks
+
+    if audio is not None and tracks.cast_delay_ms(st):
+        audio = tracks.delayed_audio(store, audio, tracks.cast_delay_ms(st))
     job = RenderJob(
         track=track, style=style, background_video_path=None, background_source=None, audio_path=audio,
         output_path=out, width=w, height=h, fps=fps, duration_ms=int(duration * 1000),
@@ -616,11 +620,20 @@ def _export_mp4(store, st, out: Path, track, extras, style, bg, w, h, fps, *, cl
         duration = max(duration, media.probe(bg["path"])["duration"])
     if clip:
         duration = min(duration, float(clip))
-    audio = None
-    if bg["kind"] != "video" or bg.get("external"):  # an external video only gives the picture
-        from .analysis import timing_audio
+    from . import tracks
+    from .analysis import timing_audio
 
+    delay = tracks.cast_delay_ms(st)
+    audio = None
+    post_audio = None  # muxed in after the render (stream copy of the video)
+    if bg["kind"] != "video":
         audio = timing_audio(store, st)
+        if delay:  # 投屏延迟: the sound comes `delay` ms after the picture
+            audio = tracks.delayed_audio(store, audio, delay)
+    elif bg.get("external") or delay or st["media"].get("hires"):
+        # the engine only plays a video background's own track: render with it, then put the song
+        # audio (external MV: picture only / Hi-Res source / 投屏延迟) in with a remux
+        post_audio = tracks.delayed_audio(store, timing_audio(store, st), delay)
     job = RenderJob(
         track=track, style=style,
         background_video_path=Path(bg["path"]) if bg["kind"] == "video" else None,
@@ -655,6 +668,13 @@ def _export_mp4(store, st, out: Path, track, extras, style, bg, w, h, fps, *, cl
         _record_export(store, kind, state="error", path=store.rel(out), label=label, error=str(exc))
         store.set_status(f"MP4 导出失败：{exc}", "error")
         raise
+    if post_audio is not None:
+        from .versions import remux_audio
+
+        store.set_status("正在写入歌曲音轨", "working")
+        tmp = out.with_name(out.stem + ".part.mp4")
+        remux_audio(out, Path(post_audio), tmp)
+        os.replace(tmp, out)
     size = out.stat().st_size if out.exists() else 0
     _record_export(store, kind, state="done", progress=1.0, path=store.rel(out), label=label,
                    size=size, seconds=round(time.time() - t0))
