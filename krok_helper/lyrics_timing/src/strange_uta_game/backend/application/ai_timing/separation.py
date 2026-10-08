@@ -1,0 +1,971 @@
+"""standalone 人声分离（2026-08 补齐：点击自动对齐自动分人声）。
+
+分离在共享 AI Runtime（``ai_runtime`` venv，含 ``audio-separator``）的
+**子进程**中执行：不阻塞 UI、取消可直接终止进程、崩溃隔离。模型使用
+UVR-MDX-NET-Inst_HQ_3（人声/伴奏双输出），自动下载到统一 ``ai_models``
+目录（与对齐模型同源管理）。产物按工作台命名约定写为
+``<原文件名>_人声.wav``，可直接被同目录严格匹配（§6.1 ③）与缓存复用。
+"""
+
+from __future__ import annotations
+
+import json
+import subprocess
+from collections import deque
+from pathlib import Path
+from typing import Callable, List, Optional
+
+ProgressFn = Callable[[str, int, str], None]
+CancelFn = Callable[[], bool]
+
+SEPARATION_MODEL = "UVR-MDX-NET-Inst_HQ_3.onnx"
+VOCAL_STEM = "人声"
+
+# ── 分离模型预下载（缺文件时用镜像补，避免 audio-separator 直连 GitHub）──
+#
+# audio-separator 的下载判据是「文件已存在就永不下载、也不校验」——因此
+# 我们预先用 SUG 的多源接力（官方直连 + gh-proxy 镜像 + 代理）把下面这些
+# 文件拉进 audio-separator 的 model_file_dir（即模型根 model_root），它检测
+# 到存在即跳过，全程不碰 GitHub。URL 与 audio-separator 0.47.0 实际访问的
+# 完全一致（域名/路径镜像）。
+SEPARATION_MODEL_URL = (
+    "https://github.com/TRvlvr/model_repo/releases/download/"
+    "all_public_uvr_models/UVR-MDX-NET-Inst_HQ_3.onnx"
+)
+# audio-separator 依次寻找的元数据/模型清单小文件（application_data 仓库 raw）。
+# 注意 mdx/vr 两张 model_data 来自同一 repo 的不同子路径，但 audio-separator
+# 会把它们各自另存为 mdx_model_data.json / vr_model_data.json。
+SEPARATION_MODEL_FILES: "list[tuple[str, str]]" = [
+    (SEPARATION_MODEL, SEPARATION_MODEL_URL),
+    (
+        "download_checks.json",
+        "https://raw.githubusercontent.com/TRvlvr/application_data/main/"
+        "filelists/download_checks.json",
+    ),
+    (
+        "mdx_model_data.json",
+        "https://raw.githubusercontent.com/TRvlvr/application_data/main/"
+        "mdx_model_data/model_data_new.json",
+    ),
+    (
+        "vr_model_data.json",
+        "https://raw.githubusercontent.com/TRvlvr/application_data/main/"
+        "vr_model_data/model_data_new.json",
+    ),
+]
+
+
+def _fmt_size(n: float) -> str:
+    """字节数的人类可读形式（预下载进度显示用）。"""
+    size = float(n)
+    for unit in ("B", "KB", "MB", "GB"):
+        if size < 1024 or unit == "GB":
+            return f"{int(size)}{unit}" if unit == "B" else f"{size:.1f}{unit}"
+        size /= 1024
+    return f"{size:.1f}GB"
+
+
+def _download_missing_model_files(
+    model_root,
+    *,
+    proxy: str = "",
+    progress: Optional[Callable[[str, int, str], None]] = None,
+    cancel: Optional[CancelFn] = None,
+) -> List[str]:
+    """把 model_file_dir 里缺失的分离模型文件补齐（镜像/代理接力）。
+
+    只下载缺失项；已存在（audio-separator 判定会跳过下载）不重拉。返回
+    本次实际下载的文件名列表。失败抛 AiTimingError（中文、可操作）。
+    即使本函数抛错，调用方也应让 audio-separator 自行官方下载兜底。
+    """
+    import os
+    import shutil
+
+    root = Path(model_root)
+    target = root  # 分离模型直接落在模型根（与 audio-separator model_file_dir 一致）
+    target.mkdir(parents=True, exist_ok=True)
+
+    from strange_uta_game.backend.application.ai_timing.runtime import (
+        AiRuntimeError,
+        _download_attempts,
+    )
+
+    downloaded: List[str] = []
+    progress = progress or (lambda _s, _p, _m: None)
+    cancel = cancel or (lambda: False)
+
+    for name, url in SEPARATION_MODEL_FILES:
+        if cancel():
+            raise AiRuntimeError("已取消")
+        dest = target / name
+        if dest.is_file():
+            continue  # 已存在：audio-separator 也不会重下
+        attempts = _download_attempts(url, proxy)
+        errors: List[str] = []
+        ok = False
+        # 原子写入：先写同目录 .part 再改名（与模型下载/AiCache 一致），
+        # 避免半成品被 audio-separator 当完整文件
+        import uuid as _uuid
+
+        part = target / f".{name}.{_uuid.uuid4().hex}.part"
+        import time as _time
+
+        import requests
+
+        progress(
+            "separation", 10, _tr("正在下载分离模型文件 {name}…").format(name=name)
+        )
+        try:
+            for cand_url, cand_proxies in attempts:
+                if cancel():
+                    raise AiRuntimeError("已取消")
+                try:
+                    with requests.get(
+                        cand_url,
+                        stream=True,
+                        timeout=(30, 60),
+                        proxies=cand_proxies,
+                    ) as resp:
+                        resp.raise_for_status()
+                        # 字节级进度：UVR 主模型 ~63MB，整文件下完才报一次
+                        # 的话慢网络下进度条会冻结数分钟（用户侧即「卡住」）
+                        headers = getattr(resp, "headers", None) or {}
+                        try:
+                            total_len = int(headers.get("content-length") or 0)
+                        except (TypeError, ValueError):
+                            total_len = 0
+                        done = 0
+                        last_emit = 0.0
+                        with part.open("wb") as fh:
+                            for chunk in resp.iter_content(chunk_size=1024 * 256):
+                                if cancel():
+                                    raise AiRuntimeError("已取消")
+                                if chunk:
+                                    fh.write(chunk)
+                                    done += len(chunk)
+                                    now = _time.monotonic()
+                                    if total_len > 0 and (
+                                        done >= total_len
+                                        or now - last_emit >= 0.5
+                                    ):
+                                        last_emit = now
+                                        progress(
+                                            "separation",
+                                            10
+                                            + int(
+                                                40 * min(1.0, done / total_len)
+                                            ),
+                                            _tr(
+                                                "下载分离模型文件 {name}："
+                                                "{cur}/{tot}"
+                                            ).format(
+                                                name=name,
+                                                cur=_fmt_size(done),
+                                                tot=_fmt_size(total_len),
+                                            ),
+                                        )
+                    total = part.stat().st_size
+                    if total <= 0:
+                        raise RuntimeError("下载内容为空")
+                    shutil.move(str(part), str(dest))
+                    ok = True
+                    break
+                except Exception as exc:  # noqa: BLE001
+                    errors.append(f"{cand_url}: {exc}")
+        finally:
+            try:
+                part.unlink(missing_ok=True)
+            except OSError:
+                pass
+        if not ok:
+            # 留给 audio-separator 官方下载兜底：不硬抛阻断分离主流程，
+            # 但记录日志。onnx 缺失时下一轮仍会尝试补齐。
+            from strange_uta_game.backend.application.ai_timing.ailog import ailog
+
+            ailog(
+                "separation",
+                f"分离模型预下载失败（{name}）：" + "；".join(errors[-3:]),
+            )
+            continue
+        downloaded.append(name)
+        progress(
+            "separation",
+            0,
+            _tr("已补齐分离模型文件 {name}").format(name=name),
+        )
+    return downloaded
+
+
+def _tr(s: str) -> str:
+    from PyQt6.QtCore import QCoreApplication
+
+    return QCoreApplication.translate("AiTimingSeparation", s)
+
+
+def ffmpeg_missing_message(embedded: bool = False) -> str:
+    """FFmpeg 缺失时的阻断消息；提示按运行模式引导到对应入口。
+
+    embedded 下 SUG 自身的 ffmpeg 设置入口隐藏（EMBEDDING §5），
+    必须引导到工作台。raise 时才调 _tr：模块级常量会在 import 期
+    固化语言，切语言后不刷新（WORKFLOW §六）。
+    """
+    if embedded:
+        return _tr(
+            "人声分离需要 FFmpeg，但未找到可用的 FFmpeg。"
+            "嵌入式运行的 FFmpeg 由工作台统一管理，"
+            "请检查工作台设置中的 FFmpeg 配置后重试"
+        )
+    return _tr(
+        "人声分离需要 FFmpeg，但未在系统中找到。"
+        "请在「设置 → 关于/语言」中配置 FFmpeg 路径"
+        "（或安装 FFmpeg 并加入系统 PATH）后重试"
+    )
+
+
+# 宿主侧 ffmpeg 预检超时：正常 ffmpeg -version 亚秒级返回；坏壳/被
+# 安全软件挂住的 ffmpeg 才会拖满超时
+_FFMPEG_PROBE_TIMEOUT_S = 15
+
+
+def ffmpeg_unresponsive_message(embedded: bool = False) -> str:
+    """FFmpeg 存在但无响应（-version 超时/失败）时的阻断消息。
+
+    audio-separator 0.44 在 Separator() 构造里用无超时的
+    subprocess.check_output 探测 ffmpeg——异常 ffmpeg 会让分离子进程
+    永久挂起且无任何输出（用户侧即「卡在分离」）。宿主侧预检拦截后
+    用本消息给出可操作指引。
+    """
+    if embedded:
+        return _tr(
+            "FFmpeg 无响应（执行 ffmpeg -version 超时或失败）。"
+            "请检查工作台设置中的 FFmpeg 配置"
+            "（程序可能已损坏或被安全软件拦截）后重试"
+        )
+    return _tr(
+        "FFmpeg 无响应（执行 ffmpeg -version 超时或失败）。"
+        "请检查「设置 → 关于/语言」中配置的 FFmpeg"
+        "（程序可能已损坏或被安全软件拦截）后重试"
+    )
+
+
+def ffmpeg_responsive(exe: str, *, timeout_s: float = _FFMPEG_PROBE_TIMEOUT_S) -> bool:
+    """启动分离子进程前预检 ffmpeg 可执行且能快速应答 -version。
+
+    与 audio-separator 构造里的探测同款命令、但带超时：把「子进程
+    永久挂起无输出」提前转化为主进程里几秒内的明确报错。
+    """
+    try:
+        from strange_uta_game.backend.infrastructure.windows import (
+            hidden_subprocess_kwargs,
+        )
+
+        completed = subprocess.run(
+            [exe, "-version"],
+            capture_output=True,
+            timeout=timeout_s,
+            **hidden_subprocess_kwargs(),
+        )
+    except (OSError, subprocess.TimeoutExpired, ValueError):
+        return False
+    return completed.returncode == 0
+
+
+def resolve_ffmpeg_exe() -> str:
+    """解析本机可用的 ffmpeg 完整路径；找不到返回空串。
+
+    audio-separator 0.44.x 在 ``Separator()`` 构造时就强制探测 PATH 上的
+    ffmpeg（缺失直接抛 FileNotFoundError，子进程退出码 1 且宿主只能看到
+    返回码）。复用主程序的解析口径：用户在「设置 → 关于/语言」配置的
+    路径优先，其次系统 PATH——配置路径不在 PATH 上时由调用方注入子进程。
+    """
+    try:
+        from strange_uta_game.backend.infrastructure.audio.video_converter import (
+            get_ffmpeg_path,
+        )
+
+        configured = get_ffmpeg_path()
+        if configured and configured != "ffmpeg":
+            return configured if Path(configured).is_file() else ""
+        import shutil
+
+        return shutil.which("ffmpeg") or ""
+    except Exception:
+        return ""
+
+
+# audio-separator get_model_hash 的取样窗口：文件末 10,240,000 字节
+_UVR_HASH_TAIL_BYTES = 10000 * 1024
+# 子进程 load_model_data_using_hash 查询的两张模型数据表（model_file_dir 下）
+_MODEL_DATA_JSONS = ("mdx_model_data.json", "vr_model_data.json")
+
+
+def _uvr_partial_md5(path: Path) -> str:
+    """audio-separator 同款部分哈希：末 10MB（不足则全文件）的 MD5。
+
+    体检口径必须与子进程查表完全一致，否则会出现「宿主认为完好、
+    子进程仍报 Unsupported Model File」或反向误删好模型。
+    """
+    import hashlib
+
+    size = path.stat().st_size
+    digest = hashlib.md5()
+    with path.open("rb") as fh:
+        if size > _UVR_HASH_TAIL_BYTES:
+            fh.seek(size - _UVR_HASH_TAIL_BYTES)
+        for chunk in iter(lambda: fh.read(4 * 1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def ensure_separation_model(model_root) -> str:
+    """分离模型体检与自愈；返回处理说明（空串 = 无需处理）。
+
+    audio-separator 的下载没有原子性：残缺文件直接落在最终名上，且
+    「文件存在即跳过下载」永不自愈——实测打包版 UVR 模型截断 1/3 后
+    每次分离都在子进程查表处抛 Unsupported Model File（退出码 1）。
+    体检对齐子进程判定口径：模型的部分 MD5 必须能在模型数据表中查到。
+
+    - 数据表 json 损坏 → 删除（子进程会重新下载，自愈）；
+    - 模型哈希查不到 → 删除模型（下次分离时重新下载）；
+    - 模型缺失 / 无数据表 → 不处理（交给子进程按需获取）。
+
+    被 ``separate()``（每次分离前）与弹窗「安装 / 修复」（环境维护时）
+    两处调用。
+    """
+    root = Path(model_root) if model_root else None
+    if root is None or not root.is_dir():
+        return ""
+    notes: List[str] = []
+    hashes = set()
+    for name in _MODEL_DATA_JSONS:
+        table = root / name
+        if not table.is_file():
+            continue
+        try:
+            data = json.loads(table.read_text(encoding="utf-8"))
+            if isinstance(data, dict):
+                hashes.update(data.keys())
+        except (OSError, ValueError):
+            try:
+                table.unlink()
+            except OSError:
+                pass
+            notes.append(_tr("分离模型数据表已损坏，已重置（将自动重新下载）"))
+    model = root / SEPARATION_MODEL
+    if model.is_file() and hashes:
+        try:
+            digest = _uvr_partial_md5(model)
+        except OSError:
+            digest = ""
+        if digest and digest not in hashes:
+            try:
+                model.unlink()
+            except OSError:
+                pass
+            notes.append(
+                _tr(
+                    "分离模型文件不完整（下载中断残留），已自动删除，"
+                    "将在下次分离时重新下载"
+                )
+            )
+    joined = "；".join(n for n in notes if n)
+    if joined:
+        from strange_uta_game.backend.application.ai_timing.ailog import ailog
+
+        ailog("separation", f"分离模型体检：{joined}")
+    return joined
+
+
+def _failure_hint(tail_text: str, *, embedded: bool = False) -> str:
+    """按子进程输出尾部识别常见失败原因，给出可操作提示。
+
+    embedded 模式下 SUG 自身的 ffmpeg/网络设置入口被隐藏（EMBEDDING
+    §5），提示必须引导到工作台，否则用户按提示找不到可操作的地方。
+    """
+    lowered = tail_text.lower()
+    if "ffmpeg" in lowered:
+        if embedded:
+            return _tr("FFmpeg 不可用：请检查工作台设置中的 FFmpeg 配置")
+        return _tr(
+            "FFmpeg 不可用：请在「设置 → 关于/语言」配置 FFmpeg 路径后重试"
+        )
+    if any(
+        key in lowered
+        for key in (
+            "github",
+            "connectionerror",
+            "failed to download",
+            "max retries",
+            "timed out",
+            "ssl",
+        )
+    ):
+        if embedded:
+            return _tr(
+                "分离模型首次使用需从 GitHub 下载，当前下载失败："
+                "请检查网络（代理跟随工作台的网络设置）后重试"
+            )
+        return _tr(
+            "分离模型首次使用需从 GitHub 下载，当前下载失败："
+            "请检查网络（可在「设置 → 网络与代理」配置代理）后重试"
+        )
+    return ""
+
+
+# 分离子进程「无任何输出」看门狗：正常静默期的上限——torch 冷导入/
+# 显卡驱动枚举 ≤ ~2 分钟；audio-separator 下载用 requests timeout=300s，
+# 网络失败也会自行报错退出。超过该窗口仍零输出即为真挂起（FFmpeg 异常
+# 卡住构造探测、CUDA/驱动死锁等，实测不会自愈），看门狗杀掉子进程并给
+# 出可操作报错，而不是永远挂在「分离中」等用户强杀进程。
+_STALL_KILL_S = 600
+
+
+def _stall_message(minutes: int, *, embedded: bool = False) -> str:
+    if embedded:
+        return _tr(
+            "人声分离长时间无响应（超过 {minutes} 分钟无任何输出），"
+            "已自动终止。常见原因：显卡驱动异常（CUDA 初始化卡住）、"
+            "网络下载无响应或 FFmpeg 异常；"
+            "请检查工作台中的分离环境与显卡驱动后重试"
+        ).format(minutes=minutes)
+    return _tr(
+        "人声分离长时间无响应（超过 {minutes} 分钟无任何输出），"
+        "已自动终止。常见原因：显卡驱动异常（CUDA 初始化卡住）、"
+        "网络下载无响应或 FFmpeg 异常；请更新显卡驱动、检查网络"
+        "（可在「设置 → 网络与代理」配置代理）后重试"
+    ).format(minutes=minutes)
+
+_SCRIPT = r"""
+import sys
+inp, out_dir, model_dir = sys.argv[1], sys.argv[2], sys.argv[3]
+# audio-separator 的进度走 logging：重定向到 stdout，宿主读行循环才能
+# 收到模型下载/加载阶段的输出（否则该阶段取消无响应、无进度）
+import logging
+logging.basicConfig(stream=sys.stdout, level=logging.INFO, format="%(message)s")
+print("stage:engine:初始化分离引擎", flush=True)
+from audio_separator.separator import Separator
+print("stage:model:下载/加载分离模型", flush=True)
+sep = Separator(
+    model_file_dir=model_dir,
+    output_dir=out_dir,
+    output_format="WAV",
+)
+sep.load_model(model_filename="UVR-MDX-NET-Inst_HQ_3.onnx")
+print("stage:separate:分离处理中", flush=True)
+outputs = sep.separate(inp)
+stem_files = [f for f in outputs if "Vocals" in f or "vocals" in f]
+if not stem_files:
+    # 轨名兜底：排除伴奏轨后取剩余（UVR 系输出通常仅人声/伴奏两条）
+    stem_files = [f for f in outputs if "nstrumental" not in f]
+if not stem_files:
+    raise SystemExit("未找到人声输出轨: %r" % (outputs,))
+import os, shutil
+# audio-separator 输出名为 <stem>_Vocals_.wav → 归一为 <stem>_人声.wav
+src = stem_files[0]
+dst = os.path.join(out_dir, os.path.splitext(os.path.basename(inp))[0] + "_人声.wav")
+shutil.move(os.path.join(out_dir, src), dst)
+# 伴奏轨保留（上游评审：这是用户判别人声分离异常还是对齐异常的依据），
+# 不做任何删除
+print("done:" + dst, flush=True)
+"""
+
+
+class StandaloneVocalSeparator:
+    """用共享 Runtime 子进程执行一次人声分离。
+
+    Args:
+        runtime_python: AI Runtime 的 python.exe 路径，或返回路径的
+            零参 callable（惰性读取：安装/修复完成后路径才写入设置，
+            同一次弹窗会话内 prober 必须能立即反映新值）。空 = 当前
+            解释器，仅在主环境恰好装有 audio-separator 时可用。
+        model_root: 统一模型根（分离模型与对齐模型同源，audio-separator 的
+            model_file_dir 即此根）。
+        proxy: 传给分离子进程的网络代理 URL；模型首次使用需从
+            GitHub 下载，代理设置必须随之注入子进程环境。
+        embedded: 嵌入式运行（工作台宿主）。FFmpeg 解析来源不变
+            （宿主注入的 tools.ffmpeg_path），但失败提示引导到
+            工作台设置而非 SUG 自身的隐藏入口。
+    """
+
+    def __init__(
+        self,
+        runtime_python,
+        model_root: Path,
+        *,
+        proxy: str = "",
+        embedded: bool = False,
+    ):
+        self._python = runtime_python
+        self._model_root = Path(model_root) if model_root else None
+        self._proxy = str(proxy or "")
+        self._embedded = bool(embedded)
+
+    def _python_exe(self) -> str:
+        value = self._python() if callable(self._python) else self._python
+        return str(value or "")
+
+    def identity(self) -> dict:
+        return {"model": SEPARATION_MODEL, "stem": VOCAL_STEM, "params": {}}
+
+    def separate_with_identity(
+        self,
+        source_path: Path,
+        progress: ProgressFn,
+        cancel: CancelFn,
+    ) -> tuple:
+        """``separate`` 的 ``(path, identity)`` 版本：作为 AiTimingService
+        的 separation_executor 接线用——缓存登记跟随实际执行者身份。"""
+        vocal_path = self.separate(source_path, progress, cancel)
+        return vocal_path, self.identity()
+
+    def _download_missing_model_files(
+        self,
+        progress: Optional[Callable[[str, int, str], None]] = None,
+        cancel: Optional[CancelFn] = None,
+    ) -> List[str]:
+        """补齐 model_file_dir 里缺失的分离模型文件（走 self._proxy 镜像接力）。"""
+        return _download_missing_model_files(
+            self._model_root, proxy=self._proxy, progress=progress, cancel=cancel
+        )
+
+    def available(self) -> bool:
+        python = self._python_exe()
+        if not python or not Path(python).is_file():
+            return False
+        try:
+            # 必须探测真实入口：顶层包可导入不代表 separator 模块可用
+            # （裸 audio-separator 缺 onnxruntime/audioread 时顶层仍成功）
+            from strange_uta_game.backend.infrastructure.windows import (
+                hidden_subprocess_kwargs,
+            )
+
+            completed = subprocess.run(
+                [
+                    python,
+                    "-c",
+                    "from audio_separator.separator import Separator",
+                ],
+                capture_output=True,
+                timeout=30,
+                **hidden_subprocess_kwargs(),
+            )
+            return completed.returncode == 0
+        except (OSError, subprocess.TimeoutExpired):
+            return False
+
+    def separate(
+        self,
+        source_path: Path,
+        progress: ProgressFn,
+        cancel: CancelFn,
+    ) -> Path:
+        source = Path(source_path)
+        # 只做解释器存在性快检，不再跑 available() 导入探测：那是又一次
+        # 完整的 torch/onnxruntime 冷导入（慢机器上 30s+ 且可能超时误报
+        # 「分离环境未安装」）；真正的组件缺失由下方子进程失败带出
+        # traceback，信息更全。弹窗状态行的探测仍走 available()。
+        python = self._python_exe()
+        if not python or not Path(python).is_file():
+            raise RuntimeError(
+                _tr("分离环境未安装：请先在弹窗中安装对齐环境（含分离能力）")
+            )
+        out_dir = source.parent
+        # audio-separator 构造即探测 ffmpeg（缺失 → 子进程退出码 1，
+        # 宿主只能看到返回码）：启动前解析并把其目录注入子进程 PATH，
+        # 未安装时给出可操作的中文错误而不是裸返回码
+        ffmpeg = resolve_ffmpeg_exe()
+        if not ffmpeg:
+            raise RuntimeError(
+                ffmpeg_missing_message(embedded=self._embedded)
+            )
+        # audio-separator 构造里的 ffmpeg 探测无超时：坏 ffmpeg 会让子进程
+        # 永久挂起且无输出。宿主侧带超时预检，把这种「卡在分离」提前变
+        # 成几秒内的明确报错（无输出看门狗兜底，但预检能快几分钟）。
+        if not ffmpeg_responsive(ffmpeg):
+            from strange_uta_game.backend.application.ai_timing.ailog import ailog
+
+            ailog("separation", f"FFmpeg 预检失败/超时（ffmpeg -version）：{ffmpeg}")
+            raise RuntimeError(
+                ffmpeg_unresponsive_message(embedded=self._embedded)
+            )
+        import time as _time
+
+        from strange_uta_game.backend.application.ai_timing.ailog import ailog
+
+        started = _time.monotonic()
+        ailog(
+            "separation",
+            f"人声分离开始：source={source.name} python={python}",
+        )
+        # 先体检再预下载：残缺模型若等到预下载之后才删除，预下载会因
+        # 「文件存在」跳过它，随后 audio-separator 仍会直连 GitHub 重下，
+        # 使镜像自愈失效。
+        progress("separation", 8, _tr("正在检查分离模型…"))
+        note = ensure_separation_model(self._model_root)
+        if note:
+            progress("separation", 8, note)
+
+        # 模型预下载（镜像接力，缺失才补）：audio-separator「文件在即跳过」
+        # —— 我们用 SUG 多源（官方 + gh-proxy + 代理）先把模型文件拉齐，
+        # 避免 audio-separator 直连 GitHub。best-effort：失败不阻断，交给
+        # audio-separator 自身官方下载兜底。进度与取消沿用本次分离任务，
+        # 大文件下载期间也必须能响应用户取消。
+        try:
+            self._download_missing_model_files(progress=progress, cancel=cancel)
+        except Exception as exc:  # noqa: BLE001
+            if cancel():
+                raise RuntimeError(_tr("已取消")) from exc
+            ailog("separation", f"分离模型预下载异常（继续走 audio-separator）：{exc}")
+        # 校验本次新下载的模型，避免异常镜像内容进入子进程。
+        note = ensure_separation_model(self._model_root)
+        if note:
+            progress("separation", 8, note)
+        cmd = [
+            python,
+            "-c",
+            _SCRIPT,
+            str(source),
+            str(out_dir),
+            str(self._model_root),
+        ]
+        import os
+
+        env = dict(os.environ)
+        # 中文 Windows 子进程默认按 GBK 写管道，宿主按 UTF-8 读会乱码
+        env["PYTHONIOENCODING"] = "utf-8"
+        # 用户配置的 ffmpeg 通常不在 PATH 上（如独立目录的 ffmpeg.exe）；
+        # 即使在，前置注入也无害
+        ffmpeg_dir = str(Path(ffmpeg).parent)
+        env["PATH"] = ffmpeg_dir + os.pathsep + env.get("PATH", "")
+        if self._proxy:
+            # 分离模型首次使用需从 GitHub 下载：主程序解析出的代理
+            # （系统/手动）必须传给子进程，requests 会读这些环境变量
+            for key in ("HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy"):
+                env[key] = self._proxy
+        from strange_uta_game.backend.infrastructure.windows import (
+            hidden_subprocess_kwargs,
+        )
+
+        proc = subprocess.Popen(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            env=env,
+            **hidden_subprocess_kwargs(),
+        )
+        result_path: Optional[Path] = None
+        assert proc.stdout is not None
+        import queue as _queue
+        import re as _re
+        import threading as _threading
+
+        # 子进程的失败输出（traceback 混入 stdout）此前被逐行读取后丢弃，
+        # 报错只剩返回码，外部用户反馈完全不可诊断——保留有界尾部，
+        # 失败时并入异常消息
+        tail: deque = deque(maxlen=24)
+
+        # 读取放后台线程、主循环按 0.25s 轮询队列：取消检查不能再挂在
+        # 「收到一行」上——推理期到达的行全是 tqdm 进度行（旧行里它们
+        # continue 在 cancel 检查之前），真静默期（模型下载/加载）则根本
+        # 无行可读。实测 CUDA 上推理期点取消要等整段推理结束才生效，
+        # CPU 机器上是分钟级（用户感知即「卡死」）
+        line_queue: "_queue.Queue" = _queue.Queue()
+
+        def _pump() -> None:
+            try:
+                for raw in proc.stdout:
+                    line_queue.put(raw)
+            finally:
+                line_queue.put(None)  # EOF 哨兵
+
+        reader = _threading.Thread(target=_pump, daemon=True)
+        reader.start()
+
+        def _raise_cancelled() -> None:
+            proc.kill()
+            try:
+                proc.wait(timeout=5)
+            except Exception:
+                pass
+            raise RuntimeError(_tr("已取消人声分离"))
+
+        def _raise_stalled() -> None:
+            # 无输出看门狗：见 _STALL_KILL_S 注释。取消检查不受影响——
+            # 用户点取消仍然优先（Empty 分支里 cancel 先判）。
+            proc.kill()
+            try:
+                proc.wait(timeout=5)
+            except Exception:
+                pass
+            ailog(
+                "separation",
+                f"分离子进程超过 {int(_STALL_KILL_S)}s 无输出，看门狗已终止"
+                f"（疑似显卡驱动/网络/FFmpeg 异常）",
+            )
+            raise RuntimeError(
+                _stall_message(
+                    max(1, int(_STALL_KILL_S / 60)), embedded=self._embedded
+                )
+            )
+
+        _ansi_re = _re.compile("\x1b\\[[0-9;]*[A-Za-z]|[\x00-\x08\x0b-\x1f]")
+        # tqdm 进度行（audio_separator 分块处理）形如：
+        #   " 50%|█████| 1/2 [00:02<00:02,  2.21s/it]"（\r 分隔、可能同行多段）
+        # 首帧 ETA 为 "?"。—— 解析出 k/N 与剩余时间，喂给进度回调；
+        # 与下载字节条互斥：块条是纯数字比（无单位字母），先于下载
+        # 正则检查，块首帧必须在此分支消费（否则漏网被误判为下载）
+        _tqdm_re = _re.compile(
+            r"(\d+)/(\d+) \[[^\]<]*(?:<(\d+):(\d{2})|<\?)?"
+        )
+        # 模型下载的字节条（_Auto 打包 runtime 实测格式，\r 前缀无换行）：
+        #   " 0.00/3.54k [00:00<?, ?iB/s]" → " 12.7M/63.2M [00:12<00:48, 1.07MiB/s]"
+        # 单位大小写混用（k 小写 / M 大写）、当前量为 0 时无单位字母，
+        # ETA 未知时为 "?"；与块条互斥：字节条带单位字母，块条纯数字
+        _download_re = _re.compile(
+            r"(\d+(?:\.\d+)?)\s*([kKmMgGtT])?i?B?\s*/\s*"
+            r"(\d+(?:\.\d+)?)\s*([kKmMgGtT])?i?B?\s*\["
+            r"[^\]<]*(?:<(\d+):(\d{2})|<\?)?"
+            r"(?:[^\]]*?([\d.]+\s*[kKmMgGtT]i?B/s))?"
+            r"[^\]]*\]"
+        )
+        _unit_pow = {"k": 1, "m": 2, "g": 3, "t": 4}
+        # 子进程 stage 行 → 百分比阶梯：引擎初始化 12 → 模型下载/加载
+        # 15（下载字节条插值 15-55）→ 分离 60（块进度 60-95）
+        _stage_pct = {"engine": 12, "model": 15, "separate": 60}
+        last_output_at = _time.monotonic()
+        while True:
+            try:
+                raw_line = line_queue.get(timeout=0.25)
+            except _queue.Empty:
+                if cancel():
+                    _raise_cancelled()
+                if _time.monotonic() - last_output_at > _STALL_KILL_S:
+                    _raise_stalled()
+                continue
+            if raw_line is None:
+                break
+            last_output_at = _time.monotonic()
+            if cancel():
+                _raise_cancelled()
+            m = None
+            for m2 in _tqdm_re.finditer(raw_line):
+                m = m2  # 取最后一段（\r 覆盖写时同行会有多个状态）
+            if m is not None:
+                done, total = int(m.group(1)), int(m.group(2))
+                if total > 0 and done <= total:
+                    pct = 60 + int(35 * done / total)
+                    parts = [f"分离处理 {done}/{total} 块"]
+                    if m.group(3) is not None:
+                        rem_s = int(m.group(3)) * 60 + int(m.group(4))
+                        rate = (rem_s / (total - done)) if done < total else 0.0
+                        parts.append(
+                            f"预计剩余 {int(rem_s // 60)}:{rem_s % 60:02d}"
+                        )
+                        if rate:
+                            parts.append(f"{rate:.1f}s/块")
+                    message = parts[0]
+                    if len(parts) > 1:
+                        message += "（" + "，".join(parts[1:]) + "）"
+                    progress("separation", min(95, pct), message)
+                continue
+            dm = None
+            for d2 in _download_re.finditer(raw_line):
+                dm = d2  # \r 覆盖写：同行取最后一段
+            if dm is not None:
+                cur_raw, cu_raw = dm.group(1), dm.group(2)
+                tot_raw, tu_raw = dm.group(3), dm.group(4)
+                cu = cu_raw.lower() if cu_raw else ""
+                tu = tu_raw.lower() if tu_raw else ""
+                cur = float(cur_raw) * (1024 ** _unit_pow.get(cu, 0))
+                total_b = float(tot_raw) * (1024 ** _unit_pow.get(tu, 0))
+                if total_b > 0:
+                    frac = min(1.0, cur / total_b)
+                    cur_disp = cur_raw + (cu_raw + "B" if cu_raw else "")
+                    tot_disp = tot_raw + (tu_raw + "B" if tu_raw else "")
+                    parts = [f"下载分离模型 {cur_disp}/{tot_disp}"]
+                    if dm.group(5) is not None:
+                        rem_s = int(dm.group(5)) * 60 + int(dm.group(6))
+                        parts.append(
+                            f"预计剩余 {int(rem_s // 60)}:{rem_s % 60:02d}"
+                        )
+                    if dm.group(7):
+                        parts.append(dm.group(7).strip())
+                    message = parts[0]
+                    if len(parts) > 1:
+                        message += "（" + "，".join(parts[1:]) + "）"
+                    progress("separation", 15 + int(40 * frac), message)
+                continue
+            line = _ansi_re.sub("", raw_line)
+            line = line.replace("\r", " ").strip()
+            if not line:
+                continue
+            if len(line) > 160:
+                line = line[:159] + "…"
+            tail.append(line)
+            stage_m = _re.match(r"stage:(\w+):(.+)", line)
+            if stage_m is not None and stage_m.group(1) in _stage_pct:
+                progress(
+                    "separation",
+                    _stage_pct[stage_m.group(1)],
+                    stage_m.group(2),
+                )
+            elif line.startswith("done:"):
+                result_path = Path(line.split(":", 1)[1])
+                progress("separation", 100, "分离完成")
+        returncode = proc.wait()
+        if result_path is not None and result_path.is_file():
+            ailog(
+                "separation",
+                f"人声分离完成：{(_time.monotonic() - started):.1f}s → {result_path.name}",
+            )
+            return result_path
+        detail_lines = [t for t in tail if t][-3:]
+        detail = "；".join(detail_lines)
+        # 提示基于全部保留输出判断（如 FFmpeg 缺失行出现在 traceback 之前，
+        # 会被 detail 的 [-3:] 截掉），展示只取末尾几行
+        hint = _failure_hint(" ".join(tail), embedded=self._embedded)
+        ailog(
+            "separation",
+            f"人声分离失败（返回码 {returncode}，"
+            f"{(_time.monotonic() - started):.1f}s）：{detail or hint or '无输出'}",
+        )
+        if detail:
+            raise RuntimeError(
+                _tr("人声分离失败（返回码 {code}）。").format(code=returncode)
+                + hint
+                + _tr("子进程输出：{output}").format(output=detail)
+            )
+        raise RuntimeError(
+            _tr(
+                "人声分离失败（返回码 {code}）。"
+                "请确认分离环境已完整安装后重试"
+            ).format(code=returncode)
+        )
+
+
+def host_first_separation(
+    host, standalone: StandaloneVocalSeparator
+) -> tuple:
+    """embedded 分离编排：宿主优先，宿主未配置时回落 AI Runtime 内置分离。
+
+    AI 安装器（自建 venv 与方案 B 共享解释器两条路径）本来就携带
+    audio-separator——只为 AI 打轴的用户不必强配工作台第 2 步的分离
+    环境；宿主可用时仍优先复用（会话人声零分离、跟随工作台设置）。
+
+    「宿主忙」不回落：工作台后端有排队/执行中的任务时
+    ``separation_status()`` 返回 ``available=False`` 且 ``busy=True``
+    ——此时静默换一套 runtime + 模型（CPU 上 7-8 分钟量级）会让用户
+    以为卡死（实测反馈），改为明确报错等宿主空闲后重试。
+
+    Returns:
+        (executor, identity, prober, follows_host)：
+        executor 兼容 AiTimingService 的 ProgressFn/CancelFn 签名，
+        返回 ``(vocal_path, identity)``（实际执行者的分离身份，供
+        缓存登记——回落时不得用宿主身份登记内置产物）；
+        follows_host 为构造时刻宿主是否可用（弹窗状态行展示口径）。
+    """
+
+    def _host_status() -> dict:
+        try:
+            status = host.separation_status()
+            return status if isinstance(status, dict) else {}
+        except Exception:
+            return {}
+
+    def _host_available() -> bool:
+        return bool(_host_status().get("available"))
+
+    def _executor(source_path: Path, progress: ProgressFn, cancel: CancelFn):
+        import time as _time
+
+        from strange_uta_game.backend.application.ai_timing.ailog import ailog
+
+        status = _host_status()
+        if status.get("available"):
+            # 宿主分支此前一行日志都不落：宿主分离服务僵死时 SUG 侧
+            # 无超时无输出，日志里只剩「触发人声分离」后一片空白，
+            # 用户反馈完全无法定位（是否进入宿主、卡在哪一环）。
+            started = _time.monotonic()
+            ailog(
+                "separation",
+                f"宿主人声分离开始：source={Path(source_path).name}",
+            )
+            try:
+                result = host.separate_vocal(source_path, progress, cancel)
+            except Exception as exc:  # noqa: BLE001
+                ailog(
+                    "separation",
+                    f"宿主人声分离失败"
+                    f"（{(_time.monotonic() - started):.1f}s）：{exc}",
+                )
+                raise
+            ailog(
+                "separation",
+                f"宿主人声分离完成"
+                f"（{(_time.monotonic() - started):.1f}s）→ {result}",
+            )
+            return result, host.effective_identity()
+        if status.get("busy"):
+            # 宿主环境是好的、只是此刻有任务在跑：换执行者会把几秒的
+            # 工作台 GPU 分离变成数分钟的内置（可能 CPU）分离——明确
+            # 报错让用户稍后重试，而不是静默降级。
+            detail = str(status.get("message") or "").strip()
+            ailog(
+                "separation",
+                f"宿主分离任务进行中，本次不回落内置分离：{detail or '无详情'}",
+            )
+            raise RuntimeError(
+                _tr(
+                    "工作台分离任务正在进行中{detail}，"
+                    "请等待其完成（或在工作台中取消）后重试 AI 打轴"
+                ).format(detail=f"（{detail}）" if detail else "")
+            )
+        ailog(
+            "separation",
+            f"工作台分离环境未配置，回落 AI Runtime 内置分离："
+            f"source={Path(source_path).name}",
+        )
+        progress(
+            "vocal",
+            12,
+            _tr(
+                "工作台分离环境暂不可用，已改用 AI 运行环境内置分离"
+                "（与工作台第 2 步环境不同，CPU 下可能需数分钟）"
+            ),
+        )
+
+        def _tagged(stage: str, pct: int, message: str) -> None:
+            # 持续标注：回落期间所有进度消息都带「内置分离」前缀——
+            # 子进程阶段消息（初始化引擎/下载模型/分块处理）会很快
+            # 覆盖上面的一次性说明，用户需要全程知道走的是哪套环境
+            progress(stage, pct, _tr("（内置分离）{msg}").format(msg=message))
+
+        vocal_path = standalone.separate(source_path, _tagged, cancel)
+        return vocal_path, standalone.identity()
+
+    def _identity() -> dict:
+        if _host_available():
+            return host.effective_identity()
+        return standalone.identity()
+
+    def _available() -> bool:
+        return _host_available() or standalone.available()
+
+    return _executor, _identity, _available, _host_available()
+
+
+__all__ = [
+    "StandaloneVocalSeparator",
+    "host_first_separation",
+    "SEPARATION_MODEL",
+    "SEPARATION_MODEL_URL",
+    "SEPARATION_MODEL_FILES",
+    "VOCAL_STEM",
+    "ffmpeg_missing_message",
+    "resolve_ffmpeg_exe",
+    "ensure_separation_model",
+    "_download_missing_model_files",
+]

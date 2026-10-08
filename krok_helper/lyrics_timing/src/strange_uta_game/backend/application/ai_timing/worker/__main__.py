@@ -1,0 +1,199 @@
+"""AI 打轴 worker 进程入口（阶段 C）。
+
+一次性进程：从 stdin 读取一条 align 消息，执行后向 stdout 写
+progress/result/cancelled/error 消息并退出。进程退出即释放模型与
+CUDA 上下文。宿主通过
+``python -m strange_uta_game.backend.application.ai_timing.worker`` 启动。
+
+取消：宿主向 stdin 追加一条 ``{"type": "cancel"}``；后台读线程置位
+取消标记，provider 在阶段边界协作停止，worker 输出 cancelled 后退出。
+宿主超时未收到退出时可直接 terminate（崩溃隔离边界）。
+
+stderr 留给 provider/依赖的原生日志（不干扰协议通道）。
+"""
+
+import sys
+import threading
+
+from strange_uta_game.backend.application.ai_timing.alignment import (
+    AlignmentValidationError,
+)
+from strange_uta_game.backend.application.ai_timing.worker.protocol import (
+    PROTOCOL_VERSION,
+    WorkerProtocolError,
+    decode_message,
+    deserialize_request,
+    encode_message,
+    serialize_result,
+)
+from strange_uta_game.backend.application.ai_timing.worker.providers import (
+    AlignmentCancelledError,
+    AlignmentProviderError,
+    create_provider,
+)
+
+
+def _emit(obj: dict) -> None:
+    sys.stdout.write(encode_message(obj) + "\n")
+    sys.stdout.flush()
+
+
+class _CancelState:
+    """跨线程取消标记（后台读线程置位，主循环在阶段边界检查）。"""
+
+    def __init__(self) -> None:
+        self.event = threading.Event()
+
+    def set(self) -> None:
+        self.event.set()
+
+    def __call__(self) -> bool:
+        return self.event.is_set()
+
+
+def _start_cancel_reader(cancel_state: _CancelState) -> threading.Thread:
+    """后台读取 stdin 剩余消息；收到 cancel 置位标记，EOF/异常静默退出。"""
+
+    def _reader() -> None:
+        try:
+            for line in sys.stdin:
+                try:
+                    message = decode_message(line)
+                except WorkerProtocolError:
+                    continue
+                if message.get("type") == "cancel":
+                    cancel_state.set()
+                    return
+        except Exception:
+            return
+
+    thread = threading.Thread(target=_reader, daemon=True)
+    thread.start()
+    return thread
+
+
+def main(argv=None) -> int:
+    from strange_uta_game.backend.application.ai_timing.ailog import ailog
+
+    provider = None
+    started = None
+    try:
+        line = sys.stdin.readline()
+        if not line:
+            _emit({"type": "error", "message": "worker 未收到任务指令"})
+            return 1
+        message = decode_message(line)
+        if message.get("type") == "validate":
+            # 独立校验消息：只做 provider/模型描述校验，不加载模型
+            try:
+                model_spec = dict(message.get("model") or {})
+                provider = create_provider(model_spec)
+                provider.validate_model(model_spec)
+                _emit({"type": "result", "payload": {"valid": True}})
+            except Exception as exc:
+                ailog("worker", f"validate 失败：{exc}")
+                _emit({"type": "error", "message": str(exc)})
+            return 0
+        if message.get("type") != "align":
+            _emit({"type": "error", "message": "worker 期望首条消息为 align"})
+            return 1
+        if int(message.get("protocol", 0)) != PROTOCOL_VERSION:
+            _emit(
+                {
+                    "type": "error",
+                    "message": (
+                        f"进程协议版本不匹配（宿主 {message.get('protocol')}，"
+                        f"worker {PROTOCOL_VERSION}）"
+                    ),
+                }
+            )
+            return 1
+
+        import time as _time
+
+        started = _time.monotonic()
+        payload = message.get("payload") or {}
+        audio_path = str(payload.get("audio_path") or "")
+        model_spec = dict(payload.get("model") or {})
+        request = deserialize_request(payload.get("request") or {})
+
+        if not audio_path:
+            _emit({"type": "error", "message": "未提供音频文件路径"})
+            return 1
+
+        ailog(
+            "worker",
+            f"对齐任务开始：provider={model_spec.get('provider')} "
+            f"model={model_spec.get('model_id')} device_pref={model_spec.get('device')} "
+            f"tokens={len(request.tokens)} audio={audio_path}",
+        )
+
+        cancel_state = _CancelState()
+        # 注意：取消监听线程延迟到 provider.load 之后启动。若在 torch 的
+        # DLL 导入期间存在阻塞读 stdin 的线程，Windows 上会与加载器死锁
+        # （stdin 保持打开的真实链路必挂；stdin 关闭时线程秒退 EOF 反而
+        # 无事——这也是假 provider 测试从未暴露的原因）。加载阶段的取消由
+        # 宿主直接终止进程树兜底；推理阶段的协作取消不受影响。
+
+        def progress(percent: int, message_cn: str) -> None:
+            _emit(
+                {
+                    "type": "progress",
+                    "stage": "align",
+                    "percent": max(0, min(100, int(percent))),
+                    "message": message_cn,
+                }
+            )
+
+        provider = create_provider(model_spec)
+        provider.validate_model(model_spec)
+        _emit(
+            {
+                "type": "progress",
+                "stage": "load",
+                "percent": 5,
+                "message": "初始化对齐环境",
+            }
+        )
+        provider.load(model_spec, progress, cancel_state)
+        loaded_at = _time.monotonic()
+        ailog("worker", f"模型加载完成：耗时 {loaded_at - started:.1f}s")
+        _start_cancel_reader(cancel_state)
+        result = provider.align(request, audio_path, progress, cancel_state)
+        provider.unload()
+        ailog(
+            "worker",
+            f"对齐完成：推理 {(_time.monotonic() - loaded_at):.1f}s / 总计 "
+            f"{(_time.monotonic() - started):.1f}s，spans={len(result.spans)}",
+        )
+        _emit({"type": "result", "payload": serialize_result(result)})
+        return 0
+    except AlignmentCancelledError:
+        if provider is not None:
+            provider.unload()
+        ailog("worker", "对齐已取消")
+        _emit({"type": "cancelled"})
+        return 0
+    except (AlignmentProviderError, AlignmentValidationError) as exc:
+        if provider is not None:
+            provider.unload()
+        ailog("worker", f"对齐失败：{exc}")
+        _emit({"type": "error", "message": str(exc)})
+        return 1
+    except WorkerProtocolError as exc:
+        _emit({"type": "error", "message": str(exc)})
+        return 1
+    except Exception as exc:  # 崩溃隔离：worker 内部异常不拖垮宿主
+        import traceback as _tb
+
+        ailog(
+            "worker",
+            f"对齐进程内部错误：{type(exc).__name__}: {exc}｜"
+            + _tb.format_exc().replace("\n", " ⏎ ")[-1500:],
+        )
+        _emit({"type": "error", "message": f"对齐进程内部错误：{exc}"})
+        return 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())

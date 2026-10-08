@@ -1,76 +1,14 @@
-# Legacy helper scripts
-一键HiRes（mkv）.bat
-
-# system files
-.DS_Store
-
-# Python cache and local env
+# Python
 __pycache__/
 *.py[cod]
-*$py.class
-.Python
 .venv/
 venv/
-env/
-ENV/
 
-# Render benchmark artifacts (scripts/bench_render.py)
-.bench/
-
-# Tooling caches
-.cache/
-.mypy_cache/
-.pytest_cache/
-.ruff_cache/
-.coverage
-.coverage.*
-htmlcov/
-
-# Self-improvement agent learnings (per-developer, not shared)
-.learnings/
-
-# AI coding agent session state — never commit
-# (Claude Code's worktree submodule gitlinks were accidentally
-# committed by StrangeUtaGame and removed in this PR; this rule
-# prevents recurrence.)
-.claude/
-.cursor/
-.aider*
-.reverse/
-.tools/
-.zcode/
-.zcodeignore
-
-# Build artifacts
-build/
-dist/
-*.egg-info/
-.eggs/
-pip-wheel-metadata/
-krok_helper/updater_app/*.spec
-
-# Runtime outputs
+# skill runtime (install home in project mode, KTV projects, outputs)
+.karaoke-master/
+projects/
 output/
-/pymss/
-%TEMP%/
-tmp-pycache/
-tmp-test/
 *.log
 
-# StrangeUtaGame runtime files generated when embedded/imported from repo root
-config.json
-dictionary.json
-ProjectBackup/
-
-docs/release-runbook.local.md
-docs/Codex启动文档-.NET8-CSharp-WinUI3重构指南.md
-docs/功能文档-当前项目与WinUI3重构参考.md
-docs/波形对齐重构自测脚本.md
-docs/波形对齐操作流程图.png
-docs/波形对齐模块UI重构指导.md
-docs/1.png
-docs/2.png
-docs/3.png
-docs/4.png
-docs/Sayatoo基本页逆向与实现计划.md
-docs/宣发视频讲解稿.md
+# agent session state
+.claude/

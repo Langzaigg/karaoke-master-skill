@@ -1,0 +1,26 @@
+# karaoke-master skill runtime (KM_HOME/venv) — created by `km.py setup`.
+# Lin-K Lyrics renderer + StrangeUtaGame lyric/reading stack, no AI models here.
+PyQt6==6.11.0
+PyQt6-Qt6==6.11.0
+PyQt6-Fluent-Widgets==1.11.2
+numpy
+scipy
+soundfile
+sounddevice
+pedalboard
+pykakasi
+jaconv
+pyphen
+jieba==0.42.1
+pypinyin==0.55.0
+sudachipy
+sudachidict_small
+requests
+charset-normalizer
+fonttools
+psutil
+yt-dlp
+winrt-Windows.Globalization==3.2.1; sys_platform == "win32"
+winrt-Windows.Foundation==3.2.1; sys_platform == "win32"
+winrt-Windows.Foundation.Collections==3.2.1; sys_platform == "win32"
+winrt-runtime==3.2.1; sys_platform == "win32"

@@ -1,0 +1,317 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Karaoke Master</title>
+  <link rel="icon" href="/static/favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="/static/app.css">
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">
+      <svg viewBox="0 0 32 32" class="brand-mark" aria-hidden="true"><defs><linearGradient id="bg1" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#ff5fa2"/><stop offset="1" stop-color="#7c5cff"/></linearGradient></defs><rect x="2" y="2" width="28" height="28" rx="8" fill="url(#bg1)"/><path d="M12 9v11.2a3.2 3.2 0 1 1-2-2.96V11l11-2.4v9.6a3.2 3.2 0 1 1-2-2.96V11.6z" fill="#fff"/></svg>
+      <div>
+        <div class="brand-name">Karaoke Master</div>
+        <div class="brand-sub" id="job-title">载入中…</div>
+      </div>
+    </div>
+    <nav class="stepper" id="stepper">
+      <button data-stage="1"><span class="num">1</span><span class="lbl">素材与确认</span></button>
+      <i class="bar"></i>
+      <button data-stage="2"><span class="num">2</span><span class="lbl">自动打轴</span></button>
+      <i class="bar"></i>
+      <button data-stage="3"><span class="num">3</span><span class="lbl">审阅与导出</span></button>
+    </nav>
+    <div class="status" id="status"><span class="dot"></span><span class="txt">连接中</span></div>
+    <button class="btn ghost sm close-btn" id="close-page" title="本工程全部完成后，关闭这个网页服务">完成并关闭</button>
+  </header>
+  <div class="closed-overlay" id="closed-overlay" hidden>
+    <div class="closed-card">
+      <h2>本工程的网页已关闭</h2>
+      <p id="closed-text">网页服务已停止，可以关闭这个标签页。</p>
+      <p class="muted small" id="closed-hint"></p>
+    </div>
+  </div>
+
+  <div class="layout">
+    <main id="main">
+      <!-- ============================== STAGE 1 ============================== -->
+      <section class="stage" id="stage-1" hidden>
+        <div class="stage-head">
+          <div>
+            <h1>素材分析与制作确认</h1>
+            <p class="muted">Agent 已根据素材补全歌曲信息并检索歌词。请确认下列制作细节，所有预览均由实际渲染引擎生成。</p>
+          </div>
+        </div>
+        <div class="waiting-banner" id="s1-banner" hidden>
+          <div class="spinner"></div>
+          <div class="grow">
+            <div id="s1-banner-text"></div>
+            <div class="pbar" id="s1-banner-bar" hidden><i></i></div>
+          </div>
+          <span class="mono small muted" id="s1-banner-pct"></span>
+        </div>
+
+        <div class="grid two">
+          <article class="card" id="card-media">
+            <header><h2>素材</h2><span class="chip" id="media-kind"></span></header>
+            <div class="player" id="s1-player"></div>
+            <div class="wave-wrap">
+              <canvas id="s1-wave" height="120"></canvas>
+              <div class="wave-legend">
+                <span><i class="sw sw-seg"></i>歌曲区间（拖动边缘调整）</span>
+                <span><i class="sw sw-voc"></i>人声活动</span>
+                <span><i class="sw sw-asr"></i>识别到的歌词</span>
+              </div>
+            </div>
+            <div class="row gap seg-fields">
+              <label>开始 <input type="text" id="seg-start" class="time-input"></label>
+              <label>结束 <input type="text" id="seg-end" class="time-input"></label>
+              <button class="btn ghost sm" id="seg-play">试听区间</button>
+              <span class="muted small" id="seg-note"></span>
+            </div>
+          </article>
+
+          <article class="card" id="card-song">
+            <header><h2>歌曲信息</h2><span class="chip ok" id="song-confidence"></span></header>
+            <div class="song-head">
+              <img id="song-cover" alt="" hidden>
+              <div class="song-fields">
+                <label class="field"><span>曲名</span><input id="song-title"></label>
+                <label class="field"><span>歌手</span><input id="song-artist"></label>
+                <label class="field"><span>作品 / 出处</span><input id="song-work"></label>
+                <div class="row gap">
+                  <label class="field"><span>作词</span><input id="song-lyricist"></label>
+                  <label class="field"><span>作曲</span><input id="song-composer"></label>
+                  <label class="field"><span>编曲</span><input id="song-arranger"></label>
+                </div>
+              </div>
+            </div>
+            <div class="notes" id="song-notes"></div>
+            <div class="sources" id="song-sources"></div>
+          </article>
+        </div>
+
+        <article class="card" id="card-lyrics">
+          <header>
+            <h2>歌词与注音</h2>
+            <div class="tabs" id="lyric-cands"></div>
+          </header>
+          <div class="lyric-toolbar">
+            <label class="toggle"><input type="checkbox" id="show-ruby" checked><span>显示注音</span></label>
+            <label class="toggle"><input type="checkbox" id="only-included"><span>只看入选行</span></label>
+            <span class="sep"></span>
+            <button class="btn ghost sm" id="inc-all">全部入选</button>
+            <button class="btn ghost sm" id="inc-suggest">采用 Agent 建议</button>
+            <span class="sep"></span>
+            <span class="muted small">点击歌手标签切换演唱者 · 点击行勾选是否出现在视频中</span>
+            <span class="grow"></span>
+            <button class="btn ghost sm" id="paste-lyrics">粘贴 / 修改歌词</button>
+          </div>
+          <div class="lyric-list" id="lyric-list"></div>
+          <div class="paste-box" id="paste-box" hidden>
+            <textarea id="paste-text" rows="10" placeholder="粘贴完整歌词。可用 漢字(かんじ) 或 {漢字|かんじ} 标注读音；行首可写 [歌手名] 指定演唱者。"></textarea>
+            <div class="row gap"><button class="btn primary sm" id="paste-send">交给 Agent 处理</button><button class="btn ghost sm" id="paste-cancel">取消</button></div>
+          </div>
+        </article>
+
+        <article class="card" id="card-template">
+          <header><h2>字幕模板</h2><span class="muted small">决定字体、配色、描边与排版</span></header>
+          <div class="gallery" id="tpl-gallery"></div>
+        </article>
+
+        <article class="card" id="card-effect">
+          <header><h2>字幕特效</h2><span class="muted small">悬停卡片查看动态效果</span></header>
+          <div class="gallery" id="fx-gallery"></div>
+        </article>
+
+        <article class="card" id="card-singers">
+          <header><h2>多人合唱样式</h2><span class="muted small" id="singer-hint"></span></header>
+          <div class="singer-grid" id="singer-grid"></div>
+          <div class="row gap"><button class="btn ghost sm" id="singer-add">＋ 添加演唱者</button><button class="btn ghost sm" id="singer-refresh">刷新预览</button></div>
+        </article>
+
+        <article class="card" id="card-output">
+          <header><h2>输出设置</h2></header>
+          <div class="out-grid">
+            <div class="field">
+              <span>背景</span>
+              <div class="seg-ctl" id="bg-type"></div>
+              <div class="bg-extra" id="bg-extra"></div>
+            </div>
+            <div class="field">
+              <span>分辨率</span>
+              <select id="out-res"><option value="1920x1080">1920 × 1080</option><option value="1280x720">1280 × 720</option><option value="2560x1440">2560 × 1440</option><option value="3840x2160">3840 × 2160</option></select>
+            </div>
+            <div class="field">
+              <span>帧率</span>
+              <div class="seg-ctl" id="out-fps"><button data-v="30">30 fps</button><button data-v="60" class="on">60 fps</button></div>
+            </div>
+            <div class="field">
+              <span>导出内容</span>
+              <div class="checks" id="out-kinds">
+                <label><input type="checkbox" value="mp4" checked> 成品 MP4</label>
+                <label><input type="checkbox" value="sug" checked> SUG 打轴工程 (.sug)</label>
+                <label><input type="checkbox" value="yurika" checked> 字幕工程 (.yurika)</label>
+                <label><input type="checkbox" value="lrc"> 逐字 LRC</label>
+                <label><input type="checkbox" value="alpha"> 透明字幕层 MOV（ProRes 4444，叠加到剪辑软件）</label>
+                <label><input type="checkbox" value="onoff" checked> on vocal / off vocal 双版本</label>
+                <label id="out-kind-mv"><input type="checkbox" value="mv"> <span id="out-kind-mv-label">AMV（无字幕版）</span></label>
+                <label><input type="checkbox" value="hires"> Hi-Res 混流（原唱 / 伴奏 MKV）</label>
+              </div>
+            </div>
+            <div class="field hires-fields" id="s1-hires">
+              <span>Hi-Res / 无损音源（可选，填本机路径）</span>
+              <input type="text" id="s1-hires-on" placeholder="原唱无损音频，如 D:\music\song.flac；留空 = 使用素材音频">
+              <input type="text" id="s1-hires-off" placeholder="伴奏无损音频，多条用 ; 分隔；留空 = 从原唱自动分离">
+              <span class="muted small">登记后自动对齐到素材时间轴：阶段二用它分离人声并打轴，on / off vocal 与 Hi-Res 混流也用它。</span>
+              <div class="hires-notes small" id="s1-hires-notes"></div>
+            </div>
+            <div class="field">
+              <span>其他</span>
+              <div class="checks">
+                <label><input type="checkbox" id="opt-ruby" checked> 显示注音（振假名）</label>
+                <label><input type="checkbox" id="opt-title" checked> 片头显示曲名信息</label>
+              </div>
+            </div>
+          </div>
+        </article>
+
+        <article class="card" id="card-mv" hidden>
+          <header><h2 id="mv-title">AMV 设计（静态 MV）</h2><span class="muted small" id="mv-sub"></span>
+            <button class="btn ghost sm" id="mv-gallery-btn">生成预设画廊</button></header>
+          <div class="mv-current">
+            <div class="mv-stills" id="mv-stills"></div>
+            <div class="mv-info">
+              <div class="mv-theme" id="mv-theme"></div>
+              <div class="mv-notes muted small" id="mv-notes"></div>
+              <div class="mv-palette" id="mv-palette"></div>
+            </div>
+          </div>
+          <div class="mv-montage" id="mv-montage" hidden>
+            <div class="mv-montage-head">
+              <h3>混剪素材与踩点剪辑</h3>
+              <span class="muted small" id="mv-montage-sum"></span>
+              <button class="btn ghost sm" id="mv-plan-btn">重新计算剪辑</button>
+            </div>
+            <div class="mv-source-row">
+              <span class="small">素材来源</span>
+              <div class="seg-ctl" id="mv-source"></div>
+              <div class="mv-upload" id="mv-upload-box">
+                <label class="btn ghost sm">上传图包（图片 / .zip）<input type="file" id="mv-upload" multiple accept="image/*,.zip" hidden></label>
+                <input type="text" id="mv-folder" class="grow" placeholder="或填写本机文件夹 / .zip 路径">
+                <button class="btn ghost sm" id="mv-folder-btn">导入</button>
+              </div>
+            </div>
+            <div class="mv-strip" id="mv-strip"></div>
+            <div class="muted small mv-montage-note" id="mv-montage-note"></div>
+            <div class="mv-pool" id="mv-pool"></div>
+          </div>
+          <div class="gallery mv-gallery" id="mv-gallery"></div>
+        </article>
+
+        <div class="confirm-bar">
+          <div class="muted" id="confirm-summary"></div>
+          <button class="btn primary lg" id="confirm-1">确认，开始自动打轴 →</button>
+        </div>
+      </section>
+
+      <!-- ============================== STAGE 2 ============================== -->
+      <section class="stage" id="stage-2" hidden>
+        <div class="stage-head">
+          <div>
+            <h1>自动打轴</h1>
+            <p class="muted">人声分离 → 注音转写 → 强制对齐 → 修正 → Agent 质检。时间轴会随对齐进度实时出现。</p>
+          </div>
+          <div class="overall"><div class="ring" id="overall-ring"><span id="overall-pct">0%</span></div></div>
+        </div>
+        <div class="grid s2">
+          <article class="card">
+            <header><h2>流水线</h2></header>
+            <ol class="steps" id="steps"></ol>
+          </article>
+          <article class="card">
+            <header><h2>实时时间轴</h2><span class="muted small" id="s2-count"></span></header>
+            <canvas id="s2-timeline" height="220"></canvas>
+            <div class="live-lines" id="live-lines"></div>
+          </article>
+        </div>
+      </section>
+
+      <!-- ============================== STAGE 3 ============================== -->
+      <section class="stage" id="stage-3" hidden>
+        <div class="stage-head">
+          <div>
+            <h1>审阅、微调与导出</h1>
+            <p class="muted">播放预览检查走字效果；点击歌词跳转，微调按钮即时生效；复杂修改可直接用文字告诉 Agent。</p>
+          </div>
+        </div>
+        <div class="grid s3">
+          <div class="s3-left">
+            <article class="card flush">
+              <div class="stage-player" id="s3-player">
+                <video id="s3-video" playsinline preload="auto"></video>
+                <canvas id="s3-overlay"></canvas>
+                <img id="s3-engine" class="engine-frame" hidden alt="">
+                <div class="engine-badge" id="s3-engine-badge" hidden>引擎渲染帧 · 点击关闭</div>
+              </div>
+              <div class="transport">
+                <button class="btn icon" id="s3-play" title="播放/暂停 (空格)">▶</button>
+                <span class="mono" id="s3-time">0:00.00</span>
+                <input type="range" id="s3-seek" min="0" max="1000" value="0" step="1">
+                <select id="s3-rate"><option value="0.5">0.5×</option><option value="0.75">0.75×</option><option value="1" selected>1×</option></select>
+                <button class="btn ghost sm" id="s3-frame">引擎帧预览</button>
+              </div>
+              <canvas id="s3-timeline" height="120"></canvas>
+            </article>
+            <article class="card">
+              <header><h2>导出</h2><button class="btn ghost sm" id="open-app" title="用 Lin-K Lyrics 打开导出的 .yurika / .sug，继续手工精修">在 Lin-K Lyrics 中打开</button><button class="btn ghost sm" id="open-export">打开导出文件夹</button></header>
+              <div class="export-row" id="export-row"></div>
+              <div class="hires-box">
+                <div class="row gap">
+                  <input type="text" id="s3-hires-on" class="grow" placeholder="Hi-Res 原唱无损音频路径（留空 = 素材原音频）">
+                  <input type="text" id="s3-hires-off" class="grow" placeholder="伴奏无损音频路径，多条用 ; 分隔（留空 = 自动分离）">
+                  <button class="btn ghost" id="s3-hires">Hi-Res 混流</button>
+                </div>
+                <div class="muted small">以已导出的成品 MP4 为视频轨，音轨统一转为 FLAC 32bit / ≥48kHz，分别输出原唱与伴奏 MKV。</div>
+              </div>
+              <div class="export-list" id="export-list"></div>
+            </article>
+          </div>
+          <div class="s3-right">
+            <article class="card lines-card">
+              <header><h2>逐行检查</h2><span class="muted small" id="qa-summary"></span></header>
+              <div class="line-table" id="line-table"></div>
+            </article>
+          </div>
+        </div>
+      </section>
+
+      <section class="stage" id="stage-0">
+        <div class="empty"><div class="spinner"></div><p>正在连接 Karaoke Master 服务…</p></div>
+      </section>
+    </main>
+
+    <aside class="side" id="side">
+      <div class="side-tabs">
+        <button class="on" data-tab="chat">Agent</button>
+        <button data-tab="log">日志</button>
+      </div>
+      <div class="side-body" id="side-chat">
+        <div class="chat" id="chat"></div>
+        <form class="prompt" id="prompt-form">
+          <textarea id="prompt" rows="3" placeholder="告诉 Agent 你想怎么调整，例如：「第 12 行整体晚了 0.2 秒」「副歌换成红色描边」「把 Mikumo 的颜色改成蓝紫色」"></textarea>
+          <button class="btn primary" type="submit">发送</button>
+        </form>
+      </div>
+      <div class="side-body" id="side-log" hidden>
+        <pre class="log" id="log"></pre>
+      </div>
+    </aside>
+  </div>
+
+  <div class="toast" id="toast" hidden></div>
+  <script src="/static/app.js"></script>
+</body>
+</html>

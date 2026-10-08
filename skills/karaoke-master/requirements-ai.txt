@@ -1,0 +1,12 @@
+# karaoke-master AI runtime (<home>/ai_venv) — CPU baseline installed by `km.py setup`.
+# Mirrors StrangeUtaGame's requirements-ai.txt plus faster-whisper for lyric location.
+# GPU acceleration is tried afterwards by the agent (see SKILL.md "Hardware acceleration").
+torch
+torchaudio
+transformers==5.15.0
+soundfile
+huggingface_hub
+audio-separator
+onnxruntime
+librosa==0.10.2.post1
+faster-whisper
