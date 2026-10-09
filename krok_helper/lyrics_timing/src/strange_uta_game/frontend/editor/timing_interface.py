@@ -1323,8 +1323,9 @@ class EditorInterface(QWidget):
         # 应用隐藏 hitbox 高亮设置
         hide_hitbox = settings.get("timing.hide_hitbox_highlights", False)
         self.preview.set_hide_hitbox_highlights(hide_hitbox)
-        # 应用走字预览指引开关
-        preview_guide = settings.get("timing.preview_guide_enabled", False)
+        # 应用打轴指引总开关（正文走字预览 + 注音打轴状态）
+        # 默认值与 DEFAULT_SETTINGS（preview_guide_enabled=True）一致
+        preview_guide = settings.get("timing.preview_guide_enabled", True)
         self.preview.set_preview_guide_enabled(preview_guide)
         # 应用走字预览指引逐群设置
         self.preview.set_preview_guide_config(
@@ -6899,15 +6900,20 @@ class EditorInterface(QWidget):
         new_char_idx = min(start, len(sentence.characters) - 1)
         return line_idx, new_char_idx, 0, "lyrics"
     
-    def _delete_timestamp(self, line_idx: int, char_idx: int) :
+    def _delete_timestamp(self, line_idx: int, char_idx: int) -> bool:
         if not self._project or line_idx < 0 or line_idx >= len(self._project.sentences):
-            return None
+            return False
 
         sentence = self._project.sentences[line_idx]
-        if not sentence.characters:
-            return None
-        
+        char = sentence.get_character(char_idx)
+        if char is None or not char.all_timestamps:
+            return False
+
         sentence.clear_one_timestamps(char_idx)
+        # 退格删除不经过 on_timetag_added 回调，只需刷新 Ruby 的已打轴底色。
+        # 走字仍使用删除前的时间轴、锚点和遮罩缓存，不由退格重算。
+        self.preview._refresh_ruby_timing_state(line_idx)
+        return True
 
     def _insert_line_break_at_current(self):
         if not self._project:

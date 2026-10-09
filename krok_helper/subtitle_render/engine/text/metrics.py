@@ -128,6 +128,7 @@ def char_advance(
     metrics: QFontMetrics,
     latin_metrics: QFontMetrics,
     font_for: FontSelector | None,
+    base_font: QFont | None = None,
 ) -> int:
     cache = getattr(_LAYOUT_PASS, "char_advances", None)
     if cache is None:
@@ -271,7 +272,7 @@ def _char_glyph_metrics(
     cached = _CHAR_GLYPH_CACHE.get(key)
     if cached is not None:
         return cached
-    advance = char_advance(text, metrics, latin_metrics, font_for)
+    advance = char_advance(text, metrics, latin_metrics, font_for, base_font=glyph_font)
     path = QPainterPath()
     if text:
         path.addText(0.0, 0.0, glyph_font, text)

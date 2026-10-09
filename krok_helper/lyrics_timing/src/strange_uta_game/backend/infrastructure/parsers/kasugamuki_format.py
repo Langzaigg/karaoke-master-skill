@@ -37,10 +37,6 @@ _SOKUON = set("っッ")
 _LONG_VOWEL = set("ー")
 
 _KRL_TIMESTAMP_RE = re.compile(r"\[(\d{1,3}:\d{2}:\d{2,3})\]")
-# 释放（停顿点）时间标签 `[>MM:SS:cc]`（F9）：显式标记「这是前一个
-# 字符的释放点」，与起始 tag `[ts]` 区分——否则「释放 tag + 后随无 ts
-# 正文」会被误读成后字凭空获得起始时间戳。
-_KRL_RELEASE_TS_RE = re.compile(r"\[>(\d{1,3}:\d{2}:\d{2,3})\]")
 _KRL_CONFIG_START_RE = re.compile(r"\A\ufeff?\s*config\s*\{", re.IGNORECASE)
 # 行首角色标签：【@角色名】，`+` 连接表示合唱（如 【@miku+rin】）。
 # 标签不属于歌词正文；未标注的行沿用上一个角色。
@@ -225,17 +221,6 @@ def sentence_from_kasugamuki(line: str, singer_id: str) -> Sentence:
             pos = next_pos
             continue
 
-        release_match = _KRL_RELEASE_TS_RE.match(line, pos)
-        if release_match:
-            # 显式释放标记 `[>ts]`（F9）：无条件绑给前一个字符，
-            # 不受后随内容影响——与导出侧 `_format_sentence_end` 对称。
-            if characters:
-                previous = characters[-1]
-                previous.is_sentence_end = True
-                previous.set_sentence_end_ts(parse_timestamp(release_match.group(1)))
-            pos = release_match.end()
-            continue
-
         character = Character(
             char=line[pos],
             check_count=1 if pending_timestamp is not None else 0,
@@ -320,17 +305,12 @@ def _get_sentence_end_ts(char: Character) -> Optional[int]:
 
 
 def _format_sentence_end(char: Character) -> str:
-    """如果字符是停顿点，返回释放时间标签字符串；否则返回空串。
-
-    F9：释放点用显式 `[>ts]` 标记（区别于起始 tag `[ts]`），导入侧
-    无条件绑给前一个字符——否则「释放 tag + 后随无 ts 正文」会被
-    误读成后字凭空获得起始时间戳，往返语义错位。
-    """
+    """如果字符是停顿点，返回 KRL 标准时间标签；否则返回空串。"""
     if not char.is_sentence_end:
         return ""
     se_ts = _get_sentence_end_ts(char)
     if se_ts is not None:
-        return f"[>{format_timestamp(se_ts)}]"
+        return f"[{format_timestamp(se_ts)}]"
     return ""
 
 
@@ -479,12 +459,12 @@ def _char_ruby_kana(char: Character) -> str:
 
 
 def _split_group_at_releases(group: List[Character]) -> List[List[Character]]:
-    """把连词组按句中停顿点切成若干子组（F9）。
+    """把连词组按句中停顿点切成若干子组。
 
     连词组中部的释放点此前被无条件丢弃（只输出组尾字符的停顿标记）。
-    在每个 is_sentence_end 字符处收尾切段，让释放标记正好落在该子组
-    之后、被导入侧绑回该字符。停顿点字符本就不该向后连读（与 inline
-    导入侧的连词规则一致），因此切点处断链是正确归一化。
+    在每个 is_sentence_end 字符处收尾切段，让 KRL 标准时间标签落在该
+    子组之后。停顿点字符本就不该向后连读（与 inline 导入侧的连词规则
+    一致），因此切点处断链是正确归一化。
     """
     subs: List[List[Character]] = []
     start = 0
@@ -657,7 +637,7 @@ def _linked_group_romaji(
     romaji_by_char: Dict[int, List[str]],
 ) -> str:
     segments: List[str] = []
-    # 连词组按句中停顿点切子组（F9：中部释放点不丢，绑回对应字符）
+    # 连词组按句中停顿点切子组，避免中部释放点被组尾吞掉。
     consumed = 0
     for sub in _split_group_at_releases(group):
         base = "".join(ch.char for ch in sub)

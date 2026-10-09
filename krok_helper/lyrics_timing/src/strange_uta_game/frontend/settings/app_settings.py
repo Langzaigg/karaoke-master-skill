@@ -173,7 +173,8 @@ class AppSettings:
             "waveform_rms_enabled": True,         # 双层波形（峰值+RMS）
             "disable_click_jump": False,
             "disable_click_recenter": False,
-            "preview_guide_enabled": False,
+            # 打轴指引总开关（正文走字预览 + 注音打轴状态），默认开
+            "preview_guide_enabled": True,
             "preview_guide_prev_alpha": 100,
             "preview_guide_curr_alpha": 50,
             "preview_guide_next_alpha": 20,
