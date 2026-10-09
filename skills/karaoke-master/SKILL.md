@@ -401,9 +401,14 @@ is busy enough) and adapt it to the song.
      of a visual novel are part of the show; keep those shots unless the user objects, but prefer
      them last (`avoid`).
 5. **Design and plan**: `KM mv <job> --kind montage --preset game_montage`, then a spec of your own
-   (theme / notes in Chinese). The planner cuts on bar downbeats (faster in loud parts; layer
-   `beat_cuts: true` allows cuts on single beats), fills each shot with an unused clip whose
-   length fits and whose motion suits the music there, alternates sources, reuses the first
+   (theme / notes in Chinese). Then **lay out the shot order yourself**: `KM mv-clips <job> --list`
+   prints every pool entry (id, source, `t_in`, duration, motion, score, tags) — order the ids by
+   the rules (video clips first, calm sources early, hottest for the chorus, one source's shots in
+   `t_in` order, images last) and write them into the montage layer's `images` array via
+   `mv --spec`. The planner then plays them in that order (length-fit and source-order guards still
+   apply; an entry too short for the current shot is skipped and picked up by a later shorter one).
+   Without `images`, the planner fills each shot with an unused clip whose length fits and whose
+   motion suits the music there, alternates sources, reuses the first
    occurrence's clips for a repeated chorus, and slows a short clip down (≥ 0.7×) instead of
    repeating one. `transitions: "auto"` on clips = hard cut exactly on the beat (卡点), short
    crossfade in quiet parts and at calm section starts; `clip_zoom` adds a slow push-in; `dim`
