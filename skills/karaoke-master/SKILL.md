@@ -387,7 +387,10 @@ is busy enough) and adapt it to the song.
      logos, facecams, livestream overlays, black / white / blurred frames — they clash with the
      karaoke lines. Shots whose only problem is an in-game dialogue subtitle can stay as a last
      resort: put their ids in the layer's `avoid`. Tag the rest (`--tag id+id=concert,best`);
-     `best` shots are preferred, `prefer_tags` on the layer boosts a theme.
+     `best` shots are preferred, `prefer_tags` on the layer boosts a theme. Scans already carry
+     derived tags (`dynamic` / `calm` / `bright` / `dark`); while reviewing the sheets, also give
+     shots semantic content tags (`--tag "#3=concert,noa"` — sheet numbers work) so the layout can
+     match them to the lyrics (`lyric_tags` on the layer).
    - *Used*: after the plan exists, `KM mv-clips <job> --sheet-used` shows start / middle / end of
      the part of each **used** clip that will actually be on screen (`clip_used_N.jpg`, numbers
      `U1`…) — subtitles, UI pop-ups and fades that appear mid-clip only show up here.
