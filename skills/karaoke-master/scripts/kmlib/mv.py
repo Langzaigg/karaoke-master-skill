@@ -537,7 +537,11 @@ def plan_montage(store: JobStore, feat: dict, layer: dict, duration: float) -> d
             if m >= threshold and m > 0:
                 a, b, _ = section_spans[i]
                 section_spans[i] = (a, b, "chorus")
-    pace = {"chorus": 0.5, "verse": 1.0, "instrumental": 2.0}
+    # video clips carry more motion per second than stills: a clip montage runs one
+    # notch slower (a calm interlude may hold a single long clip shot), while stills
+    # compress the section multipliers so one image never lingers too long
+    pace = ({"chorus": 0.75, "verse": 1.5, "instrumental": 3.0} if clips
+            else {"chorus": 0.5, "verse": 1.0, "instrumental": 1.25})
     pace.update(layer.get("section_pace") or {})
     sec_motion = {"chorus": "high", "instrumental": "low"}
     sec_motion.update(layer.get("section_motion") or {})
@@ -643,11 +647,17 @@ def plan_montage(store: JobStore, feat: dict, layer: dict, duration: float) -> d
             n_bars = (layer.get("bars", 2) * scale * (0.5 if e > 0.72 else 2.0 if e < 0.28 else 1.0)
                       * pace.get(section_of(t), 1.0))
             fine = bool(layer.get("beat_cuts")) and n_bars < 1.0  # 卡点 on beats, not only bar starts
-            target = min(t + max(0.5 if fine else 1.0, n_bars) * bar_len, t + max_shot)
+            # a calm instrumental passage in a clip montage may hold one long shot
+            max_here = max_shot
+            if clips and section_of(t) == "instrumental" and pace.get("instrumental", 1.0) >= 2.0:
+                span_end = next((b for a, b, k in section_spans
+                                 if k == "instrumental" and a <= t < b), t + max_shot)
+                max_here = max(max_shot, min(span_end, t + 20.0))
+            target = min(t + max(0.5 if fine else 1.0, n_bars) * bar_len, t + max_here)
             nxt = next((f for f in forced if t + min_shot <= f <= target + 0.01), None)
             if nxt is None:
-                cands = [b for b in (beats if fine else bars) if t + min_shot <= b <= t + max_shot]
-                nxt = min(cands, key=lambda b: abs(b - target)) if cands else min(duration, t + max_shot)
+                cands = [b for b in (beats if fine else bars) if t + min_shot <= b <= t + max_here]
+                nxt = min(cands, key=lambda b: abs(b - target)) if cands else min(duration, t + max_here)
             if duration - nxt < min_shot:
                 break
             cuts.append(round(float(nxt), 3))
