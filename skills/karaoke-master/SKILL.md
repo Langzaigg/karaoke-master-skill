@@ -403,6 +403,9 @@ is busy enough) and adapt it to the song.
      hides in the last seconds) and exclude those shots — or the whole source when the overlays
      are everywhere. In-game dialogue subtitles of a visual novel are part of the show; keep
      those shots unless the user objects, but prefer them last (`avoid`).
+   - **Facecams drift**: a streamer who keeps the camera in the side panel early may move it
+     over the game picture later. A `--crop` that hid it stops working then — when one spotted
+     shot shows a face, drop the whole source rather than playing whack-a-mole per clip.
 5. **Design and plan**: `KM mv <job> --kind montage --preset game_montage`, then a spec of your own
    (theme / notes in Chinese). The planner cuts on bar downbeats (faster in loud parts; layer
    `beat_cuts: true` allows cuts on single beats), fills each shot with an unused clip whose
