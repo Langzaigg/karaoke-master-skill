@@ -263,7 +263,7 @@ DEFAULT_PRESET = "spectrum_classic"
 KINDS = ("mv", "montage")  # AMV design / image montage
 # bump when the montage planner's output changes for the same inputs (the design
 # signature below includes it so a stale rendered background is not reused)
-PLANNER_VERSION = 3
+PLANNER_VERSION = 4
 DEFAULT_PRESETS = {"mv": DEFAULT_PRESET, "montage": "anime_montage"}
 KIND_LABEL = {"mv": "AMV", "montage": "混剪"}
 
