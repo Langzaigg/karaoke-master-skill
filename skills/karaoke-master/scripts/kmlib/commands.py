@@ -1648,8 +1648,9 @@ def cmd_mv_clips(args) -> int:
             only_used=getattr(args, "only_used", False), no_sr=getattr(args, "no_sr", False),
             no_rife=getattr(args, "no_rife", False), sr_scale=args.sr_scale, rife_multi=args.rife_multi)
     if args.list:
-        out["clips"] = [{k: a.get(k) for k in ("id", "name", "duration", "motion", "score", "tags")}
-                        for a in mv_clips.clips(store)]
+        out["clips"] = [{k: a.get(k) for k in ("id", "name", "duration", "motion", "score", "tags",
+                                               "t_in", "t_out", "library_id", "kind", "w", "h")}
+                        for a in mv_assets.load_pool(store)]
     out["pool"] = {"clips": len(mv_clips.clips(store)), "total": len(mv_assets.load_pool(store))}
     media = store.load().get("media") or {}
     if (args.add or args.from_library or args.exclude or args.avoid_from) and \

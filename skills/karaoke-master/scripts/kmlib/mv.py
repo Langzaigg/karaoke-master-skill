@@ -485,8 +485,12 @@ def plan_montage(store: JobStore, feat: dict, layer: dict, duration: float) -> d
 
     pool = mv_assets.load_pool(store)
     ids = [a["id"] for a in pool if a["id"] not in set(layer.get("exclude", []))]
-    if isinstance(layer.get("images"), list):
-        ids = [i for i in layer["images"] if i in ids]
+    # ``images``: an explicit use order laid out by the agent (``mv-clips --list`` →
+    # judge by the rules → write the id list). Covers clips too: the planner then plays
+    # them in that order (length-fit and source-order guards still apply).
+    manual_ids = layer.get("images") if isinstance(layer.get("images"), list) else None
+    if manual_ids is not None:
+        ids = [i for i in manual_ids if i in ids]
     origins = {a["id"]: mv_assets.origin_of(a) for a in pool}
     clips = {a["id"]: a for a in pool if a.get("kind") == "clip"}
     # one montage module for images and video clips: ``sources`` picks the ingredient
@@ -603,20 +607,31 @@ def plan_montage(store: JobStore, feat: dict, layer: dict, duration: float) -> d
         return min(ok, key=lambda i: (counts.get(i, 0), -dur_of(i)))
 
     def take(unused: list[str], s: dict, last: dict) -> str | None:
-        """Images: front to back, preferring this section's tags. Clips: among the next
-        few in order that are long enough, the one whose length fits the shot and whose
-        motion suits the music there, preferring another source than the previous shot.
-        None = no clip is long enough (the shot then repeats a long-enough one, see fallback)."""
+        """Clips lead whenever one can fill the shot (video first); an image fills the
+        gaps no clip can take, or jumps the queue when its tags fit this section.
+        None = nothing fits (the shot then repeats a long-enough clip, see fallback)."""
         sec = section_of(s["t0"])
-        if not clips or unused[0] not in clips:
-            want_tags = sec_tags.get(sec) or set()
-            if want_tags:
-                hit = next((i for i in unused[:6] if set(by_id[i].get("tags") or []) & want_tags), None)
-                if hit is not None:
-                    unused.remove(hit)
-                    return hit
-            return unused.pop(0)
         need = need_of(s)
+        usable = [cid for cid in unused if cid in clips and long_enough(cid, need)] if clips else []
+        if not usable:
+            # no clip can fill this shot — an image fills it (manual order when given)
+            cands = [i for i in unused if i not in clips]
+            if manual_ids is not None:
+                rank = {cid: k for k, cid in enumerate(manual_ids)}
+                cands.sort(key=lambda i: rank.get(i, len(manual_ids)))
+            img = cands[0] if cands else None
+            if img is not None:
+                unused.remove(img)
+                return img
+            return None
+        # a section-tagged image may still jump the queue when the words fit it
+        want_tags = sec_tags.get(sec) or set()
+        if want_tags and unused[0] not in clips:
+            hit = next((i for i in unused[:6]
+                        if i not in clips and set(by_id[i].get("tags") or []) & want_tags), None)
+            if hit is not None:
+                unused.remove(hit)
+                return hit
         e = float(energy[min(len(energy) - 1, int(s["t0"] * fps))])
         m = sec_motion.get(sec)
         want = motion_hi if m == "high" else motion_lo if m == "low" else 0.008 + 0.05 * e
@@ -632,6 +647,12 @@ def plan_montage(store: JobStore, feat: dict, layer: dict, duration: float) -> d
                     or float(clips[cid].get("t_in") or 0) >= lin.get(clips[cid].get("library_id"), 0.0)]
         if in_order:
             usable = in_order
+        if manual_ids is not None:
+            # the agent laid out the order by hand: the first still-usable entry wins
+            rank = {cid: k for k, cid in enumerate(manual_ids)}
+            pick = min(usable, key=lambda cid: rank.get(cid, len(manual_ids)))
+            unused.remove(pick)
+            return pick
         window = [cid for cid in unused[:14] if cid in usable] or usable[:14]
         best, best_q = window[0], -1e9
         for j, cid in enumerate(window):
