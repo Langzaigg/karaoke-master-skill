@@ -391,6 +391,12 @@ is busy enough) and adapt it to the song.
      game or a stream outro. After `--add` of sectioned long videos, spot-check one frame per
      section (`ffmpeg -ss`) before trusting the pool — exclude whole sections whose content is
      off-topic, and delete them from the library so sibling projects never import them.
+   - **Trailers carry burned-in marketing**: official trailers / PVs often end in release-date
+     cards, character-name cards or "ON SALE" banners, and some uploads are tutorial reels or
+     carry channel logos throughout. Sample a few frames across the whole video (the end card
+     hides in the last seconds) and exclude those shots — or the whole source when the overlays
+     are everywhere. In-game dialogue subtitles of a visual novel are part of the show; keep
+     those shots unless the user objects, but prefer them last (`avoid`).
 5. **Design and plan**: `KM mv <job> --kind montage --preset game_montage`, then a spec of your own
    (theme / notes in Chinese). The planner cuts on bar downbeats (faster in loud parts; layer
    `beat_cuts: true` allows cuts on single beats), fills each shot with an unused clip whose
