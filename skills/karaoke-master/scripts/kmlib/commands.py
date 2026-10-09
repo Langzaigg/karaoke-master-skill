@@ -1536,6 +1536,16 @@ def cmd_hires_source(args) -> int:
     return 0
 
 
+def sheet_ids(store: JobStore) -> dict:
+    """Tile numbers of the last review sheets → asset ids ("#3" pool sheet, "U5" used sheet)."""
+    sheet = {}
+    for f in sorted(store.path("previews").glob("clip_sheet_*.json")):
+        sheet.update({f"#{e['n']}": e["id"] for e in read_json(f, [])})
+    for f in sorted(store.path("previews").glob("clip_used_*.json")):
+        sheet.update({e["n"]: e["id"] for e in read_json(f, [])})
+    return sheet
+
+
 def cmd_mv_assets(args) -> int:
     """Image pool for the MV montage."""
     from . import mv_assets
@@ -1554,6 +1564,18 @@ def cmd_mv_assets(args) -> int:
         out["from_video"] = {"added": sum(1 for r in res if r.get("ok")), "skipped": sum(1 for r in res if not r.get("ok"))}
     if args.remove:
         out["removed"] = mv_assets.remove(store, args.remove)
+    if getattr(args, "tag", None):
+        from . import mv_clips
+
+        specs = []
+        for spec in args.tag:
+            head, _, tags = spec.partition("=")
+            keys = [k.strip() for k in head.split("+")]
+            if any(k.startswith(("#", "U")) for k in keys):
+                sheet = sheet_ids(store)
+                keys = [sheet.get(k, k) for k in keys]
+            specs.append("+".join(keys) + "=" + tags)
+        out["tagged"] = mv_clips.set_tags(store, specs)
     if args.credits:
         out["credits"] = mv_assets.credits(store)
     if args.plan:
@@ -1611,15 +1633,19 @@ def cmd_mv_clips(args) -> int:
     if args.exclude:
         ids = [x.strip() for x in args.exclude.split(",") if x.strip()]
         if any(x.startswith(("#", "U")) for x in ids):  # "#12" / "U3" = tile of the last --sheet / --sheet-used
-            sheet = {}
-            for f in sorted(store.path("previews").glob("clip_sheet_*.json")):
-                sheet.update({f"#{e['n']}": e["id"] for e in read_json(f, [])})
-            for f in sorted(store.path("previews").glob("clip_used_*.json")):
-                sheet.update({e["n"]: e["id"] for e in read_json(f, [])})
-            ids = [sheet.get(x, x) for x in ids]
+            ids = [sheet_ids(store).get(x, x) for x in ids]
         out["removed"] = mv_assets.remove(store, ids)
     if args.tag:
-        out["tagged"] = mv_clips.set_tags(store, args.tag)
+        # "#3=concert" / "U5=battle" refer to the tiles of the last review sheets
+        specs = []
+        for spec in args.tag:
+            head, _, tags = spec.partition("=")
+            keys = [k.strip() for k in head.split("+")]
+            if any(k.startswith(("#", "U")) for k in keys):
+                sheet = sheet_ids(store)
+                keys = [sheet.get(k, k) for k in keys]
+            specs.append("+".join(keys) + "=" + tags)
+        out["tagged"] = mv_clips.set_tags(store, specs)
     if args.avoid_from:
         if not (Path(args.avoid_from) / "render" / "montage_plan.json").is_file():
             raise SystemExit(f"--avoid-from：{args.avoid_from} 没有剪辑计划（render/montage_plan.json）")

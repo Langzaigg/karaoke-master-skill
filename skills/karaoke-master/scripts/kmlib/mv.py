@@ -551,6 +551,11 @@ def plan_montage(store: JobStore, feat: dict, layer: dict, duration: float) -> d
     sec_motion.update(layer.get("section_motion") or {})
     # per-section tag affinity (images and clips alike): e.g. {"chorus": ["battle"]}
     sec_tags = {k: set(v) for k, v in (layer.get("section_tags") or {}).items()}
+    # lyrics-aware tag windows: [{"t0": seconds, "t1": seconds, "tags": [...]}] — the agent
+    # reads the lyrics and tags the passages (a desert verse, a hopeful chorus) so shots whose
+    # content tags fit the moment are preferred there
+    lyric_tag_rules = [(float(t["t0"]), float(t["t1"]), set(t["tags"]))
+                       for t in (layer.get("lyric_tags") or []) if t.get("tags")]
     clip_motions = sorted(float(c.get("motion") or 0.01) for c in clips.values())
     motion_hi = clip_motions[int(len(clip_motions) * 0.7)] if clip_motions else 0.02
     motion_lo = clip_motions[int(len(clip_motions) * 0.25)] if clip_motions else 0.005
@@ -560,6 +565,13 @@ def plan_montage(store: JobStore, feat: dict, layer: dict, duration: float) -> d
             if a <= t < b:
                 return k
         return "verse"
+
+    def want_tags_of(t: float, sec: str) -> set:
+        w = set(sec_tags.get(sec) or set())
+        for a, b, tags in lyric_tag_rules:
+            if a <= t < b:
+                w |= tags
+        return w
 
     fps = feat["fps"]
     energy = np.asarray(feat["energy"])
@@ -625,7 +637,7 @@ def plan_montage(store: JobStore, feat: dict, layer: dict, duration: float) -> d
                 return img
             return None
         # a section-tagged image may still jump the queue when the words fit it
-        want_tags = sec_tags.get(sec) or set()
+        want_tags = want_tags_of(s["t0"], sec)
         if want_tags and unused[0] not in clips:
             hit = next((i for i in unused[:6]
                         if i not in clips and set(by_id[i].get("tags") or []) & want_tags), None)
@@ -668,7 +680,7 @@ def plan_montage(store: JobStore, feat: dict, layer: dict, duration: float) -> d
             order_term = (0.9 if prev_in is not None and float(c.get("t_in") or 0) >= prev_in
                           else -0.9 if prev_in is not None else 0.0)
             q = (1.3 * fit + 0.8 * match + 0.5 * clip_quality(c, layer.get("prefer_tags")) - 0.3 * j / 14
-                 + (0.6 if set(c.get("tags") or []) & (sec_tags.get(sec) or set()) else 0.0)
+                 + (0.6 if set(c.get("tags") or []) & want_tags_of(s["t0"], sec) else 0.0)
                  + order_term
                  - (0.6 if c.get("library_id") and c.get("library_id") == last.get("src") else 0.0))
             if q > best_q:

@@ -499,6 +499,23 @@ def shot_score(s: dict) -> float:
     return round(q, 3)
 
 
+def auto_tags(s: dict) -> set[str]:
+    """Content-derived tags from the scan metrics: motion and brightness bands.
+    Semantic tags (concert / battle / a character) are added by the agent with --tag."""
+    out = set()
+    mo = float(s.get("motion") or 0)
+    if mo >= 0.05:
+        out.add("dynamic")
+    elif mo <= 0.015:
+        out.add("calm")
+    luma = float(s.get("luma") or 0)
+    if luma >= 0.55:
+        out.add("bright")
+    elif luma <= 0.22:
+        out.add("dark")
+    return out
+
+
 # ------------------------------------------------------------------ pool
 def clip_id(src: Path, t_in: float, *, local: bool = False) -> str:
     """Library files: name + folder (stable across projects sharing the library).
@@ -603,7 +620,9 @@ def import_source(store: JobStore, rec: dict, *, library: str | None = None, min
                      "detail": s["detail"], "score": q, "ahash": s["ahash"], "sha1": "", "library_id": rec["id"],
                      "source": link, "credit": rec.get("credit"),
                      "name": f"{(rec.get('title') or rec['id'])[:40]} @ {int(orig_t // 60)}:{int(orig_t % 60):02d}",
-                     "tags": list(tags or []), "added": time.time()}
+                     # content-derived tags for the section/lyrics-aware layout: motion and
+                     # brightness bands; the agent adds semantic ones with --tag
+                     "tags": sorted(set(tags or []) | auto_tags(s)), "added": time.time()}
             pool.append(entry)
             hashes.append((ah, str(path), s["t_in"]))
             have.add(cid)

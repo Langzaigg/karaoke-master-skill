@@ -199,6 +199,7 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--tags", help="逗号分隔标签，如 chorus,character")
     p.add_argument("--from-video", type=int, metavar="N", help="从素材视频抽取 N 个不同场景")
     p.add_argument("--remove", action="append", help="删除素材 id（all = 全部）")
+    p.add_argument("--tag", action="append", help="事后打标：id[+id…]=标签,标签（支持 sheet 编号 #3 / U5）")
     p.add_argument("--list", action="store_true")
     p.add_argument("--credits", action="store_true", help="列出出处 / 署名")
     p.add_argument("--plan", action="store_true", help="按当前 MV 设计计算节拍剪辑计划（需要多少张图）")
