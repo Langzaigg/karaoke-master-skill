@@ -75,6 +75,77 @@ def parse_lrc_text(lrc: str) -> list[dict]:
     return out
 
 
+_WORD_STAMP = re.compile(r"\[(\d+):(\d+(?:\.\d+)?)\]")
+
+
+def parse_verbatim_text(lrc: str) -> list[dict]:
+    """Word-level (逐字) LRC — ``[00:12.34]word[00:12.80]word …`` per line, as the
+    engine builds it from NetEase YRC / Kugou KRC — into lines whose ``words``
+    are ``[first_char, last_char, start_seconds]`` (inclusive, like ruby spans;
+    ``_add_durations`` appends the word length when the raw source has it)."""
+    out = []
+    for raw in lrc.splitlines():
+        stamps = list(_WORD_STAMP.finditer(raw))
+        if not stamps:
+            continue
+        text, words = "", []
+        for k, m in enumerate(stamps):
+            piece = raw[m.end():stamps[k + 1].start() if k + 1 < len(stamps) else len(raw)]
+            if not text:
+                piece = piece.lstrip()
+            core = piece.rstrip()
+            if core.strip():
+                first = len(text) + len(core) - len(core.lstrip())
+                words.append([first, len(text) + len(core) - 1, round(int(m.group(1)) * 60 + float(m.group(2)), 3)])
+            text += piece
+        text = text.rstrip()
+        if text.strip():
+            out.append({"text": text, "ruby": [], "t": words[0][2] if words else None, "tr": None, "words": words})
+    return out
+
+
+def _word_durations(c) -> dict[int, int]:
+    """Word start (ms) → duration (ms) from the raw NetEase YRC / Kugou KRC; the
+    engine's word-level LRC keeps only the starts, karaoke wipes want the lengths."""
+    import base64
+
+    from krok_helper import lyrics as kl
+
+    out: dict[int, int] = {}
+    try:
+        if c.provider_id == "ne":
+            raw = kl._extract_nested_lyric(c.lyrics_payload, "yrc") or kl._extract_nested_lyric(c.lyrics_payload, "klyric")
+            for line in raw.splitlines():
+                m = kl._LINE_DURATION_PATTERN.match(line.strip())
+                for w in kl._YRC_WORD_PATTERN.finditer(m.group(3) if m else ""):
+                    out[int(w.group("start"))] = int(w.group("duration"))
+        elif c.provider_id == "kg":
+            content = str(((c.lyrics_payload or {}).get("download") or {}).get("content") or "")
+            for line in kl._decrypt_kugou_krc(base64.b64decode(content)).splitlines():
+                m = kl._LINE_DURATION_PATTERN.match(line.strip())
+                for w in kl._KRC_WORD_PATTERN.finditer(m.group(3) if m else ""):
+                    out[int(m.group(1)) + int(w.group("start"))] = int(w.group("duration"))
+    except Exception:  # noqa: BLE001 - durations are a bonus
+        return {}
+    return out
+
+
+def _add_durations(lines: list[dict], durs: dict[int, int]) -> None:
+    """Append each word's length (seconds) as a 4th element when the raw source has it."""
+    if not durs:
+        return
+    import bisect
+
+    keys = sorted(durs)
+    for line in lines:
+        for w in line.get("words") or []:
+            ms = int(round(w[2] * 1000))
+            k = bisect.bisect_left(keys, ms)
+            near = min((keys[j] for j in (k - 1, k) if 0 <= j < len(keys)), key=lambda x: abs(x - ms), default=None)
+            if near is not None and abs(near - ms) <= 12 and len(w) == 3:
+                w.append(round(durs[near] / 1000.0, 3))
+
+
 def _attach_translation(lines: list[dict], translation_lrc: str) -> None:
     if not translation_lrc:
         return
@@ -91,9 +162,16 @@ def _attach_translation(lines: list[dict], translation_lrc: str) -> None:
 def _candidate_dict(c, idx: int) -> dict:
     from krok_helper.lyrics import LYRICS_PREVIEW_LINE, build_lyrics_preview
 
+    from krok_helper.lyrics import LYRICS_PREVIEW_VERBATIM
+
     has_ruby = "[tool:utaten-ruby]" in (c.plain_lyrics or "")
+    has_verbatim = bool((c.verbatim_lyrics or "").strip())
     if has_ruby:
         lines = parse_utaten_text(c.plain_lyrics)
+    elif has_verbatim:  # word-level timing (NetEase YRC / Kugou KRC): keep every word's start
+        lines = parse_verbatim_text(build_lyrics_preview(c, LYRICS_PREVIEW_VERBATIM).text)
+        _add_durations(lines, _word_durations(c))
+        _attach_translation(lines, c.translation_lyrics)
     else:
         try:
             text = build_lyrics_preview(c, LYRICS_PREVIEW_LINE).text
@@ -113,6 +191,7 @@ def _candidate_dict(c, idx: int) -> dict:
         "url": c.source_url,
         "has_ruby": has_ruby,
         "has_timing": any(l.get("t") is not None for l in lines),
+        "has_verbatim": any(l.get("words") for l in lines),
         "has_translation": any(l.get("tr") for l in lines),
         "line_count": len(lines),
         "lines": lines,
@@ -247,9 +326,14 @@ def split_line(lines: list[dict], index: int, at: int) -> None:
         raise ValueError("拆分位置超出范围")
     left_text, right_text = text[:at].rstrip(), text[at:].lstrip()
     lshift = at + (len(text[at:]) - len(text[at:].lstrip()))
-    left = dict(line, text=left_text, ruby=[r for r in line.get("ruby", []) if r[1] < at])
-    right = dict(line, text=right_text, t=None, tr=None,
-                 ruby=[[r[0] - lshift, r[1] - lshift, *r[2:]] for r in line.get("ruby", []) if r[0] >= at])
+    words = line.get("words") or []
+    # a word that crosses the split keeps its time on the side of its first character
+    left = dict(line, text=left_text, ruby=[r for r in line.get("ruby", []) if r[1] < at],
+                words=[[w[0], min(w[1], len(left_text) - 1), *w[2:]] for w in words if w[0] < len(left_text)])
+    right_words = [[w[0] - lshift, w[1] - lshift, *w[2:]] for w in words if w[0] >= lshift]
+    right = dict(line, text=right_text, t=right_words[0][2] if right_words else None, tr=None,
+                 ruby=[[r[0] - lshift, r[1] - lshift, *r[2:]] for r in line.get("ruby", []) if r[0] >= at],
+                 words=right_words)
     lines[index:index + 1] = [left, right]
 
 
@@ -257,7 +341,8 @@ def merge_lines(lines: list[dict], index: int, sep: str = " ") -> None:
     a, b = lines[index], lines[index + 1]
     shift = len(a["text"]) + len(sep)
     merged = dict(a, text=a["text"] + sep + b["text"],
-                  ruby=list(a.get("ruby", [])) + [[r[0] + shift, r[1] + shift, *r[2:]] for r in b.get("ruby", [])])
+                  ruby=list(a.get("ruby", [])) + [[r[0] + shift, r[1] + shift, *r[2:]] for r in b.get("ruby", [])],
+                  words=list(a.get("words") or []) + [[w[0] + shift, w[1] + shift, *w[2:]] for w in b.get("words") or []])
     lines[index:index + 2] = [merged]
 
 
@@ -276,11 +361,59 @@ def auto_split_long(lines: list[dict], max_units: float = 17.0) -> int:
             if spaces:
                 mid = len(text) / 2
                 at = min(spaces, key=lambda k: abs(k - mid))
+                # a phrase break (after , ; : ! ? 、 。) near the middle reads better than the exact middle
+                phrase = [k for k in spaces if text[k - 1] in ",;:!?、。，" and abs(k - mid) <= len(text) * 0.22]
+                if phrase:
+                    at = min(phrase, key=lambda k: abs(k - mid))
                 split_line(lines, i, at)
                 count += 1
                 continue
         i += 1
     return count
+
+
+_CREDIT_LINE = re.compile(r"^\s*(作词|作詞|作曲|编曲|編曲|词|曲|制作人|製作|混音|母带|和声|吉他|贝斯|鼓|弦乐|录音|出品|"
+                          r"演唱|Lyrics?|Lyricist|Composer|Compose[rd]?|Arrange[rd]?|Arrangement|Vocals?|Producer)"
+                          r"\s*[:：]", re.I)
+
+
+def is_lrc_text(text: str) -> bool:
+    return len(re.findall(r"^\s*\[\d+:\d+(?:[.:]\d+)?\]", text, re.M)) >= 3
+
+
+def parse_user_lrc(text: str) -> tuple[list[dict], list[str]]:
+    """A user's .lrc file (often a NetEase / QQ export): timed lines plus the
+    credits found in it. NetEase puts credits in JSON lines
+    (``{"t":0,"c":[{"tx":"作词: "},{"tx":"…"}]}``) or as timed ``作词 : …`` lines
+    before the first sung line; both are returned as ``credits``, not lyrics."""
+    import json as _json
+
+    credits: list[str] = []
+    kept: list[str] = []
+    for raw in text.splitlines():
+        s = raw.strip()
+        if s.startswith("{") and s.endswith("}"):
+            try:
+                obj = _json.loads(s)
+                credits.append("".join(str(c.get("tx", "")) for c in obj.get("c", [])).strip())
+                continue
+            except (ValueError, AttributeError):
+                pass
+        kept.append(raw)
+    lines = []
+    for line in parse_lrc_text("\n".join(kept)):
+        if not lines and _CREDIT_LINE.match(line["text"]):
+            credits.append(line["text"])
+            continue
+        prev = lines[-1] if lines else None
+        if prev and line["t"] is not None and prev["t"] is not None and round(line["t"], 1) == round(prev["t"], 1) \
+                and line["text"] != prev["text"] and not re.search(r"[A-Za-z぀-ヿ]", line["text"]):
+            # a bilingual export repeats the timestamp for the translation (no kana / Latin letters)
+            if not prev.get("tr") and not line["text"].startswith("//"):
+                prev["tr"] = line["text"]
+            continue
+        lines.append(line)
+    return lines, [c for c in credits if c]
 
 
 def parse_user_lyrics(text: str) -> list[dict]:

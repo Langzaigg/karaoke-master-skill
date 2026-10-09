@@ -73,7 +73,9 @@ mimetypes.add_type("image/webp", ".webp")
 TOOL_ACTIONS = {
     "preview_styles",   # re-render template / effect / singer previews
     "preview_frame",    # engine-render one frame at time t (stage 3)
-    "edit_timing",      # manual nudges from the review table
+    "edit_timing",      # manual nudges / 平滑走字 from the review table
+    "singers",          # stage-3 singer palette: add / recolour, assign lines (several = 拼色 chorus)
+    "undo",             # restore the timing project before the last manual change
     "set_option",       # change a render option from the review page
     "export",           # .sug / .yurika / mp4
     "confirm_stage1",   # apply the user's stage-1 decisions (agent is notified too)

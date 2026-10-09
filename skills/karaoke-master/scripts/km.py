@@ -32,6 +32,25 @@ if hasattr(sys.stdout, "reconfigure"):
         pass
 
 
+class _CleanStdout:
+    """QFluentWidgets (imported with the SUG engine) prints an advert to stdout;
+    drop it so command output stays parseable JSON."""
+
+    def __init__(self, stream):
+        self._stream = stream
+
+    def write(self, text):
+        if "QFluentWidgets Pro" in text:
+            return len(text)
+        return self._stream.write(text)
+
+    def __getattr__(self, name):
+        return getattr(self._stream, name)
+
+
+sys.stdout = _CleanStdout(sys.stdout)
+
+
 def _store(job: str):
     from kmlib.jobstore import JobStore
 
@@ -135,6 +154,9 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--singer", action="append", help="行范围=歌手id，如 1-4=s1")
     p.add_argument("--ruby", action="append", help="行:起-止=读音，如 3:0-1=きおく（字符位置从 0 开始）")
     p.add_argument("--reannotate", action="store_true", help="重新自动补全缺失注音")
+    p.add_argument("--fix-char", action="append",
+                   help="行:位置=文字，把该位置的一个字符换成 0–3 个字符（位置从 0 开始）：20:32=’ 修正撇号误作逗号；13=\"e \" 补空格；等号后留空则删除")
+    p.add_argument("--split-long", type=float, help="拆分超过 N 个全角宽度的行（英文字母按半个计；优先在逗号处断开）")
 
     p = sub.add_parser("match", help="把歌词行与语音识别结果对齐，建议入选行与歌曲区间")
     p.add_argument("job")
@@ -190,6 +212,42 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--local", metavar="PATH", help="改用本机视频文件作 MV 背景（同样自动对齐）")
     p.add_argument("--max-height", type=int, default=1080)
 
+    p = sub.add_parser("mv-clips", help="视频片段混剪：下载游戏 / 动画素材视频（YouTube·B站 / 本地），切成镜头加入混剪素材池")
+    p.add_argument("job")
+    p.add_argument("--search", help="搜索 YouTube（PV / 实况 / 过场 / 剪辑）")
+    p.add_argument("--n", type=int, default=15, help="搜索结果数量")
+    p.add_argument("--info", metavar="URL", help="查看视频信息（标题 / 频道 / 时长 / 章节 / 最高画质），不下载")
+    p.add_argument("--add", action="append", metavar="URL|PATH",
+                   help="下载（只要画面，≤1080p）或登记本地视频，切成镜头加入素材池；可多次")
+    p.add_argument("--sections", help="长视频只下载这些区间，如 60-180,7:30-9:00（对本次所有 --add 生效）")
+    p.add_argument("--max-height", type=int, default=1080)
+    p.add_argument("--credit", help="署名（作品 / 频道）")
+    p.add_argument("--crop", help="画面裁切 x,y,w,h（0–1，去黑边 / 角标 / 摄像头框）；缺省自动去黑边")
+    p.add_argument("--library", help="素材库：名称或目录（缺省：工程目录旁的 _footage，多个工程共用）")
+    p.add_argument("--min-score", type=float, default=0.35, help="镜头质量下限 0–1（亮度 / 色彩 / 细节 / 动感）")
+    p.add_argument("--max-clips", type=int, default=80, help="每个来源最多加入的镜头数")
+    p.add_argument("--tags", help="逗号分隔标签")
+    p.add_argument("--from-library", action="store_true", help="把素材库里已下载的来源全部加入本工程")
+    p.add_argument("--sheet", action="store_true", help="生成带编号的镜头缩略图总览（previews/clip_sheet_N.jpg）供审核")
+    p.add_argument("--sheet-used", action="store_true",
+                   help="按当前剪辑计划，为每个用到的片段截取实际出镜部分的首 / 中 / 尾三帧（previews/clip_used_N.jpg，编号 U1…）供二次审核；已标记 checked 的片段跳过")
+    p.add_argument("--mark-checked", action="store_true",
+                   help="二次审核后：把当前计划用到的片段标记为 checked（先 --exclude 不合格的；可与 --sheet-used 同用，先标记再出新图）")
+    p.add_argument("--exclude", help="从素材池移除镜头（逗号分隔 id，或最近一次 --sheet 上的黄色编号 #N）")
+    p.add_argument("--tag", action="append", help="id[+id…]=标签,标签")
+    p.add_argument("--avoid-from", metavar="PROJECT", help="另一个工程已用过的镜头排到最后（同一素材库的多首歌少重复画面）")
+    p.add_argument("--list", action="store_true")
+    p.add_argument("--credits", action="store_true", help="列出素材来源署名")
+    p.add_argument("--enhance", action="store_true",
+                   help="AI 增强素材池里的低清源视频（RIFE 补帧 + Real-ESRGAN 超分）：在素材库生成 <原名>.enhanced.mp4 "
+                        "并把素材池指过去；串行执行，一次只处理一个源")
+    p.add_argument("--ids", help="只增强这些镜头 id（逗号分隔）涉及的源文件；时长 >5 分钟的保护对显式指定的源不生效")
+    p.add_argument("--only-used", action="store_true", help="只增强当前剪辑计划（montage_plan.json）实际用到的镜头涉及的源")
+    p.add_argument("--no-sr", action="store_true", help="不做超分（只补帧）")
+    p.add_argument("--no-rife", action="store_true", help="不做补帧（只超分）")
+    p.add_argument("--sr-scale", type=int, default=2, help="超分倍率 2/3/4（默认 2）")
+    p.add_argument("--rife-multi", type=int, default=2, help="补帧倍率，2 的幂（默认 2）")
+
     p = sub.add_parser("versions", help="on vocal / off vocal 双版本（复制视频流，只换音轨）")
     p.add_argument("job")
     p.add_argument("--video", help="母版视频（缺省：已导出的成品 MP4）")
@@ -201,16 +259,34 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("job")
     p.add_argument("--device", help="cpu / cuda / xpu / xpu:1 …（缺省：安装时选定的加速方案）")
     p.add_argument("--no-chunk", action="store_true", help="整首一次对齐（默认按间奏分段）")
+    p.add_argument("--no-words", action="store_true", help="不用逐字歌词（YRC/KRC 单词时间）校正对齐结果")
+    p.add_argument("--aligner", action="store_true",
+                   help="英文歌也用强制对齐模型（缺省：英文歌按逐字歌词 / 英文识别定时，同 realign --english）")
 
     p = sub.add_parser("realign", help="重新对齐部分行")
     p.add_argument("job")
     p.add_argument("--lines", required=True, help="如 12-15")
     p.add_argument("--window", help="start,end（秒）；缺省按前后行自动推断")
+    p.add_argument("--english", action="store_true", help="英文行：用英文语音识别确定每个单词的时间")
+    p.add_argument("--no-words", action="store_true", help="不用逐字歌词（YRC/KRC 单词时间）校正")
+    p.add_argument("--asr-first", action="store_true",
+                   help="--english：即使逐字歌词可靠也以语音识别的单词时间为主")
+    p.add_argument("--fresh-asr", action="store_true",
+                   help="--english：重新识别这些行（缺省：英文歌复用阶段一的整首英文识别）")
     p.add_argument("--device")
 
     p = sub.add_parser("edit", help="时间轴编辑（JSON 操作列表）")
     p.add_argument("job")
     p.add_argument("ops", help='JSON，如 [{"op":"shift_lines","lines":[3],"ms":-200}]（行号从 0 开始）')
+
+    p = sub.add_parser("singers", help="从字幕文件 / 歌割り资料导入每个字的演唱者（打轴之后）")
+    p.add_argument("job")
+    p.add_argument("--from", dest="source", required=True,
+                   help="字幕或资料：.ass/.ssa/.lrc/.txt/.html/.json 文件或网页 URL")
+    p.add_argument("--map", action="append", default=[],
+                   help="键=歌手（键：颜色 #rrggbb、ASS 的 Name/Style、LRC 前缀、none=无颜色文字；歌手写 - 表示忽略）")
+    p.add_argument("--ignore-unmapped", action="store_true", help="忽略没有 --map 的键")
+    p.add_argument("--dry-run", action="store_true", help="只报告覆盖率，不修改")
 
     p = sub.add_parser("style", help="修改渲染样式（JSON 合并）")
     p.add_argument("job")

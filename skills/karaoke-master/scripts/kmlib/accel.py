@@ -15,6 +15,7 @@ and can be overridden per run with environment variables:
 | ``dml_device`` | ``KM_DML_DEVICE`` | separation on DirectML | DXGI index, ``igpu`` / ``dgpu`` |
 | ``asr_device`` / ``asr_compute`` | ``KM_ASR_DEVICE`` | faster-whisper | cpu / cuda, int8 / float16 … |
 | ``encoder`` | ``KM_ENCODER`` | MP4 export | cpu, auto, nvenc, qsv, amf_qvbr, amf_cqp, videotoolbox |
+| ``codec`` | ``KM_CODEC`` | MP4 export video codec | h264, hevc (HEVC halves the file size at the same quality) |
 | ``align_jobs`` | ``KM_ALIGN_JOBS`` | parallel alignment workers (opt-in, default 1) | integer |
 | ``render_workers`` | ``KM_RENDER_WORKERS`` | subtitle renderer processes (default: half the cores, max 4) | integer |
 
@@ -31,10 +32,10 @@ import subprocess
 from pathlib import Path
 
 DEFAULTS = {"ai_python": None, "align_device": "cpu", "onnx": "auto", "dml_device": None,
-            "asr_device": "cpu", "asr_compute": "int8", "encoder": "cpu", "align_jobs": None,
-            "render_workers": None}
+            "asr_device": "cpu", "asr_compute": "int8", "encoder": "cpu", "codec": "h264",
+            "align_jobs": None, "render_workers": None}
 ENV = {"ai_python": "KM_AI_PYTHON", "align_device": "KM_DEVICE", "onnx": "KM_ONNX", "dml_device": "KM_DML_DEVICE",
-       "asr_device": "KM_ASR_DEVICE", "asr_compute": "KM_ASR_COMPUTE", "encoder": "KM_ENCODER",
+       "asr_device": "KM_ASR_DEVICE", "asr_compute": "KM_ASR_COMPUTE", "encoder": "KM_ENCODER", "codec": "KM_CODEC",
        "align_jobs": "KM_ALIGN_JOBS", "render_workers": "KM_RENDER_WORKERS"}
 
 

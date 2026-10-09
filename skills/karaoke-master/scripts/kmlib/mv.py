@@ -230,6 +230,18 @@ PRESETS: dict[str, dict] = {
             {"type": "progress", "color": "$0"},
         ],
     },
+    "game_montage": {
+        "name": "游戏素材卡点混剪", "desc": "游戏 PV / 实况 / 过场的视频片段按小节卡点硬切（安静段落短交叉淡化），"
+                                      "片段动感随音乐能量匹配，副歌重复段沿用首次的镜头 —— 游戏 / 动画 / 视频素材",
+        "palette": "auto",
+        "layers": [
+            {"type": "montage", "bars": 2, "transitions": "auto", "trans": 0.35, "dim": 0.1, "min_shot": 1.2,
+             "max_shot": 8.0},
+            {"type": "lyrics_band", "from": 0.6, "alpha": 0.62},
+            {"type": "vignette", "strength": 0.4},
+            {"type": "progress", "color": "$0"},
+        ],
+    },
     "spectrum_classic": {
         "name": "经典频谱", "desc": "封面模糊铺底 + 旋转封面唱片 + 环形频谱 —— 通用、稳妥",
         "palette": "auto",
@@ -249,8 +261,11 @@ PRESETS: dict[str, dict] = {
 }
 DEFAULT_PRESET = "spectrum_classic"
 KINDS = ("mv", "montage")  # AMV design / image montage
+# bump when the montage planner's output changes for the same inputs (the design
+# signature below includes it so a stale rendered background is not reused)
+PLANNER_VERSION = 2
 DEFAULT_PRESETS = {"mv": DEFAULT_PRESET, "montage": "anime_montage"}
-KIND_LABEL = {"mv": "AMV", "montage": "图片混剪"}
+KIND_LABEL = {"mv": "AMV", "montage": "混剪"}
 
 
 def preset_kind(pid: str) -> str:
@@ -468,24 +483,92 @@ def plan_montage(store: JobStore, feat: dict, layer: dict, duration: float) -> d
     if isinstance(layer.get("images"), list):
         ids = [i for i in layer["images"] if i in ids]
     origins = {a["id"]: mv_assets.origin_of(a) for a in pool}
+    clips = {a["id"]: a for a in pool if a.get("kind") == "clip"}
+    if clips and not isinstance(layer.get("images"), list):
+        ids = clip_order(ids, clips, set(layer.get("avoid", [])), layer.get("prefer_tags"))
     grid = beat_grid(feat)
     bars = [b for b in grid["bars"] if b < duration - 0.5]
+    beats = [b for b in grid["beats"] if b < duration - 0.5]
     bar_len = 4 * grid["beat_period"]
     if len(bars) < 4:
         bars = list(np.arange(0.0, duration, 4.0))
+        beats = list(np.arange(0.0, duration, 1.0))
         bar_len = 4.0
+    trans = float(layer.get("trans", 0.5))
     sections = lyric_sections(store)
     repeats = lyric_repeats(store)
     fps = feat["fps"]
     energy = np.asarray(feat["energy"])
     flux = np.asarray(feat["flux"])
     min_shot, max_shot = float(layer.get("min_shot", 1.5)), float(layer.get("max_shot", 10.0))
-    pins = sorted(layer.get("pins", []), key=lambda p: p["t"])
+    # a pin whose asset left the pool (excluded / removed) is ignored instead of breaking the plan
+    pins = sorted((p for p in layer.get("pins", []) if p.get("asset") in ids), key=lambda p: p["t"])
 
     def nearest_bar(t: float) -> float:
         return min(bars, key=lambda b: abs(b - t))
 
     forced = sorted({nearest_bar(s["start"] - 0.15) for s in list(sections) + list(repeats) if s["start"] > bar_len})
+
+    margin = 1.6 * trans + 0.15  # the longest crossfade (quiet parts) keeps playing the clip past its cut
+
+    def need_of(s: dict) -> float:
+        return s["t1"] - s["t0"] + margin
+
+    def clip_fit(s: dict) -> None:
+        """In-point (and slow motion when a clip is short) for a clip shot."""
+        c = clips.get(s.get("asset"))
+        if c is None:
+            return
+        need = need_of(s)
+        if c["duration"] >= need:
+            s["in"], s["speed"] = round((c["duration"] - need) * 0.35, 2), 1.0
+        else:
+            s["in"], s["speed"] = 0.0, round(max(0.7, c["duration"] / need), 3)
+
+    def long_enough(cid: str, need: float) -> bool:
+        """A clip may be slowed to 0.7× at most — a shorter one would freeze on its last frame."""
+        return cid not in clips or clips[cid]["duration"] >= 0.7 * need
+
+    def dur_of(i: str) -> float:
+        return clips[i]["duration"] if i in clips else 0.0
+
+    def reuse(s: dict, counts: dict, avoid_id) -> str:
+        """Fallback for a shot no unused clip can fill: the least-used long-enough
+        clip (not the previous shot's); when none is long enough, rotate among the
+        longest ones instead of giving every such shot the same clip."""
+        ok = [i for i in ids if long_enough(i, need_of(s)) and i != avoid_id]
+        if not ok:
+            longest = sorted(ids, key=lambda i: -dur_of(i))
+            ok = [i for i in longest[:max(3, len(ids) // 4)] if i != avoid_id] or longest[:1]
+        return min(ok, key=lambda i: (counts.get(i, 0), -dur_of(i)))
+
+    def take(unused: list[str], s: dict, last: dict) -> str | None:
+        """Images: front to back. Clips: among the next few in order that are long
+        enough, the one whose length fits the shot and whose motion suits the music
+        there, preferring another source than the previous shot. None = no clip is
+        long enough (the shot then repeats a long-enough one, see fallback)."""
+        if not clips or unused[0] not in clips:
+            return unused.pop(0)
+        need = need_of(s)
+        e = float(energy[min(len(energy) - 1, int(s["t0"] * fps))])
+        want = 0.008 + 0.05 * e
+        usable = [cid for cid in unused if long_enough(cid, need)]
+        if not usable:
+            return None
+        window = [cid for cid in unused[:14] if cid in usable] or usable[:14]
+        best, best_q = window[0], -1e9
+        for j, cid in enumerate(window):
+            c = clips.get(cid)
+            if c is None:
+                continue
+            fit = 1.0 if c["duration"] >= need else max(0.0, (c["duration"] / need - 0.55) / 0.45)
+            match = math.exp(-abs(math.log(max(1e-4, float(c.get("motion") or 0.01)) / want)))
+            q = (1.3 * fit + 0.8 * match + 0.5 * clip_quality(c, layer.get("prefer_tags")) - 0.3 * j / 14
+                 - (0.6 if c.get("library_id") and c.get("library_id") == last.get("src") else 0.0))
+            if q > best_q:
+                best, best_q = cid, q
+        unused.remove(best)
+        return best
 
     def build(scale: float, order: list[str]):
         cuts = [0.0]
@@ -493,10 +576,11 @@ def plan_montage(store: JobStore, feat: dict, layer: dict, duration: float) -> d
         while t < duration - min_shot:
             e = float(energy[min(len(energy) - 1, int(t * fps))])
             n_bars = layer.get("bars", 2) * scale * (0.5 if e > 0.72 else 2.0 if e < 0.28 else 1.0)
-            target = min(t + max(1.0, n_bars) * bar_len, t + max_shot)
+            fine = bool(layer.get("beat_cuts")) and n_bars < 1.0  # 卡点 on beats, not only bar starts
+            target = min(t + max(0.5 if fine else 1.0, n_bars) * bar_len, t + max_shot)
             nxt = next((f for f in forced if t + min_shot <= f <= target + 0.01), None)
             if nxt is None:
-                cands = [b for b in bars if t + min_shot <= b <= t + max_shot]
+                cands = [b for b in (beats if fine else bars) if t + min_shot <= b <= t + max_shot]
                 nxt = min(cands, key=lambda b: abs(b - target)) if cands else min(duration, t + max_shot)
             if duration - nxt < min_shot:
                 break
@@ -505,50 +589,80 @@ def plan_montage(store: JobStore, feat: dict, layer: dict, duration: float) -> d
         cuts.append(duration)
         shots = [{"t0": a, "t1": b} for a, b in zip(cuts, cuts[1:]) if b - a > 0.05]
         unused = [i for i in order if i not in {p.get("asset") for p in pins}]
+        last: dict = {}
+        counts: dict[str, int] = {}
+        prev_asset = None
+        run_cursor: dict[int, int] = {}
         for s in shots:
             mid = (s["t0"] + s["t1"]) / 2
             pin = next((p for p in pins if s["t0"] <= p["t"] < s["t1"]), None)
             dur = max(0.05, s["t1"] - s["t0"])
             run = next((r for r in repeats
                         if (min(s["t1"], r["end"] + 0.6) - max(s["t0"], r["start"] - 0.6)) / dur >= 0.5), None)
-            if pin and pin.get("asset"):
-                s["asset"], s["why"] = pin["asset"], "pin"
-                if pin["asset"] in unused:
-                    unused.remove(pin["asset"])
-                continue
+            prev = None
             if run is not None:
                 span = max(0.1, run["end"] - run["start"])
                 rel = min(max(mid, run["start"]), run["end"]) - run["start"]
                 mapped = run["src_start"] + rel * (run["src_end"] - run["src_start"]) / span
                 prev = next((x for x in shots if x is not s and x.get("asset") and x["t0"] <= mapped < x["t1"]), None)
                 if prev is not None:
-                    s["asset"], s["why"] = prev["asset"], "repeat"
-                    continue
-            s["asset"] = unused.pop(0) if unused else None
-            s["why"] = "new" if s["asset"] else "missing"
-        missing = sum(1 for s in shots if s["asset"] is None)
+                    # repeat shots walk the source passage in order: when the linear map lands
+                    # on the shot the previous repeat shot in this run already used (the repeat's
+                    # cuts need not align with the source's), take the next source shot instead —
+                    # two consecutive shots replaying one clip from the same point look broken
+                    idx = shots.index(prev)
+                    last_i = run_cursor.get(id(run), -1)
+                    if idx <= last_i < len(shots) - 1 \
+                            and shots[last_i + 1].get("asset") \
+                            and shots[last_i + 1]["t0"] < run["src_end"] - 0.05:
+                        idx, prev = last_i + 1, shots[last_i + 1]
+                    run_cursor[id(run)] = idx
+            if pin and pin.get("asset"):
+                s["asset"], s["why"] = pin["asset"], "pin"
+                if pin["asset"] in unused:
+                    unused.remove(pin["asset"])
+            elif prev is not None and long_enough(prev["asset"], need_of(s)):
+                s["asset"], s["why"] = prev["asset"], "repeat"
+            else:  # (a repeat whose first-occurrence clip is too short for this longer shot takes a new one)
+                s["asset"] = take(unused, s, last) if unused else None
+                s["why"] = "new" if s["asset"] else "missing"
+                if s["asset"] is None and unused:
+                    # clips are left but none is long enough: reuse one now (so a later repeat of this
+                    # passage finds it) instead of stretching the plan
+                    s["asset"], s["why"], s["short"] = reuse(s, counts, prev_asset), "fallback", True
+            clip_fit(s)
+            if s.get("asset"):
+                counts[s["asset"]] = counts.get(s["asset"], 0) + 1
+                prev_asset = s["asset"]
+            if s.get("asset") in clips:
+                last["src"] = clips[s["asset"]].get("library_id")
+        missing = sum(1 for s in shots if s["why"] == "missing")
         return shots, missing
 
     scale = 1.0
     shots, missing = build(scale, ids)
-    ideal = sum(1 for s in shots if s["why"] in ("new", "missing"))  # unique images the designed pacing wants
-    while missing and scale < 4.0 and ids:
+    ideal = sum(1 for s in shots if s["why"] in ("new", "missing") or s.get("short"))  # unique images the pacing wants
+    # a small pool: lengthen the shots (up to ``max_scale``), then repeat the least-used ones;
+    # max_scale 1.0 keeps the designed 卡点 pacing and repeats instead of slowing clips down
+    while missing and scale * 1.3 <= float(layer.get("max_scale", 4.0)) + 1e-6 and ids:
         scale *= 1.3
         shots, missing = build(scale, ids)
-    n_new = sum(1 for s in shots if s["why"] in ("new", "missing"))
+    n_new = sum(1 for s in shots if s["why"] in ("new", "missing") or s.get("short"))
     order = arrange_assets(ids, origins, n_new, layer.get("prefer"))
     if order != ids:
         shots, missing = build(scale, order)
-    if missing and ids:  # pool still too small: reuse the least used images
-        counts = {i: 0 for i in ids}
+    if missing and ids:  # pool still too small: reuse the least used ones
+        counts: dict[str, int] = {}
         for s in shots:
-            if s["asset"]:
-                counts[s["asset"]] += 1
+            if s.get("asset"):
+                counts[s["asset"]] = counts.get(s["asset"], 0) + 1
+        prev_asset = None
         for s in shots:
-            if s["asset"] is None:
-                s["asset"] = min(counts, key=counts.get)
-                counts[s["asset"]] += 1
-                s["why"] = "fallback"
+            if s.get("asset") is None:
+                s["asset"], s["why"] = reuse(s, counts, prev_asset), "fallback"
+                counts[s["asset"]] = counts.get(s["asset"], 0) + 1
+                clip_fit(s)
+            prev_asset = s["asset"]
     for k, s in enumerate(shots):
         i0 = int(s["t0"] * fps)
         s["strength"] = round(float(flux[max(0, i0 - 1):i0 + 2].max()) if len(flux) else 0.0, 2)
@@ -565,8 +679,39 @@ def plan_montage(store: JobStore, feat: dict, layer: dict, duration: float) -> d
             "by_origin": by_origin,
             "repeated_sections": sum(1 for s in shots if s["why"] == "repeat"),
             "fallback_repeats": need_more,
-            "note": (f"素材不足：仍有 {need_more} 个镜头重复使用图片，建议再补 {need_more} 张以上" if need_more
+            "clips": len(clips),
+            "slow_motion": sum(1 for s in shots if (s.get("speed") or 1.0) < 0.999),
+            "note": (f"素材不足：仍有 {need_more} 个镜头重复使用素材，建议再补 {need_more} 个以上" if need_more
                      else "")}
+
+
+def clip_order(ids: list[str], clips: dict[str, dict], avoid: set[str], prefer_tags=None) -> list[str]:
+    """Clip pool order for the planner: best shots of every source first, sources
+    taken in turn so one trailer does not fill the whole intro; clips another
+    project already used (``avoid``) go last. Images keep their place in front."""
+    images = [i for i in ids if i not in clips]
+    by_src: dict[str, list[str]] = {}
+    for i in ids:
+        if i in clips and i not in avoid:
+            by_src.setdefault(str(clips[i].get("library_id") or clips[i].get("src")), []).append(i)
+    for lst in by_src.values():
+        lst.sort(key=lambda i: -clip_quality(clips[i], prefer_tags))
+    order: list[str] = []
+    queues = sorted(by_src.values(), key=len, reverse=True)
+    while any(queues):
+        for q in queues:
+            if q:
+                order.append(q.pop(0))
+    late = sorted((i for i in ids if i in clips and i in avoid), key=lambda i: -clip_quality(clips[i], prefer_tags))
+    return images + order + late
+
+
+def clip_quality(c: dict, prefer_tags=None) -> float:
+    """Scan score, plus a bonus for shots the agent tagged ``best`` while reviewing the sheets
+    and for shots with one of the layer's ``prefer_tags`` (e.g. concert scenes for an idol song)."""
+    tags = set(c.get("tags") or [])
+    return (float(c.get("score") or 0.5) + (0.25 if "best" in tags else 0.0)
+            + (0.2 if prefer_tags and tags & set(prefer_tags) else 0.0))
 
 
 def arrange_assets(ids: list[str], origins: dict[str, str], n: int, prefer=None) -> list[str]:
@@ -1346,8 +1491,40 @@ class MVRenderer:
         st["shots"] = plan.get("shots", [])
         st["starts"] = [s["t0"] for s in st["shots"]]
         st["files"] = layer.get("_files", {})
+        st["clips"] = layer.get("_clips", {})
+        st["readers"] = {}
         st["cache"] = {}
         st["order"] = []
+
+    def close(self) -> None:
+        """Stop the clip decoders (video-clip montages)."""
+        for st in self.state:
+            for rd in (st.get("readers") or {}).values():
+                rd.close()
+            if st.get("readers"):
+                st["readers"].clear()
+
+    def _clip_frame(self, layer, st, k, t):
+        """Frame of the clip that fills shot ``k`` at time ``t`` (sequential reads;
+        a jump backwards reopens the decoder)."""
+        from .mv_clips import ClipReader
+
+        shot = st["shots"][k]
+        clip = st["clips"][shot["asset"]]
+        fps = float(layer.get("_fps") or 30)
+        speed = float(shot.get("speed") or 1.0)
+        j = max(0, int(round((t - shot["t0"]) * fps)))
+        rd = st["readers"].get(k)
+        if rd is None or j < rd.pos:
+            if rd is not None:
+                rd.close()
+            start = float(clip["t_in"]) + float(shot.get("in") or 0.0) + j / fps * speed
+            rd = ClipReader(clip["src"], start, self.w, self.h, fps, crop=clip.get("crop"), speed=speed, first_index=j,
+                            end=float(clip["t_out"]))
+            st["readers"][k] = rd
+        for old in [x for x in st["readers"] if x < k - 1 or x > k + 1]:
+            st["readers"].pop(old).close()
+        return rd.frame(j)
 
     def _shot_image(self, layer, st, aid):
         """Frame-sized (×1.2 for Ken Burns headroom) version of an asset; images
@@ -1398,6 +1575,16 @@ class MVRenderer:
         from PyQt6.QtCore import QRectF
 
         shot = st["shots"][k]
+        if shot.get("asset") in st["clips"]:  # video clip: the frame already fills the picture
+            img = self._clip_frame(layer, st, k, t)
+            if img is None:
+                return
+            u = max(0.0, min(1.0, (t - shot["t0"]) / max(0.01, shot["t1"] - shot["t0"])))
+            s = extra_scale * (1.0 + float(layer.get("clip_zoom", 0.0)) * u)
+            w, h = self.w * s, self.h * s
+            p.setOpacity(opacity)
+            p.drawImage(QRectF((self.w - w) / 2, (self.h - h) / 2, w, h), img)
+            return
         img = self._shot_image(layer, st, shot.get("asset"))
         u = (t - shot["t0"]) / max(0.01, shot["t1"] - shot["t0"])
         s, dx, dy = self._kb(k, max(0.0, min(1.0, u)))
@@ -1419,7 +1606,16 @@ class MVRenderer:
         punch = float(layer.get("punch", 0.0)) * float(self.f["onset"][i])
         mode = layer.get("transitions", "auto")
         dur = float(layer.get("trans", 0.5))
-        if mode == "auto":
+        if mode == "auto" and shot.get("asset") in st["clips"]:
+            # video clips: hard cut on the beat (卡点); quiet parts / section starts ease in
+            # (`cut_energy` raises the bar for hard cuts in gentle songs)
+            gate = float(layer.get("cut_energy", 0.4))
+            if shot.get("energy", 0.5) < gate or (shot.get("section_start") and shot.get("energy", 0.5) < gate + 0.2):
+                mode = "crossfade"
+                dur *= 1.6 if shot.get("energy", 0.5) < 0.25 else 1.0
+            else:
+                mode = "cut"
+        elif mode == "auto":
             # smooth: every cut is a crossfade, longer at section starts and in quiet parts
             mode = "crossfade"
             if shot.get("section_start") or shot.get("energy", 0.5) < 0.3:
@@ -1626,7 +1822,7 @@ def refresh_montage_plan(store: JobStore) -> dict | None:
 
 
 def make_renderer(store: JobStore, st: dict, spec: dict, w: int, h: int, feat: dict,
-                  publish: bool = True) -> MVRenderer:
+                  publish: bool = True, fps: int = FPS) -> MVRenderer:
     song = st.get("song") or {}
     duration = float(st["media"]["source"]["duration"])
     spec = copy.deepcopy(spec)
@@ -1636,8 +1832,11 @@ def make_renderer(store: JobStore, st: dict, spec: dict, w: int, h: int, feat: d
 
             plan = plan_montage(store, feat, layer, duration)
             pool_d = mv_assets.pool_dir(store)
+            pool = mv_assets.load_pool(store)
             layer["_plan"] = plan
-            layer["_files"] = {a["id"]: str(pool_d / a["file"]) for a in mv_assets.load_pool(store)}
+            layer["_files"] = {a["id"]: str(pool_d / a["file"]) for a in pool if a.get("file")}
+            layer["_clips"] = {a["id"]: a for a in pool if a.get("kind") == "clip"}
+            layer["_fps"] = fps
             if publish:  # gallery thumbnails of other presets must not replace the project's plan
                 publish_montage_plan(store, plan)
     return MVRenderer(spec, w, h, feat, cover=_cover(store, st), title=song.get("title") or "",
@@ -1681,13 +1880,16 @@ def render_stills(store: JobStore, *, kind: str | None = None, spec: dict | None
     r = make_renderer(store, st, spec, w, h, feat)
     out = []
     rev = int(time.time())
-    for k, t in enumerate(times):
-        img = QImage(w, h, QImage.Format.Format_RGB32)
-        img.fill(0)
-        r.frame(img, t)
-        path = store.path("previews", f"{kind}_still_{k}.jpg")
-        img.save(str(path), quality=88)
-        out.append(f"previews/{kind}_still_{k}.jpg?v={rev}")
+    try:
+        for k, t in enumerate(times):
+            img = QImage(w, h, QImage.Format.Format_RGB32)
+            img.fill(0)
+            r.frame(img, t)
+            path = store.path("previews", f"{kind}_still_{k}.jpg")
+            img.save(str(path), quality=88)
+            out.append(f"previews/{kind}_still_{k}.jpg?v={rev}")
+    finally:
+        r.close()
     still_full = store.path("render", f"{kind}_still.jpg")  # karaoke previews use this as background
     QImage(str(store.dir / out[-1].split("?")[0])).scaled(*_output_wh(st), Qt.AspectRatioMode.IgnoreAspectRatio,
                                                          Qt.TransformationMode.SmoothTransformation).save(str(still_full), quality=90)
@@ -1721,6 +1923,7 @@ def render_gallery(store: JobStore, kind: str | None = None) -> dict:
         img = QImage(640, 360, QImage.Format.Format_RGB32)
         img.fill(0)
         r.frame(img, t)
+        r.close()
         img.save(str(store.path("previews", f"preset_{pid}.jpg")), quality=85)
         out[pid] = f"previews/preset_{pid}.jpg?v={rev}"
     store.update(lambda s: s.setdefault("previews", {}).setdefault("design_gallery", {}).update({kind: out})
@@ -1736,14 +1939,18 @@ def design_sig(store: JobStore, st: dict, kind: str, spec: dict | None = None) -
     spec = spec if spec is not None else load_spec(store, kind)
     w, h = _output_wh(st)
     parts = [json.dumps(spec, sort_keys=True, ensure_ascii=False), f"{w}x{h}@{_output_fps(st, spec)}",
-             str(st["media"].get("audio"))]
+             str(st["media"].get("audio")), f"planner:{PLANNER_VERSION}"]
     if montage_layer(spec):
         from . import mv_assets
 
         parts.append(",".join(a["id"] for a in mv_assets.load_pool(store)))
         view = read_json(store.dir / "timing" / "timed.json") or {}
-        # the cut plan follows the lyric times / repeats, not singer colours or styling
-        parts.append(json.dumps([(round(l.get("start") or 0, 2), round(l.get("end") or 0, 2), l.get("text"))
+        # the cut plan follows the lyric times / repeats (compared without spaces and punctuation,
+        # like lyric_repeats), not singer colours, styling or a spelling fix
+        import re as _re
+
+        parts.append(json.dumps([(round(l.get("start") or 0, 2), round(l.get("end") or 0, 2),
+                                  _re.sub(r"[\s\W_ー〜～]+", "", l.get("text") or "").lower())
                                  for l in view.get("lines") or []], ensure_ascii=False))
     return hashlib.sha1("|".join(parts).encode("utf-8")).hexdigest()[:16]
 
@@ -1768,12 +1975,12 @@ def render_video(store: JobStore, *, kind: str | None = None, seconds: float | N
     kind = kind or design_kind(st)
     spec = load_spec(store, kind)
     if montage_layer(spec) and _pool_empty(store):
-        raise SystemExit("图片混剪的素材池是空的：请先上传图包或让 Agent 搜集图片")
+        raise SystemExit("混剪的素材池是空的：请先上传图包、导入视频片段（mv-clips）或让 Agent 搜集素材")
     sig = design_sig(store, st, kind, spec)
     feat = job_features(store, st)
     w, h = _output_wh(st)
     fps = _output_fps(st, spec)
-    r = make_renderer(store, st, spec, w, h, feat)
+    r = make_renderer(store, st, spec, w, h, feat, fps=fps)
     total = int(r.duration * fps) if seconds is None else min(int(r.duration * fps), int(seconds * fps))
     out = out or store.path("render", f"{kind}.mp4" if seconds is None else f"{kind}_clip.mp4")
     from .analysis import timing_audio
@@ -1809,6 +2016,8 @@ def render_video(store: JobStore, *, kind: str | None = None, seconds: float | N
     except Exception:
         proc.kill()
         raise
+    finally:
+        r.close()
     if seconds is None:
         store.update(lambda s: s["media"].setdefault("designs", {}).update({kind: {"video": store.rel(out), "sig": sig,
                                                                                      "fps": fps}})

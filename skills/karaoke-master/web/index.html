@@ -41,7 +41,6 @@
         <div class="stage-head">
           <div>
             <h1>素材分析与制作确认</h1>
-            <p class="muted">Agent 已根据素材补全歌曲信息并检索歌词。请确认下列制作细节，所有预览均由实际渲染引擎生成。</p>
           </div>
         </div>
         <div class="waiting-banner" id="s1-banner" hidden>
@@ -104,8 +103,6 @@
             <span class="sep"></span>
             <button class="btn ghost sm" id="inc-all">全部入选</button>
             <button class="btn ghost sm" id="inc-suggest">采用 Agent 建议</button>
-            <span class="sep"></span>
-            <span class="muted small">点击歌手标签切换演唱者 · 点击行勾选是否出现在视频中</span>
             <span class="grow"></span>
             <button class="btn ghost sm" id="paste-lyrics">粘贴 / 修改歌词</button>
           </div>
@@ -146,7 +143,7 @@
             </div>
             <div class="field">
               <span>投屏延迟</span>
-              <div class="cast-row"><input type="number" id="out-cast" step="50" min="-2000" max="2000"> <span class="muted small">毫秒：画面比声音提前，补偿投屏 / 电视的画面延迟（默认 +200）</span></div>
+              <div class="cast-row"><input type="number" id="out-cast" step="50" min="-2000" max="2000" title="画面比声音提前的毫秒数，补偿投屏 / 电视的画面延迟（默认 +200）"> <span class="muted small">毫秒</span></div>
             </div>
             <div class="field">
               <span>帧率</span>
@@ -166,10 +163,9 @@
               </div>
             </div>
             <div class="field hires-fields" id="s1-hires">
-              <span>Hi-Res / 无损音源（可选，填本机路径）</span>
+              <span title="登记后自动对齐到素材时间轴：阶段二用它分离人声并打轴，on / off vocal 与 Hi-Res 混流也用它">Hi-Res / 无损音源（可选，填本机路径）</span>
               <input type="text" id="s1-hires-on" placeholder="原唱无损音频，如 D:\music\song.flac；留空 = 使用素材音频">
               <input type="text" id="s1-hires-off" placeholder="伴奏无损音频，多条用 ; 分隔；留空 = 从原唱自动分离">
-              <span class="muted small">登记后自动对齐到素材时间轴：阶段二用它分离人声并打轴，on / off vocal 与 Hi-Res 混流也用它。</span>
               <div class="hires-notes small" id="s1-hires-notes"></div>
             </div>
             <div class="field">
@@ -226,7 +222,6 @@
         <div class="stage-head">
           <div>
             <h1>自动打轴</h1>
-            <p class="muted">人声分离 → 注音转写 → 强制对齐 → 修正 → Agent 质检。时间轴会随对齐进度实时出现。</p>
           </div>
           <div class="overall"><div class="ring" id="overall-ring"><span id="overall-pct">0%</span></div></div>
         </div>
@@ -248,7 +243,6 @@
         <div class="stage-head">
           <div>
             <h1>审阅、微调与导出</h1>
-            <p class="muted">播放预览检查走字效果；点击歌词跳转，微调按钮即时生效；复杂修改可直接用文字告诉 Agent。</p>
           </div>
         </div>
         <div class="grid s3">
@@ -269,23 +263,28 @@
               </div>
               <canvas id="s3-timeline" height="120"></canvas>
             </article>
-            <article class="card">
-              <header><h2>导出</h2><button class="btn ghost sm" id="open-app" title="用 Lin-K Lyrics 打开导出的 .yurika / .sug，继续手工精修">在 Lin-K Lyrics 中打开</button><button class="btn ghost sm" id="open-export">打开导出文件夹</button></header>
-              <div class="export-row" id="export-row"></div>
-              <div class="hires-box">
-                <div class="row gap">
-                  <input type="text" id="s3-hires-on" class="grow" placeholder="Hi-Res 原唱无损音频路径（留空 = 素材原音频）">
-                  <input type="text" id="s3-hires-off" class="grow" placeholder="伴奏无损音频路径，多条用 ; 分隔（留空 = 自动分离）">
-                  <button class="btn ghost" id="s3-hires">Hi-Res 混流</button>
+            <article class="card collapse" id="export-card">
+              <header id="export-head"><h2 title="点击展开 / 收起"><span class="caret">▸</span>导出</h2><button class="btn ghost sm" id="open-app" title="用 Lin-K Lyrics 打开导出的 .yurika / .sug，继续手工精修">在 Lin-K Lyrics 中打开</button><button class="btn ghost sm" id="open-export">打开导出文件夹</button></header>
+              <div class="collapse-body">
+                <div class="export-row" id="export-row"></div>
+                <div class="hires-box">
+                  <div class="row gap">
+                    <input type="text" id="s3-hires-on" class="grow" placeholder="Hi-Res 原唱无损音频路径（留空 = 素材原音频）">
+                    <input type="text" id="s3-hires-off" class="grow" placeholder="伴奏无损音频路径，多条用 ; 分隔（留空 = 自动分离）">
+                    <button class="btn ghost" id="s3-hires">Hi-Res 混流</button>
+                  </div>
                 </div>
-                <div class="muted small">以已导出的成品 MP4 为视频轨，音轨统一转为 FLAC 32bit / ≥48kHz，分别输出原唱与伴奏 MKV。</div>
+                <div class="export-list" id="export-list"></div>
               </div>
-              <div class="export-list" id="export-list"></div>
             </article>
           </div>
           <div class="s3-right">
             <article class="card lines-card">
               <header><h2>逐行检查</h2><span class="muted small" id="qa-summary"></span></header>
+              <div class="s3-tools">
+                <div class="sg-bar" id="s3-singers"></div>
+                <div class="sel-bar" id="s3-selbar"></div>
+              </div>
               <div class="line-table" id="line-table"></div>
             </article>
           </div>

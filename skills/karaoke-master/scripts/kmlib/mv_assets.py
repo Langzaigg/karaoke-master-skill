@@ -47,11 +47,13 @@ def save_pool(store: JobStore, pool: list[dict]) -> None:
     store.update(lambda s: s.setdefault("previews", {}).update(
         mv_assets=[{"id": a["id"], "thumb": f"render/mv_assets/thumbs/{a['id']}.jpg", "w": a["w"], "h": a["h"],
                     "origin": origin_of(a), "name": a.get("name"), "credit": a.get("credit"),
-                    "source": a.get("source"), "tags": a.get("tags", [])} for a in pool]))
+                    "source": a.get("source"), "tags": a.get("tags", []), "kind": a.get("kind", "image"),
+                    "duration": a.get("duration")} for a in pool]))
 
 
 def origin_of(a: dict) -> str:
-    """user (image packs / files the user gave) · web (found online) · video (source-video scenes)."""
+    """user (image packs / files the user gave) · web (found online) · video (source-video scenes) ·
+    clip (video clips cut from downloaded footage, see mv_clips)."""
     if a.get("origin"):
         return a["origin"]
     src = a.get("source") or ""
@@ -95,7 +97,7 @@ def _download(url: str, dest_stem: Path) -> Path:
 
 IMAGE_EXTS = {".jpg", ".jpeg", ".jfif", ".png", ".webp", ".bmp", ".gif", ".tif", ".tiff"}
 MAX_LOCAL_BYTES = 80 * 1024 * 1024
-ORIGIN_LABEL = {"user": "用户提供", "web": "网络", "video": "素材视频截图"}
+ORIGIN_LABEL = {"user": "用户提供", "web": "网络", "video": "素材视频截图", "clip": "视频片段"}
 
 
 @contextlib.contextmanager
@@ -281,18 +283,29 @@ def add(store: JobStore, src: str, *, source: str | None = None, credit: str | N
     return res[0] if res else {"ok": False, "reason": "没有可导入的图片"}
 
 
+def excluded_ids(store: JobStore) -> list[str]:
+    """Video clips removed from the pool (a review rejected them): re-imports skip them."""
+    return read_json(pool_dir(store) / "excluded.json", []) or []
+
+
 def remove(store: JobStore, ids: list[str]) -> int:
     with _pool_lock(store):
         pool = load_pool(store)
         keep, gone = [], 0
+        rejected = []
         for a in pool:
             if a["id"] in ids or "all" in ids:
-                (pool_dir(store) / a["file"]).unlink(missing_ok=True)
+                if a.get("kind") == "clip" and "all" not in ids:  # a reset is not a rejection
+                    rejected.append(a["id"])
+                if a.get("file"):  # clips point into the shared footage library: keep the video
+                    (pool_dir(store) / a["file"]).unlink(missing_ok=True)
                 (pool_dir(store) / "thumbs" / f"{a['id']}.jpg").unlink(missing_ok=True)
                 gone += 1
             else:
                 keep.append(a)
         save_pool(store, keep)
+        if rejected:
+            write_json(pool_dir(store) / "excluded.json", sorted(set(excluded_ids(store)) | set(rejected)))
     return gone
 
 

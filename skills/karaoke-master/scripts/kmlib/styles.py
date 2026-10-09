@@ -9,6 +9,7 @@ with fallbacks, so templates work on machines without the first choice.
 from __future__ import annotations
 
 import colorsys
+import re
 from dataclasses import replace
 from typing import Any
 
@@ -147,6 +148,13 @@ def resolve_font(candidates: list[str]) -> str:
 def _fill(value):
     from krok_helper.subtitle_render.domain.paint import PaintFill
 
+    if isinstance(value, dict) and value.get("split"):  # 拼色: hard-edged bands, top to bottom
+        cols = list(value["split"])
+        n = len(cols)
+        stops = [(round(100.0 * k / n, 3), c) for k, c in enumerate(cols)] + [(100, cols[-1])]
+        return PaintFill(mode="split_vertical", color=cols[0], start_color=cols[0], end_color=cols[-1],
+                         gradient_stops=[(0, cols[0]), (100, cols[-1])], split_top_color=cols[0],
+                         split_bottom_color=cols[-1], split_position_pct=100.0 / n, split_stops=stops)
     if isinstance(value, (list, tuple)):
         a, b = value[0], value[-1]
         return PaintFill(mode="gradient_vertical", color=a, start_color=a, end_color=b,
@@ -231,13 +239,38 @@ def apply_effect(style, eff: dict):
     return style
 
 
-def singer_scheme(tpl: dict, color: str):
+def singer_colors(singers: list[dict], custom: dict | None = None) -> dict[str, dict]:
+    """name -> {"color", "bands"} for every singer. ``bands`` (2+ colours) means 拼色: parts sung
+    together show each member's colour as a horizontal band of the glyph. Explicit ``colors`` on
+    the singer win; a singer named after other singers (「A＆B」, "A&B", "A・B") gets theirs."""
+    custom = custom or {}
+    base = {s["name"]: (custom.get(s.get("id")) or {}).get("color") or s.get("color") or "#FF5FA2"
+            for s in singers}
+    out = {}
+    for s in singers:
+        bands = [c for c in (s.get("colors") or []) if c]
+        if not bands:
+            parts = [p.strip() for p in re.split(r"[＆&・+＋]", s["name"]) if p.strip()]
+            if len(parts) > 1 and all(p in base for p in parts):
+                bands = [base[p] for p in parts]
+        out[s["name"]] = {"color": base[s["name"]], "bands": bands if len(bands) > 1 else []}
+    return out
+
+
+def blend(colors: list[str]) -> str:
+    rgb = [_rgb(c) for c in colors]
+    return _hex(tuple(sum(c[i] for c in rgb) / len(rgb) for i in range(3)))
+
+
+def singer_scheme(tpl: dict, color: str, bands: list[str] | None = None):
     """Role scheme for one singer: template appearance with the singer's
-    color as the sung (after) fill."""
+    color as the sung (after) fill; with ``bands`` the sung fill is 拼色 (one band per colour)."""
     from krok_helper.subtitle_render.domain.models import SubtitleStyleScheme
 
     after = dict(tpl["after"])
     after["text"] = [shade(color, 0.12), shade(color, -0.08, 1.1)]
+    if bands:
+        after["text"] = {"split": [shade(c, 0.06) for c in bands]}
     if tpl.get("decoration") == "glow":
         after["shadow"] = color
     before = dict(tpl["before"])
@@ -277,6 +310,7 @@ def web_style(tpl: dict, eff: dict, singers: list[dict], overrides: dict | None,
         "entry": eff["fields"].get("entry_anim"),
         "exit": eff["fields"].get("exit_anim"),
         "singers": {s["id"]: {"name": s["name"], "color": s["color"],
-                              "top": shade(s["color"], 0.12), "bottom": shade(s["color"], -0.08, 1.1)}
+                              "top": shade(s["color"], 0.12), "bottom": shade(s["color"], -0.08, 1.1),
+                              "bands": [shade(c, 0.06) for c in s.get("bands") or []]}
                     for s in singers},
     }

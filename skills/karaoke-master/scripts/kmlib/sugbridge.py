@@ -146,9 +146,27 @@ def load_project(path: str | Path):
     return SugProjectParser.load(str(path))
 
 
+def drop_stale_pauses(project) -> int:
+    """Clear mid-line pause releases that fall after the next character's start (left behind when
+    words move, e.g. English lines): the previous word's wipe would run into the next one."""
+    n = 0
+    for s in project.sentences:
+        chs = s.characters
+        for ci, ch in enumerate(chs):
+            if ch.is_sentence_end and ch.sentence_end_ts is not None:
+                nxt = next((t for c in chs[ci + 1:] for t in c.timestamps), None)
+                if nxt is not None and ch.sentence_end_ts > nxt:
+                    ch.is_sentence_end = False
+                    ch.sentence_end_ts = None
+                    n += 1
+    return n
+
+
 def save_project(project, path: str | Path, *, media_path: str | None = None) -> Path:
     setup()
     from strange_uta_game.backend.infrastructure.persistence.sug_io import SugProjectParser
+
+    drop_stale_pauses(project)
 
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -489,6 +507,83 @@ def refine_with_energy(project, rms_hop, *, line_indices: Iterable[int] | None =
     return {"heads": heads, "tails": tails, "pauses": pauses}
 
 
+def apply_word_anchors(project, lines: list[dict], *, line_indices: Iterable[int] | None = None,
+                       tol_ms: int = 200) -> dict:
+    """Correct the forced alignment with human word-level times (逐字歌词:
+    NetEase YRC / Kugou KRC, stage-1 ``line["words"]`` = ``[[first, last, start_s]]``
+    character ranges of ``line["text"]``; ``lines[i]`` belongs to sentence ``i``).
+
+    The source's constant offset against this audio is the median difference
+    between its word starts and the aligned ones. Words whose aligned start is
+    off by more than ``tol_ms`` after removing that offset are moved to the
+    source time; every checkpoint of the line is then re-mapped piecewise-linearly
+    through the word starts, so syllables inside a moved word keep their shape.
+    Nothing is changed when too few words agree (another version of the song).
+    """
+    import difflib
+    import statistics
+
+    targets = set(line_indices) if line_indices is not None else None
+    per_line = []
+    for li, (sentence, line) in enumerate(zip(project.sentences, lines)):
+        words = line.get("words") or []
+        if not words or (targets is not None and li not in targets):
+            continue
+        chars = sentence.characters
+        sm = difflib.SequenceMatcher(a=line["text"], b="".join(ch.char for ch in chars), autojunk=False)
+        pos = {}
+        for a, b, n in sm.get_matching_blocks():
+            for k in range(n):
+                pos[a + k] = b + k
+        knots = []
+        for first, last, t, *_dur in words:
+            idx = [pos[c] for c in range(int(first), int(last) + 1) if c in pos]
+            timed = [k for k in idx if chars[k].timestamps]
+            if timed:
+                knots.append([chars[timed[0]].timestamps[0], int(round(float(t) * 1000))])
+        if knots:
+            per_line.append((li, knots))
+    deltas = [v - a for _li, knots in per_line for a, v in knots]
+    if len(deltas) < 8:
+        return {"words": len(deltas), "moved": 0, "lines": [], "skipped": "逐字时间太少"}
+    offset = int(statistics.median(deltas))
+    agree = sum(1 for d in deltas if abs(d - offset) <= tol_ms) / len(deltas)
+    stats = {"words": len(deltas), "offset_ms": offset, "agree": round(agree, 2), "moved": 0, "lines": []}
+    if agree < 0.4:
+        stats["skipped"] = "逐字歌词与音频大多对不上（可能是另一个版本），未使用"
+        return stats
+    for li, knots in per_line:
+        src, dst = [], []
+        moved = 0
+        for a, v in knots:
+            s = v - offset if abs(v - offset - a) > tol_ms else a
+            moved += s != a
+            if src and (a <= src[-1] or s <= dst[-1] + 30):
+                continue  # keep the map strictly increasing
+            src.append(a)
+            dst.append(s)
+        if not moved or not src:
+            continue
+
+        def f(t: int, src=src, dst=dst) -> int:
+            if t <= src[0]:
+                return t + dst[0] - src[0]
+            for k in range(len(src) - 1):
+                if src[k] <= t < src[k + 1]:
+                    return int(dst[k] + (t - src[k]) * (dst[k + 1] - dst[k]) / (src[k + 1] - src[k]))
+            return t + dst[-1] - src[-1]
+
+        for ch in project.sentences[li].characters:
+            if ch.timestamps:
+                ch.timestamps = [max(0, f(t)) for t in ch.timestamps]
+            if ch.sentence_end_ts is not None:
+                ch.sentence_end_ts = max(0, f(ch.sentence_end_ts))
+        stats["moved"] += moved
+        stats["lines"].append(li)
+    _enforce_monotonic(project)
+    return stats
+
+
 def _longest_gap(voiced) -> tuple[int, int] | None:
     """(start, end) frame indices of the longest unvoiced run."""
     best = None
@@ -529,7 +624,9 @@ def auto_release_ms(project, line: int, char: int, rms_hop) -> int | None:
 def apply_edits(project, edits: list[dict]) -> list[str]:
     """Deterministic timing edits used by the review page and by the agent.
 
-    ops: shift_lines {lines, ms} · shift_all {ms} · set_line_span {line, start, end}
+    ops: shift_lines {lines, ms} · shift_all {ms} · split_line {line, char} (char = first character of
+    the new line; timing kept) · smooth {lines?, strength?=0.5, max_ms?=80}
+    (even wipe speed inside phrases) · set_line_span {line, start, end}
     (seconds; rescales the line linearly) · set_char {line, char, cp?, t} ·
     set_line_end {line, t} · set_pause {line, char, t|None} ·
     set_singer {lines, singer (id or name), chars?: [first, last]} (chars = 0-based, inclusive:
@@ -553,6 +650,20 @@ def apply_edits(project, edits: list[dict]) -> list[str]:
             times = [t for ch in s.characters for t in ch.timestamps]
             ends = [ch.sentence_end_ts for ch in s.characters if ch.sentence_end_ts is not None]
             if not times:
+                # untimed line (e.g. an English line the recognizer missed): distribute the
+                # characters evenly over the span — an LRC anchor, not a real alignment
+                new_a, new_b = int(float(ed["start"]) * 1000), int(float(ed["end"]) * 1000)
+                chars = [ch for ch in s.characters if ch.char.strip()]
+                if not chars:
+                    continue
+                step = max(1, (new_b - new_a) / len(chars))
+                for k, ch in enumerate(chars):
+                    ch.timestamps = [int(new_a + k * step)]
+                    ch.is_sentence_end = False
+                    ch.sentence_end_ts = None
+                chars[-1].is_sentence_end = True
+                chars[-1].sentence_end_ts = new_b
+                log.append(f"第 {int(ed['line']) + 1} 行无时间戳，在 {ed['start']}–{ed['end']} 秒内均分（参考歌词锚点）")
                 continue
             old_a, old_b = min(times), max(times + ends)
             new_a, new_b = int(float(ed["start"]) * 1000), int(float(ed["end"]) * 1000)
@@ -579,6 +690,34 @@ def apply_edits(project, edits: list[dict]) -> list[str]:
                     ch.sentence_end_ts = ms
                     break
             log.append(f"第 {int(ed['line']) + 1} 行结束时间设为 {ed['t']} 秒")
+        elif op == "split_line":
+            # a line too wide for the screen → two lines, timing kept (spaces at the cut dropped)
+            from strange_uta_game.backend.domain.entities import Sentence
+
+            li, at = int(ed["line"]), int(ed["char"])
+            s = sentences[li]
+            head, tail = list(s.characters[:at]), list(s.characters[at:])
+            while head and not head[-1].char.strip():
+                head.pop()
+            while tail and not tail[0].char.strip():
+                tail.pop(0)
+            if not head or not tail:
+                raise ValueError(f"第 {li + 1} 行无法在第 {at + 1} 字处拆分")
+            first = next((t for c in tail for t in c.timestamps), None)
+            last = head[-1]
+            last.linked_to_next = False
+            if not last.is_sentence_end or last.sentence_end_ts is None or (first and last.sentence_end_ts > first):
+                last.is_sentence_end = True
+                last.sentence_end_ts = first
+            s.characters = head
+            project.add_sentence(Sentence(singer_id=s.singer_id, characters=tail), after_sentence_id=s.id)
+            log.append(f"第 {li + 1} 行在第 {at + 1} 字处拆成两行（时间不变）")
+        elif op == "smooth":
+            idx = _line_list(ed, len(sentences)) if ("lines" in ed or "line" in ed or "from" in ed) \
+                else list(range(len(sentences)))
+            k = smooth_wipe(sentences, idx, float(ed.get("strength", 0.5)), int(ed.get("max_ms", 80)))
+            log.append(f"平滑走字（强度 {ed.get('strength', 0.5)}，最多 {ed.get('max_ms', 80)} ms）："
+                       f"{len(idx)} 行中调整了 {k} 个检查点")
         elif op == "set_pause":
             # sung pause / release after a character (SUG is_sentence_end)
             ch = sentences[int(ed["line"])].characters[int(ed["char"])]
@@ -642,6 +781,55 @@ class _OneLine:
 
     def __init__(self, sentence):
         self.sentences = [sentence]
+
+
+def smooth_wipe(sentences, indices, strength: float = 0.5, max_ms: int = 80, passes: int = 2) -> int:
+    """Even out the wipe speed inside continuous phrases (平滑走字).
+
+    Each inner checkpoint moves toward the time that gives a constant wipe speed between its two
+    neighbours (positions in character widths, half width for Latin), ``passes`` times by
+    ``strength``. Phrase starts / ends, pauses, gaps over 1 s (rests, held notes) stay where they
+    are, and no checkpoint moves more than ``max_ms``. Returns how many checkpoints moved."""
+    moved = 0
+    for li in indices:
+        chars = sentences[li].characters
+        pts = []  # [t_ms, x, char index, checkpoint index, phrase]
+        x, phrase = 0.0, 0
+        for ci, ch in enumerate(chars):
+            ts = list(ch.timestamps or [])
+            for j, t in enumerate(ts):
+                pts.append([float(t), x + j / len(ts), ci, j, phrase])
+            x += 0.55 if ord((ch.char or " ")[0]) < 0x2E80 else 1.0
+            if ch.is_sentence_end and ch.sentence_end_ts is not None:
+                phrase += 1
+        groups: list[list[int]] = []
+        for k, p in enumerate(pts):
+            if not groups or p[4] != pts[k - 1][4] or p[0] - pts[k - 1][0] > 1000:
+                groups.append([])
+            groups[-1].append(k)
+        for g in groups:
+            if len(g) < 3:
+                continue
+            orig = [pts[k][0] for k in g]
+            xs = [pts[k][1] for k in g]
+            t = list(orig)
+            for _ in range(passes):
+                new = list(t)
+                for i in range(1, len(g) - 1):
+                    if xs[i + 1] <= xs[i - 1]:
+                        continue
+                    target = t[i - 1] + (t[i + 1] - t[i - 1]) * (xs[i] - xs[i - 1]) / (xs[i + 1] - xs[i - 1])
+                    new[i] = t[i] + strength * (target - t[i])
+                t = new
+            for i in range(1, len(g) - 1):
+                v = min(max(t[i], orig[i] - max_ms), orig[i] + max_ms)
+                v = min(max(v, t[i - 1] + 20), orig[i + 1] - 20)
+                t[i] = v
+                if abs(v - orig[i]) >= 5:
+                    _t, _x, ci, j, _p = pts[g[i]]
+                    chars[ci].timestamps[j] = int(round(v))
+                    moved += 1
+    return moved
 
 
 def _line_list(ed: dict, n: int) -> list[int]:

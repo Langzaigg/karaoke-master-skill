@@ -21,7 +21,7 @@ Written to ``render/web_layout.json`` + ``render/web_sprites/``.
 
 from __future__ import annotations
 
-import shutil
+import hashlib
 import time
 from pathlib import Path
 
@@ -60,6 +60,10 @@ def _compress(samples: list[tuple[int, float | None]], tol: float = 0.6) -> list
     return out + [[round(t / 1000.0, 3), round(x, 1)] for t, x in keep]
 
 
+def _sig(*parts) -> str:
+    return hashlib.md5("|".join(repr(p) for p in parts).encode("utf-8", "replace")).hexdigest()[:12]
+
+
 def build(store: JobStore) -> dict:
     from . import render
 
@@ -80,10 +84,18 @@ def build(store: JobStore) -> dict:
     schedule = P.display_schedule_for_style(track, style, logical_w=W, logical_h=H)
 
     sprite_dir = store.dir / "render" / "web_sprites"
-    if sprite_dir.exists():
-        shutil.rmtree(sprite_dir, ignore_errors=True)
     sprite_dir.mkdir(parents=True, exist_ok=True)
     rev = int(time.time() * 1000)
+    # per-line cache: a line whose style, content, timing, singer and display slot are unchanged
+    # keeps its sprites (singer / timing edits on the review page re-render only those lines)
+    from dataclasses import replace as _replace
+
+    schemes = dict(getattr(style, "custom_style_schemes", None) or {})
+    style_sig = _sig(_replace(style, custom_style_schemes={}), W, H)  # + each line's own singers below
+    prev = read_json(store.path("render", "web_layout.json")) or {}
+    cached = {l["sig"]: l for l in prev.get("lines") or [] if l.get("sig")
+              and (sprite_dir / l["before"].split("/")[-1].split("?")[0]).is_file()
+              and (sprite_dir / l["after"].split("/")[-1].split("?")[0]).is_file()}
 
     captured: dict = {}
     original = P._paint_line
@@ -105,6 +117,11 @@ def build(store: JobStore) -> dict:
             line = track.lines[idx]
             starts = [c.start_ms for c in line.chars if c.start_ms is not None]
             if not starts:
+                continue
+            names = sorted({line.singer_label or ""} | {c.role_label or "" for c in line.chars})
+            sig = _sig(style_sig, idx, lane, start_ms, end_ms, line, [(n, schemes.get(n)) for n in names])
+            if sig in cached:
+                lines_out.append(cached[sig])
                 continue
             first = min(starts)
             last_end = int(line.end_ms or max(starts))
@@ -137,7 +154,7 @@ def build(store: JobStore) -> dict:
             x1 = min(W, max(b[2] for b in boxes) + 2)
             y1 = min(H, max(b[3] for b in boxes) + 2)
             rect = QRect(x0, y0, x1 - x0, y1 - y0)
-            name_b, name_a = f"l{idx:03d}_b.png", f"l{idx:03d}_a.png"
+            name_b, name_a = f"l{idx:03d}_{sig}_b.png", f"l{idx:03d}_{sig}_a.png"
             before.copy(rect).save(str(sprite_dir / name_b))
             after.copy(rect).save(str(sprite_dir / name_a))
 
@@ -190,7 +207,7 @@ def build(store: JobStore) -> dict:
                     sw += int(getattr(line_style, "stroke2_width_px", 0) or 0)
                 split = round(my(layout.baseline_y - asc - sw * 0.6 - 2), 1) if rubies else None
             lines_out.append({
-                "i": idx, "lane": lane, "start": start_ms / 1000.0, "end": end_ms / 1000.0,
+                "i": idx, "sig": sig, "lane": lane, "start": start_ms / 1000.0, "end": end_ms / 1000.0,
                 "box": [x0, y0, x1 - x0, y1 - y0],
                 "before": f"render/web_sprites/{name_b}?v={rev}", "after": f"render/web_sprites/{name_a}?v={rev}",
                 "left": left, "wipe": wipe, "rubies": rubies, "split": split,
@@ -202,6 +219,12 @@ def build(store: JobStore) -> dict:
             "entry_ms": int(getattr(style, "entry_lead_ms", 300) or 300),
             "exit_ms": int(getattr(style, "exit_fade_ms", 300) or 300)}
     data["title"] = _title_sprite(store, track, style, W, H, duration, rev)
+    # lines wider than the frame (the renderer clips them) → split_line
+    data["overflow"] = [l["i"] for l in lines_out if l["box"][0] <= 1 or l["box"][0] + l["box"][2] >= W - 1]
+    keep = {"title.png"} | {l[k].split("/")[-1].split("?")[0] for l in lines_out for k in ("before", "after")}
+    for f in sprite_dir.glob("*.png"):  # sprites of lines that changed
+        if f.name not in keep:
+            f.unlink(missing_ok=True)
     write_json(store.path("render", "web_layout.json"), data)
     store.update(lambda s: s.setdefault("render", {}).update(web_layout="render/web_layout.json", layout_rev=rev))
     return data

@@ -11,8 +11,11 @@ description: >-
   MKVs, at 30 or 60 fps. Backgrounds: the source video, the song's MV downloaded from YouTube /
   Bilibili and aligned to the user's audio, an AMV designed for the song (themed scene
   + audio visualizers), a beat-synced montage of images (found online, the user's image packs, or
-  both), or subtitles only. Use whenever the user wants 卡拉OK字幕、
-  打轴、歌词时间轴、走字视频、伴奏版 / off vocal、歌曲 MV / AMV, karaoke subtitles, or to turn a
+  both) or of video clips cut from a game's / anime's footage on YouTube (trailers, gameplay
+  recordings — 游戏素材卡点混剪), or subtitles only. Japanese and English songs (word-level
+  NetEase / Kugou lyrics are used for English timing). Use whenever the user wants 卡拉OK字幕、
+  打轴、歌词时间轴、走字视频、伴奏版 / off vocal、歌曲 MV / AMV、游戏 / 动画素材混剪卡点的 KTV,
+  karaoke subtitles, or to turn a
   song / MV / MAD into a karaoke video. Built on the Lin-K Lyrics repo (krok_helper) and its
   StrangeUtaGame (SUG) submodule.
 ---
@@ -32,9 +35,8 @@ form) are executed by the server itself; `km.py wait` only wakes you for things 
 
 ## Hard rules
 
-1. **Never type, paste or print lyrics yourself** (chat, files, commands). Lyrics only come from
-   `lyrics-search` results or text the user provides (page "粘贴歌词" → `uploads/`). Change lines
-   with index-based tools (`lines`, `edit`), and never quote lyric lines in terminal replies.
+1. Lyrics come from `lyrics-search` results or text the user provides (page "粘贴歌词" →
+   `uploads/`). Change lines with index-based tools (`lines`, `edit`) so word timings shift along.
 2. All user-facing text (page messages via `say`, `--status`, song notes) is **Chinese**.
 3. JSON arguments: write the JSON to a temp file and pass `@path` (PowerShell mangles inline quotes).
 4. Line numbers: `lines`/`--include`/`--singer` use **1-based stage-1 lyric lines** (all candidate
@@ -43,6 +45,22 @@ form) are executed by the server itself; `km.py wait` only wakes you for things 
 5. Keep the page informed: post a `say` message after every meaningful step, and set
    `--status` while long jobs run. Don't leave the user staring at a silent page.
 6. Do not edit `krok_helper/` (incl. the StrangeUtaGame code in `krok_helper/lyrics_timing`); the skill only calls it.
+
+## Throughput — heavy jobs in the background, keep working
+
+Never sit idle waiting for a render. Start heavy jobs in the background (no timeout — an export
+can legitimately take 10-30+ min, page servers run for hours) and use the time for the next
+song's timing / editing work:
+
+- **Can run alongside an export** (render workers + hardware encoder): `analyze`, `timing` /
+  `realign` (English mode), `match`, `qa`, `edit`, `style` / `mv --spec`, footage downloads and
+  scans, lyrics search, song info, typo scans, page / docs edits.
+- **Serialize these** (they fight for the same resource): two exports at once (render processes
+  + encoder), an export next to `--enhance` (encoder + Vulkan compute), a Japanese forced
+  alignment next to an export (heavy CPU/GPU). When in doubt, one heavy job at a time; light
+  steps always fit in the gaps.
+- The same applies to `--enhance` and footage downloads: queue them in the background and
+  continue with stage 1-3 work on other projects.
 
 ## Stage 0 — environment and project
 
@@ -77,7 +95,7 @@ CTranslate2 CUDA). Four independent things can be accelerated:
 | forced alignment (biggest win) | PyTorch inside SUG's worker; any `torch.device` string is passed through | `align_device` (`cuda`, `xpu`, `mps`, `cuda:1` …) |
 | vocal separation | ONNX Runtime via audio-separator | `onnx` (`cuda` / `dml` / `auto`), `dml_device` (adapter index, `igpu`, `dgpu`) |
 | ASR | faster-whisper / CTranslate2 | `asr_device`, `asr_compute` |
-| MP4 encode | ffmpeg via the renderer | `encoder` (`nvenc`, `qsv`, `amf_qvbr`, `videotoolbox`, `auto`) |
+| MP4 encode | ffmpeg via the renderer | `encoder` (`nvenc`, `qsv`, `amf_qvbr`, `videotoolbox`, `auto`), `codec` (`h264` / `hevc`) |
 
 How to approach it: identify the vendor/generation from `KM accel`, look up (web search) which
 PyTorch build and ONNX Runtime execution provider support that GPU and this Python version, and
@@ -137,14 +155,16 @@ Run these in this order; start the slow one first.
    as timing audio automatically.
 1. **Analysis (background, 3–6 min on CPU):** `KM analyze <job>` — vocal separation (SUG's
    UVR-MDX-NET-Inst_HQ_3 model, ONNX) + faster-whisper ASR on
-   the vocal stem of the timing audio. Progress shows on the page.
+   the vocal stem of the timing audio. Progress shows on the page. ASR runs in `song.language`
+   (default `ja`): for an English song set it first — `KM set <job> --song @f` with
+   `{"language": "en"}` — or re-run `analyze` (the separation is reused).
 2. **Identify the song** from the file name, `KM status <job>` → `media.tags`, and what the user
    said; use web search to complete it: official title notation, artist, tie-in work, 作詞/作曲/編曲,
    language, singers (for groups: each member; for anime/idol units the characters + CV), and
    **歌割り** (who sings which line) when a reliable source exists. Write `song.json` and run
    `KM set <job> --song @song.json`. Fields: `title artist work lyricist composer arranger language
    confidence(0–1) notes(Chinese: how you identified it, caveats) sources[{label,url}]
-   singers[{id,name,color}]`. Single artist → one singer (the artist). Group → first singer is the
+   singers[{id,name,color,colors?}]` (`colors` = 拼色 bands, see 5). Single artist → one singer (the artist). Group → first singer is the
    whole group ("全員"/unit name) used as default, then members.
 3. **Lyrics:** `KM lyrics-search <job> --query "<title> <artist>" --utaten-query "<title> <artist>"`
    (UtaTen misses decorated titles such as `ALIVE～祈りの唄～`; simpler variants like `ALIVE ワルキューレ`
@@ -155,7 +175,28 @@ Run these in this order; start the slow one first.
    - No UtaTen → the synced candidate whose duration matches the media. Missing readings are
      filled by SUG's analyzer (shown dimmer, marked `auto`).
    - Want LRC line breaks but UtaTen readings → `lyrics-use <lrc-id> --ruby-from <utaten-id>`.
-   - Lines wider than ~17 full-width chars won't fit: add `--split-long 17`, or `lines --split N:pos`.
+   - **Word-level (逐字) lyrics** — candidates with `has_verbatim` (NetEase YRC `ne-*`, Kugou KRC
+     `kg-*`) keep every word's start and length (`line.words`). Prefer one whose duration matches
+     the media: English songs are timed from it (stage 2), other songs use it to correct the
+     aligner. Compare its text with the other candidates; where they disagree on a word, check
+     `analysis/asr.json` around that time. It is usually finer than an LRC the
+     user brings — search even when the user gives one.
+   - **The user's .lrc**: `lyrics-use <job> <file.lrc>` keeps its line times as the `match`
+     reference (candidate `user-lrc`); NetEase credit lines (`{"t":0,"c":…}`, `作词 : …`) are not
+     lyrics — they are printed in `notes` (useful for `song.json`).
+   - Typos in the source — synced lyric sites have them (`it,ll`, `all.,`, `word ,`, a missing
+     space `becomeour`, misspellings `Commenmorate`): scan the lines with regexes for punctuation
+     slips and, for English, every word against a word list (SUG ships CMU / e2k lists under
+     `krok_helper/lyrics_timing/src/strange_uta_game`), and report the offending word / position.
+     Fix with `KM lines <job> --fix-char N:pos=TEXT` — the character at 0-based `pos` becomes
+     `TEXT` (0–3 chars: `’` replaces, `"e "` inserts a space after an `e`, empty deletes); word
+     times and readings shift along. Then re-run `timing` (English: seconds).
+   - Lines wider than ~17 full-width chars won't fit: add `--split-long 17` (or `lines --split-long 17`
+     later; Latin letters count as half, a comma near the middle is preferred), or `lines --split N:pos`.
+     After timing, `qa` also flags lines the engine draws wider than the frame (「超出画面宽度」, from
+     the review page's layout): `edit` `[{"op":"split_line","line":i,"char":k}]` splits the timed
+     line at character `k` (0-based, e.g. the space after a comma) keeping every timestamp, and
+     splits the stage-1 line the same way.
 4. **Locate the sung lines** (after `analyze` finished): `KM match <job> --apply`. Output per line:
    `✓/·  score  est-time  source(asr|lrc)  ref=reference line  note`. ASR anchors + the synced
    reference give a piecewise offset (handles MAD cuts); lines predicted outside vocal activity are
@@ -165,14 +206,26 @@ Run these in this order; start the slow one first.
    - A run of consecutive missing lines in the middle = the MAD cut that part. Repeated chorus in
      the edit = `lines --dup N` then re-run `match --apply`.
    - Check the printed song region; fix with `KM set <job> --segment start,end` if needed.
-5. **Singers (歌割り):** for groups / duets, look up the part distribution (official booklet, fan
-   パート分け pages — they usually colour-code members; markers like `F&M&K` mean those members
-   together) and give **every member their own colour** (use the members' official image colours).
-   Parts sung together get their own singer (e.g. 「フレイア＆美雲＆カナメ」). Before timing:
-   `KM lines <job> --singer 1-4=<id> …`; after timing (or when a line switches singer mid-way) use
-   `edit` ops `add_singer` and `set_singer` with `chars: [first, last]` (character ranges — no lyric
-   text needed). Pure vocalisation backing lines such as "(ha～)" stay excluded; mention them.
-   Without 歌割り data keep the default singer and say the user can assign singers in the page.
+5. **Singers (歌割り)** — take them from a source, never from listening (harmonies and unison
+   parts cannot be told apart by ear or by the vocal stem). Sources in this order:
+   1. a subtitle / lyric file the user gives (ASS with per-singer styles, actors or colours; LRC/TXT
+      with `名前：` / `【名前】` prefixes);
+   2. a reliable 歌割り source: official booklet or karaoke data, fan パート分け pages that
+      colour-code members (`F&M&K`-style markers = those members together), fansub ASS;
+   3. nothing found → keep the default singer and tell the user.
+   After timing, import it with **`KM singers <job> --from <file|URL> --map KEY=歌手 …`**: it reads
+   the runs (ASS Name/Style/inline colour, LRC prefix, HTML colour, or a JSON list you write), aligns
+   them to the timed characters and sets every character's singer (mid-line switches included). Run
+   it once without `--map` to see the keys (`need_map`: colours / names with character counts); map
+   unwanted keys (legends, translations) to `-`. Check `coverage` (≈1.0) and the `uncovered` /
+   `weak` line numbers; tell the user which source you used.
+   **Fewer colours, fewer mistakes:** one colour per lead singer, and parts sung together become
+   one 「和声」 singer drawn in **拼色** — `{"name":"和声","color":"<blend>","colors":["#lead1","#lead2"]}`
+   in `song.singers` splits every glyph into horizontal bands of those colours (a singer named
+   「A＆B」 after existing singers gets their bands automatically). Members who only sing backing
+   chorus need no colour of their own; ask before showing more than ~4 colours. Backing lines that
+   overlap the lead (e.g. "(ha～)") or whose position the source does not give stay excluded —
+   mention them. Before timing, whole lines can be pre-assigned with `KM lines <job> --singer 1-4=<id>`.
 6. **Background and output format** (page card "输出设置"; you set defaults, the user changes them):
    - **视频** — the source video (default for video jobs).
    - **MV 视频**（audio projects）— the song's MV downloaded from YouTube / Bilibili with Lin-K
@@ -180,8 +233,10 @@ Run these in this order; start the slow one first.
      "MV from the web" below). Typical for "I have the lossless song, use the official MV / anime OP·ED".
    - **AMV** — a themed scene you design for the song (default for audio-only jobs), see
      "AMV design" below.
-   - **图片混剪** — a beat-synced montage of images: found online, the user's image packs, or both;
-     see "Image montage" below.
+   - **混剪** — a beat-synced montage of images (found online, the user's image packs, or both;
+     see "Image montage") and / or of **video clips** cut from a game's / anime's own footage —
+     trailers, PVs, gameplay recordings found on YouTube / Bilibili or local videos (see
+     "Video-clip montage"). Typical for "用这个游戏的实况 / PV 卡点剪辑做背景".
    - **仅 KTV 字幕** — subtitles only on a plain colour (`{"type": "subs", "color": "#000000"}`;
      green `#00B140` for keying); pair it with export kind `alpha` = a transparent ProRes 4444 MOV
      to lay over the user's own footage in an editor.
@@ -233,7 +288,7 @@ does the same alignment for a video the user already has.
 The AMV design is the background when `background.type` is `mv`; it is also exported alone as
 `<name> (MV).mp4` (export kind `mv`). **Design it for this song** — don't just take the first preset:
 
-1. Read the song: lyrics themes (you may read them, never print them), tie-in work, cover art,
+1. Read the song: lyrics themes, tie-in work, cover art,
    tempo / mood from `analyze`. Pick imagery, palette and motion that fit (e.g. 祈り / 星空 →
    night sky, slow drifting light; summer idol song → bright sky, petals, bouncy bars).
 2. `KM mv <job> --list-presets --kind mv`, start from the closest one (`KM mv <job> --preset <id>`),
@@ -269,9 +324,8 @@ Exported alone as `<name> (混剪).mp4`.
   singers' characters, the story the lyrics refer to). Prefer official sources and large images
   (short side ≥ 720 px; < 480 is rejected), no watermarks / UI / subtitles burned in, varied shots
   (characters, scenery, close-ups). If the user has not chosen `web` / `mixed` in the page, **ask
-  before downloading** (which sites, roughly how many). These are copyrighted — for personal /
-  non-commercial fan videos; always record the origin:
-  `KM mv-assets <job> --add <url> [--add …] --source <page url> --credit "<作品 / 版权方>" --tags chorus,character`.
+  before downloading** (which sites, roughly how many). Always record the origin:
+  `KM mv-assets <job> --add <url> [--add …] --source <page url> --credit "<作品 / 出处说明>" --tags chorus,character`.
 - Exact and near-duplicates are rejected (output says why). Video jobs can also use
   `--from-video N` (distinct scenes from the source video). `--remove <id|all>`, `--list`,
   `--credits` (put them in the video description and tell the user).
@@ -284,8 +338,87 @@ Exported alone as `<name> (混剪).mp4`.
 - Keep montages **smooth** by default: crossfades and slow pans only (`transitions: "auto"`, no `punch`,
   no `flash` layer). Beat zooms / white flashes on still images look like twitching — use the `beat`
   transitions, `punch` or the `montage_beat` preset only when the user explicitly wants a 燃 / 踩点冲击 edit.
-- The page shows the cut plan as a filmstrip plus the image pool (badges: 图包 / 网络 / 视频); the
+- The page shows the cut plan as a filmstrip plus the image pool (badges: 图包 / 网络 / 视频 / 片段); the
   user can remove images (re-plans and re-renders stills), upload more, or ask you for others.
+
+### Video-clip montage (视频片段混剪 / 游戏素材卡点剪辑)
+
+The same `montage` background, filled with **video clips** instead of (or next to) images — for
+"use this game's / anime's footage". Start from the preset `game_montage` (游戏素材卡点混剪:
+hard cuts on the beat, short crossfades in quiet parts, a lyrics band, no particles — game footage
+is busy enough) and adapt it to the song.
+
+1. **Find footage** that fits the song's role: concert scenes for an in-game idol song, the ending
+   for an ED theme, battles for the loud parts, the story's key places / characters. Search with
+   `KM mv-clips <job> --search "<game> no commentary"` (also `実況なし` / `全編` / `walkthrough` /
+   `trailer` / `PV` / `all cutscenes`); `--info URL` prints duration, best height and the uploader's
+   chapters (they often name every scene). Prefer, in this order: official trailers / PVs / opening
+   movies (only their caption-free ranges — most have feature captions, logo and release cards),
+   full **no-commentary** playthroughs in high resolution (no facecam, flat 16:9 mirror view; VR
+   lens views and Twitch layouts are poor), then let's plays whose picture is clean. Look before
+   choosing ranges: the thumbnail, the storyboard or a few single frames.
+2. **Download** (ask first unless the user already told you to search and use footage; name the
+   videos): `KM mv-clips <job> --add <url> [--sections "a-b,c-d"] --credit "<频道 · 作品>"`. Picture
+   only, ≤1080p (`--max-height`), into the **footage library** `<projects>/_footage` shared by sibling
+   projects (each source downloaded once; `--library` for another one). Long videos: only
+   `--sections` (seconds or m:ss; ~1–3 min each, 10–15 min of good footage per song) — fetched as
+   byte ranges of the stream through yt-dlp's own session, so no full download. Short trailers:
+   whole. One `--add` per video when the sections differ; run them one after another in the
+   background (each is a download plus a quick scan, not a render).
+3. **Shots**: every file is scanned once (cuts at 6 fps; long continuous shots split into ≤ 7 s
+   pieces) and each shot scored for brightness, colour, detail and motion; black bars are cropped
+   automatically (`--crop x,y,w,h` also cuts a logo / facecam corner off a source); near-identical
+   shots from different trailers are dropped. `--min-score` (0.35), `--max-clips` per source (80).
+   Only the files of the given `--sections` go into this project's pool, so each song gets its
+   own footage from a shared library.
+4. **Review**: the planner already rejects black bars, low scores and duplicates, and battle HUD
+   (FIRE / DANGER / radar / the full-screen TOUCH hexagons) is part of the show — keep it. When the
+   user asks for a careful review (or the footage is new and untrusted), do two rounds:
+   - *Pool*: `KM mv-clips <job> --sheet` writes `previews/clip_sheet_N.jpg` (one middle frame per
+     clip, yellow numbers `#N`; `previews/clip_sheet_N.json` maps them to ids). Look at every sheet
+     (several sheets → fan them out to sub-agents, one sheet each, answering by number) and
+     `--exclude "#3,#17,…"` shots with burned-in captions / marketing text, credits, menus,
+     logos, facecams, livestream overlays, black / white / blurred frames — they clash with the
+     karaoke lines. Shots whose only problem is an in-game dialogue subtitle can stay as a last
+     resort: put their ids in the layer's `avoid`. Tag the rest (`--tag id+id=concert,best`);
+     `best` shots are preferred, `prefer_tags` on the layer boosts a theme.
+   - *Used*: after the plan exists, `KM mv-clips <job> --sheet-used` shows start / middle / end of
+     the part of each **used** clip that will actually be on screen (`clip_used_N.jpg`, numbers
+     `U1`…) — subtitles, UI pop-ups and fades that appear mid-clip only show up here.
+     `--exclude "U5,U8" --mark-checked`, re-plan (`mv --spec` or `--sheet-used` again, which
+     only shows the newly used clips) until a round comes back clean.
+   - **Long recordings lie about their content**: a 4-hour "ALTDEUS Longplay" can end in another
+     game or a stream outro. After `--add` of sectioned long videos, spot-check one frame per
+     section (`ffmpeg -ss`) before trusting the pool — exclude whole sections whose content is
+     off-topic, and delete them from the library so sibling projects never import them.
+5. **Design and plan**: `KM mv <job> --kind montage --preset game_montage`, then a spec of your own
+   (theme / notes in Chinese). The planner cuts on bar downbeats (faster in loud parts; layer
+   `beat_cuts: true` allows cuts on single beats), fills each shot with an unused clip whose
+   length fits and whose motion suits the music there, alternates sources, reuses the first
+   occurrence's clips for a repeated chorus, and slows a short clip down (≥ 0.7×) instead of
+   repeating one. `transitions: "auto"` on clips = hard cut exactly on the beat (卡点), short
+   crossfade in quiet parts and at calm section starts; `clip_zoom` adds a slow push-in; `dim`
+   darkens. A second song from the same library: `KM mv-clips <job2> --avoid-from <job1>` puts the
+   first song's shots last. `mv-assets --plan` / `mv-clips` print `clips`, `unique_used`,
+   `ideal_unique`, `slow_motion`; aim for a pool of ~1.5× `ideal_unique` after review. A clip is
+   never given a shot it cannot fill at ≥ 0.7× speed (it would freeze on its last frame); when the
+   clean pool is small, `max_scale: 1.0` keeps the designed pacing and repeats the least-used long
+   clips (`fallback_repeats`) instead of stretching every shot — prefer that over subtitled shots,
+   and tell the user how many repeats there are. Tempo: if `bpm` comes out half of the felt tempo
+   (a ballad at ~78), `bars: 1` gives ~3 s shots; `bars: 2` suits ~110–130 BPM.
+6. Check `KM mv <job> --stills` (and the karaoke `frame`s) before exporting. The background video is
+   rendered once at export (clips decoded with ffmpeg while drawing, one process).
+7. **Credits**: `KM mv-clips <job> --credits` lists every source if you need a record.
+8. **Low-quality footage → AI enhance (optional)**: sources below 1080p or 30 fps (VR eye-mirror
+   recordings are often 720×720@24) look soft after the cover-crop to 16:9. `KM mv-clips <job>
+   --enhance` re-encodes each such source in the library with **RIFE frame interpolation**
+   (2× fps) and **Real-ESRGAN super-resolution** (2×, `realesr-animevideov3` — great on cel-shaded
+   game footage) and repoints the pool at the enhanced copies. `--only-used` limits it to the
+   sources the current plan actually uses (the cheap default), `--no-sr` / `--no-rife` skip one
+   stage, `--ids` names clips explicitly. It runs strictly serially and resumes across runs.
+   Cost on an Arc A770M: RIFE ≈ 11 fps of 720² frames, Real-ESRGAN ≈ 4 fps — a few minutes per
+   source with `--only-used`, hours for whole longplays (don't). First run needs the tools under
+   `<home>/tools/`; the command prints the download links when they are missing.
 
 ## Stage 2 — automatic timing
 
@@ -295,6 +428,18 @@ Exported alone as `<name> (混剪).mp4`.
    `NextFire/mms-300m-ForcedAligner-karaoke-ja-Latn`, split into blocks at instrumental breaks so
    errors cannot drift) → refine (energy-based line-head / tail / breath correction) → QA.
    About 1.5–3 min per 4-min song on CPU. It prints `bad_lines` / `warn_lines` (1-based).
+   - With **word-level lyrics** (`line.words`), aligned words that land more than 0.2 s away from
+     the lyric source's time (after its constant offset) are moved there afterwards — the log says
+     「逐字歌词校正」; nothing changes when the source mostly disagrees (another version). `--no-words`
+     skips it.
+   - **English songs** (`song.language` = `en`): the aligner (a Japanese romaji model) is skipped —
+     on English it was off by 3–5 s on whole lines. Every word is timed from the word-level lyrics
+     when they are reliable (≥ 60 % of their words within 0.25 s of the English recognizer after
+     their offset; they lead because the recognizer's word starts after a held note are pulled
+     into the previous word), otherwise from the stage-1 English recognition (`analysis/asr.json`)
+     with the word-level lyrics filling gaps — the same code as `realign --english`, in seconds.
+     Line ends that run < 0.3 s into the next line are trimmed; stale mid-line pauses are dropped.
+     `--aligner` forces the aligner anyway. It prints `mode`, `lyrics_offset`, `lyrics_agree`.
 2. **Review with your own judgement** — `KM qa <job>` lists every line with flags. Fix, then re-run
    `qa`; stop after ~3 rounds and report what is left:
    - "人声能量很低，疑似错位" / "与语音识别位置相差" → `KM realign <job> --lines N[-M]` (auto
@@ -304,21 +449,46 @@ Exported alone as `<name> (混剪).mp4`.
      (release at the last voiced moment), or realign with a tighter window. A long held **final**
      note is normal.
    - "语速过快" (squeezed) / "与下一行重叠" → realign that line together with its neighbour.
+   - **English lines in a Japanese song** (refrains, English verses): the aligner is built for
+     Japanese and QA flags miss its mistakes — a word stretched over an interlude, the next words
+     squeezed into a few frames, neighbours shifted. Compare every English line and its neighbours
+     with the synced reference (`match` maps English lines by their letters; NetEase `ne-*` line
+     starts are usually within ±0.3 s): for a line off by more than ~0.4 s run
+     `KM realign <job> --lines N --window a,b` with `a` = its reference start − 0.3 and `b` = the
+     next line's reference start (one line per call; the vocal-stem energy shows where a held note
+     ends). Without a synced reference, `realign --english` (English recognizer word times) helps,
+     but its word starts often swallow the silence before a phrase (~1 s early) — check them
+     against the energy before keeping them. Then check with `qa` that no character is shorter than
+     a frame or longer than a held note. When the chosen lyrics are **word-level** (`ne-*` / `kg-*`
+     with `has_verbatim`), `realign --lines N --english` uses their word starts and lengths
+     (`--asr-first` to prefer the recognizer, `--fresh-asr` to recognize the windows again).
    - Line missing entirely / sung lyrics differ → back to stage 1 (`lines`, then `timing`).
 3. `KM say` a summary (lines timed, fixes made, lines the user should listen to), then
    `KM set <job> --stage 3 --await-user --status "打轴完成，请审阅"`.
 
 ## Stage 3 — review, tweaks, export
 
-The page plays the media with a live canvas karaoke overlay (approximation), a draggable
-timeline, per-line ±0.02/0.1 s nudges and "⇤ 播放头", an "引擎帧预览" button (real renderer frame)
-and export buttons. Those are handled by the server. You run the wait loop and handle `prompt`s:
+The page plays the media with a live karaoke overlay (engine sprites), a draggable timeline,
+per-line ±0.02/0.1 s nudges and "⇤ 播放头", a singer bar (歌割り by hand), 「平滑走字」, 「↶ 撤销」,
+an "引擎帧预览" button (real renderer frame) and export buttons. Those are handled by the server.
+You run the wait loop and handle `prompt`s:
 
 - Timing: "第 12 行晚了 0.2 秒" → `edit` `[{"op":"shift_lines","lines":[11],"ms":-200}]`;
   "整体提前 0.1 秒" → `shift_all`; "这句" uses `active_line` / `t` from the payload.
 - Readings: `edit` `set_ruby` then `realign --lines N`.
+- Singers on the page: click line numbers to select (Shift = range; none = the playing line),
+  click one or more singers in the bar (several = chorus 「A＆B」, drawn in 拼色), then 「设为…」 or
+  press 1–9; a singer's colour dot recolours it, 「＋ 歌手」 adds one. In chat use `KM singers` /
+  `edit` `set_singer` (tell the user the page can do it in bulk).
+- "走字不够平滑 / 速度忽快忽慢" → `edit` `[{"op":"smooth"}]` (or the page's 「平滑走字」; `lines` to
+  limit it, run again for more): evens the wipe speed between neighbouring characters, keeps phrase
+  starts, pauses and held notes, moves no checkpoint more than `max_ms` (80). Every manual change
+  on the page can be undone (「↶ 撤销」 / ui-action `undo`, last 30 changes).
 - Look: `KM style <job> @patch.json` with `template`, `effect`, `overrides` (Style fields),
   `singer_styles {id: {color}}`, `ruby`, `title`, `background`, `resolution`, `fps` (30 / 60).
+  English lyrics: `"ruby": false` and a Latin font in `overrides` — `font_family_latin`
+  (`Segoe UI`, `Georgia` …; the templates' Japanese fonts are wide for Latin), `space_width_percent`
+  ≈ 28, `font_size_px` 86–88 so a 34-letter line fits; check the longest line with `KM frame`.
 - Export: `KM export <job> --kinds sug,yurika,mp4,onoff` (the default; add `lrc`, `alpha`, `mv`,
   `hires`). MP4 ≈ 1–1.5× song length on 8 CPU cores, at the chosen 30 / 60 fps. `--clip 25` first
   renders a 25-second trial `<name> (preview).mp4` (and `(透明字幕 preview).mov` with `alpha`) —
@@ -372,7 +542,7 @@ with the skill venv and loads the exported project.
 | command | purpose |
 |---|---|
 | `setup [--check] [--target user\|project\|DIR] [--reinstall-ai] [--engine-ref TAG] [--with-models]` | install wizard / status |
-| `accel [--set KEY=VALUE …] [--quick]` | probe GPUs / AI runtime, set acceleration knobs |
+| `accel [--set KEY=VALUE …] [--quick]` | probe GPUs / AI runtime, set acceleration knobs (`encoder`, `codec`, `align_device`, `onnx`, `asr_device` …) |
 | `new SRC [--name N] [--title --artist] [--dir D] [--out D] [--like PROJECT]` | create a project folder (probe, extract audio, peaks, browser proxy) |
 | `serve JOB [--daemon] [--port --no-browser]` · `stop JOB` | the project's page server (stdlib HTTP + SSE) / close it |
 | `status JOB [--full]` / `qa JOB` | compact state / per-line QA table |
@@ -380,15 +550,17 @@ with the skill venv and loads the exported project.
 | `say JOB TEXT` | agent message in the page |
 | `set JOB [--song @f] [--segment a,b] [--options @f] [--stage N] [--status T] [--await-user]` | write state |
 | `analyze JOB [--skip-asr] [--asr-model M]` | separation + ASR |
-| `lyrics-search JOB --query Q [--utaten-query Q]` · `lyrics-use JOB ID\|file [--ruby-from ID] [--split-long N]` | lyrics |
-| `lines JOB [--list] [--split N:pos] [--merge N] [--dup N] [--delete N] [--include R] [--exclude R] [--singer R=id] [--ruby N:a-b=かな] [--reannotate]` | stage-1 line ops |
+| `lyrics-search JOB --query Q [--utaten-query Q]` · `lyrics-use JOB ID\|file [--ruby-from ID] [--split-long N]` | lyrics (a `.lrc` file → candidate `user-lrc`; `has_verbatim` = word-level) |
+| `lines JOB [--list] [--split N:pos] [--merge N] [--dup N] [--delete N] [--include R] [--exclude R] [--singer R=id] [--ruby N:a-b=かな] [--reannotate] [--fix-char N:pos=X] [--split-long N]` | stage-1 line ops |
 | `match JOB [--apply] [--ref ID]` | locate lines via ASR + synced reference |
 | `hires-source JOB [--on F] [--off F …] [--no-align] [--clear]` | stage-1 lossless source → timing audio |
 | `mv JOB [--kind mv\|montage] [--list-presets] [--preset ID] [--spec @f] [--show] [--stills] [--gallery] [--video] [--seconds N]` | AMV / montage designer (alias `spectrum`) |
 | `mv-video JOB [--search Q] [--n N] [--info URL\|#k] [--use URL\|#k] [--local PATH] [--max-height H]` | MV background from YouTube / Bilibili or a local video, aligned to the song |
+| `mv-clips JOB [--search Q] [--info URL] [--add URL\|PATH … [--sections a-b,…] [--credit C] [--crop x,y,w,h] [--max-height H]] [--library L] [--from-library] [--min-score S] [--max-clips N] [--sheet] [--sheet-used] [--mark-checked] [--exclude IDS\|#N\|UN] [--tag ID=t] [--avoid-from PROJECT] [--enhance [--only-used] [--ids IDS] [--no-sr] [--no-rife] [--sr-scale N] [--rife-multi N]] [--list] [--credits]` | video-clip montage: footage library → shots in the montage pool; review sheets; AI enhance (RIFE + Real-ESRGAN) for low-quality sources |
 | `mv-assets JOB [--add URL\|IMAGE\|FOLDER\|ZIP …] [--origin user\|web\|video] [--source U] [--credit C] [--tags a,b] [--from-video N] [--remove ID] [--list] [--credits] [--plan]` | montage image pool / cut plan |
 | `previews JOB [--only templates\|effects\|singers]` | engine-rendered galleries |
-| `timing JOB [--device DEV] [--no-chunk]` · `realign JOB --lines R [--window a,b]` | alignment |
+| `timing JOB [--device DEV] [--no-chunk] [--no-words] [--aligner]` · `realign JOB --lines R [--window a,b] [--english [--asr-first] [--fresh-asr]] [--no-words]` | alignment (English songs: word-level lyrics / English recognizer instead of the aligner) |
+| `singers JOB --from FILE\|URL [--map KEY=歌手 …] [--ignore-unmapped] [--dry-run]` | 歌割り from a subtitle file / part-distribution source (ASS, LRC, TXT, colour-coded HTML, JSON runs) |
 | `edit JOB @ops.json` · `style JOB @patch.json` · `frame JOB T` | review |
 | `export JOB [--kinds sug,yurika,lrc,mp4,alpha,onoff,mv,hires] [--clip N] [--cast-delay MS]` | output (default `sug,yurika,mp4,onoff`; 投屏延迟 default +200 ms) |
 | `versions JOB [--video V] [--on F] [--off F …] [--no-align]` | on / off vocal versions |
@@ -401,10 +573,16 @@ with the skill venv and loads the exported project.
   headless Linux set `QT_QPA_FONTDIR`. `KM_QT_PLATFORM` overrides.
 - First `analyze` / `timing` downloads models (separation ~60 MB from GitHub, ASR ~0.8 GB and
   alignment ~1.2 GB from Hugging Face). Set `HF_ENDPOINT` for a mirror; proxies come from
-  `HTTPS_PROXY`. The alignment model is **CC-BY-NC-SA-4.0 (non-commercial)** — say so if the user
-  mentions commercial use.
+  `HTTPS_PROXY`.
 - Port busy → the server picks the next free port and writes it to `<job>/live_preview/lock.json`.
 - GPU problems → the log says "<device> 推理失败…改用 CPU"; force a device for one run with
   `KM_DEVICE` (alignment), `KM_ONNX` (separation), `KM_ENCODER` (MP4), or reset with
   `KM accel --set align_device=default`.
+- YouTube downloads: 403 → the other player clients are tried automatically (as Lin-K Lyrics'
+  downloader does). Behind a proxy whose exit address changes, stream URLs are bound to the
+  address that asked for them, so never hand them to ffmpeg — `mv-clips --sections` fetches byte
+  ranges through yt-dlp's own session for that reason (a 403 mid-download re-extracts a fresh URL;
+  "Sign in to confirm you're not a bot" moves on to the next player client). If a source still
+  fails, re-run that one `--add` later — finished sections are kept and skipped.
+- Command output must stay JSON: `km.py` drops QFluentWidgets' advert from stdout.
 - Logs: `<job>/logs/events.log`, page-triggered actions in `<job>/logs/ui_actions.log`.

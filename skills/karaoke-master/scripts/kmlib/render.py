@@ -65,10 +65,8 @@ def build_style(st: dict, height: int, *, include_title: bool = True, first_line
     singers = st.get("song", {}).get("singers") or []
     if len(singers) > 1:
         schemes = dict(style.custom_style_schemes)
-        custom = opts.get("singer_styles") or {}
-        for s in singers:
-            color = (custom.get(s["id"]) or {}).get("color") or s.get("color") or "#FF5FA2"
-            schemes[s["name"]] = styles.singer_scheme(tpl, color)
+        for name, c in styles.singer_colors(singers, opts.get("singer_styles")).items():
+            schemes[name] = styles.singer_scheme(tpl, c["color"], c["bands"])
         style = replace(style, custom_style_schemes=schemes)
     if include_title and opts.get("title", True) and (st.get("song") or {}).get("title"):
         seg = st.get("segment") or {}
@@ -348,24 +346,25 @@ def cmd_previews(store: JobStore, only: list[str] | None = None) -> int:
     return 0
 
 
-def write_web_style(store: JobStore) -> dict:
+def write_web_style(store: JobStore, refresh: bool = True) -> dict:
     qt_app()
     st = store.load()
     opts = st.get("options", {})
     tpl = styles.template(opts.get("template"))
     eff = styles.effect(opts.get("effect"))
     singers = st["song"].get("singers") or []
-    custom = opts.get("singer_styles") or {}
-    singers = [dict(s, color=(custom.get(s["id"]) or {}).get("color") or s.get("color")) for s in singers]
+    colors = styles.singer_colors(singers, opts.get("singer_styles"))
+    singers = [dict(s, **colors[s["name"]]) for s in singers]
     ws = styles.web_style(tpl, eff, singers, opts.get("overrides"), font=styles.resolve_font(tpl["fonts"]))
     ws["ruby"] = opts.get("ruby", True)
     ws["by_name"] = {s["name"]: ws["singers"][s["id"]] for s in singers}
     ws["rev"] = int(time.time() * 1000)
     write_json(store.path("render", "web_style.json"), ws)
     store.update(lambda s: s.setdefault("render", {}).update(web_style="render/web_style.json", rev=ws["rev"]))
-    from . import weblayout
+    if refresh:
+        from . import weblayout
 
-    weblayout.refresh(store)  # no-op before timing exists
+        weblayout.refresh(store)  # no-op before timing exists
     return ws
 
 
@@ -552,6 +551,14 @@ def _encoder(st: dict) -> str:
     return (st.get("options") or {}).get("encoder") or accel.profile().get("encoder") or "cpu"
 
 
+def _codec(st: dict) -> str:
+    """Video codec for the MP4 export: ``h264`` (default) or ``hevc``."""
+    from . import accel
+
+    value = (st.get("options") or {}).get("codec") or accel.profile().get("codec") or "h264"
+    return "hevc" if str(value).lower() == "hevc" else "h264"
+
+
 def _render_workers() -> int:
     """Renderer processes: ``render_workers`` setting, else a conservative half of
     the cores (max 4) so exporting never saturates the machine."""
@@ -639,7 +646,7 @@ def _export_mp4(store, st, out: Path, track, extras, style, bg, w, h, fps, *, cl
         background_video_path=Path(bg["path"]) if bg["kind"] == "video" else None,
         background_source=_background_source(bg), audio_path=audio,
         output_path=out, width=w, height=h, fps=fps, duration_ms=int(duration * 1000),
-        include_audio=True, encoder_mode=_encoder(st), crf=18, preset="medium",
+        include_audio=True, encoder_mode=_encoder(st), codec=_codec(st), crf=18, preset="medium",
         extra_tracks=tuple(extras), gpu_export_enabled=False, render_workers=_render_workers(),
     )
     kind, label = ("preview", "试看片段") if clip else ("mp4", "成品 MP4")

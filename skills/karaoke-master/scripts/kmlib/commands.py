@@ -322,6 +322,22 @@ def cmd_lyrics_search(args) -> int:
         raise SystemExit("缺少检索词：先 km.py set --song '{\"title\":..}' 或传 --query")
     store.set_status(f"正在检索歌词：{queries[0]}", "working")
     cands = lyrics.search(queries, utaten_queries=args.utaten_query)
+    old = read_json(store.dir / "lyrics" / "candidates.json", []) or []
+    # keep what the user gave (their LRC) next to the new search results
+    cands += [c for c in old if c.get("provider") == "user"]
+    # ids are positional: re-point the chosen lyrics at the same candidate (or keep it) after a re-search
+    sel = st["lyrics"].get("selected")
+    was = next((c for c in old if c["id"] == sel and c.get("provider") != "user"), None)
+    if was is not None:
+        def ident(c: dict) -> tuple:
+            return c.get("provider"), c.get("title"), c.get("artist"), round(float(c.get("duration") or 0)), c.get("line_count")
+
+        same = next((c for c in cands if ident(c) == ident(was)), None)
+        if same is None:
+            same = dict(was, id=f"kept-{was['id']}")
+            cands.append(same)
+        if same["id"] != sel:
+            store.update(lambda s2: s2["lyrics"].update(selected=same["id"]))
     write_json(store.path("lyrics", "candidates.json"), cands)
     meta = [{k: c[k] for k in c if k != "lines"} | {"preview": [l["text"] for l in c["lines"][:4]]} for c in cands]
     store.update(lambda st: st["lyrics"].update(candidates=meta))
@@ -359,17 +375,40 @@ def cmd_lyrics_use(args) -> int:
     store = JobStore(args.job)
     cands = read_json(store.dir / "lyrics" / "candidates.json", [])
     by_id = {c["id"]: c for c in cands}
+    credits: list[str] = []
     if args.candidate in by_id:
         cand = by_id[args.candidate]
         lines = json.loads(json.dumps(cand["lines"]))
         selected = cand["id"]
+        credits = list(cand.get("credits") or [])
     else:
         path = Path(args.candidate)
         if not path.is_absolute():
             path = store.dir / path
-        lines = lyrics.parse_user_lyrics(path.read_text(encoding="utf-8"))
-        selected = "custom"
+        text = path.read_text(encoding="utf-8-sig", errors="replace")
+        if lyrics.is_lrc_text(text):
+            # a synced file the user gave: keep its line times as the timing
+            # reference for `match` (registered as candidate "user-lrc")
+            lines, credits = lyrics.parse_user_lrc(text)
+            selected = "user-lrc"
+            cands = [c for c in cands if c["id"] != selected] + [{
+                "id": selected, "provider": "user", "provider_name": "用户提供的 LRC", "title": path.stem,
+                "artist": None, "album": None, "duration": None, "url": None, "has_ruby": False, "has_timing": True,
+                "has_translation": any(l.get("tr") for l in lines), "line_count": len(lines),
+                "lines": json.loads(json.dumps(lines)),
+                "credits": credits, "error": ""}]
+            write_json(store.path("lyrics", "candidates.json"), cands)
+            by_id = {c["id"]: c for c in cands}
+            store.update(lambda st: st["lyrics"].update(candidates=[
+                {k: c[k] for k in c if k != "lines"} | {"preview": [l["text"] for l in c["lines"][:4]]} for c in cands]))
+        else:
+            lines = lyrics.parse_user_lyrics(text)
+            selected = "custom"
     note = []
+    if selected == "user-lrc":
+        note.append(f"LRC 时间作为定位参考（{sum(1 for l in lines if l.get('t') is not None)} 行带时间）")
+        if credits:
+            note.append("文件内的制作信息未当作歌词：" + "；".join(credits))
     if args.ruby_from:
         moved = lyrics.merge_ruby(lines, by_id[args.ruby_from]["lines"])
         note.append(f"从 {args.ruby_from} 迁移 {moved} 处注音")
@@ -400,6 +439,31 @@ def cmd_lines(args) -> int:
     st = store.load()
     lines = st["lyrics"]["lines"]
     changed = []
+    for spec in getattr(args, "fix_char", None) or []:
+        # one character by position (typos such as "," for an apostrophe) — no lyric text needed
+        head, ch = spec.split("=", 1)
+        li, pos = (int(x) for x in head.split(":"))
+        line = lines[li - 1]
+        text = line["text"]
+        if len(ch) > 3 or not 0 <= pos < len(text):
+            raise SystemExit(f"--fix-char {spec}：位置超出范围，或替换文字超过 3 个字符")
+        line["text"] = text[:pos] + ch + text[pos + 1:]
+        delta = len(ch) - 1
+        if delta:  # spans after the position move with the text (deleted char: its 1-char spans go)
+            def shift(spans: list) -> list:
+                out = []
+                for a, b, *rest in spans:
+                    if delta < 0 and a == b == pos:
+                        continue
+                    out.append([a + delta if a > pos else a, b + delta if b >= pos and (b > pos or delta < 0) else b, *rest])
+                return out
+            line["ruby"] = shift(line.get("ruby") or [])
+            if line.get("words"):
+                line["words"] = shift(line["words"])
+        changed.append(f"第 {li} 行第 {pos + 1} 个字符" + (f"改为「{ch}」" if ch else "删除"))
+    if getattr(args, "split_long", None):
+        k = lyrics.auto_split_long(lines, args.split_long)
+        changed.append(f"拆分 {k} 个过长行")
     for spec in args.split or []:
         li, at = spec.split(":")
         lyrics.split_line(lines, int(li) - 1, int(at))
@@ -454,6 +518,15 @@ def cmd_lines(args) -> int:
 
 
 # ====================================================================== match
+def _ref_key(text: str, reading: str) -> str:
+    """Key for matching a lyric line to the synced reference: English lines by their letters (our
+    UtaTen lines carry katakana readings for English, the reference has the plain words)."""
+    import unicodedata
+
+    letters = re.sub(r"[^a-z0-9]", "", unicodedata.normalize("NFKC", text).lower())
+    return letters if len(letters) > len(re.findall(r"[぀-ヿ一-鿿]", text)) else reading
+
+
 def _line_reading(line: dict) -> str:
     from . import analysis
 
@@ -492,10 +565,12 @@ def cmd_match(args) -> int:
     duration = st["media"]["source"]["duration"]
     activity = st["media"].get("activity", [])
     cands = read_json(store.dir / "lyrics" / "candidates.json", [])
-    ref = _pick_reference(cands, duration, getattr(args, "ref", None))
+    chosen = next((c for c in cands if c["id"] == st["lyrics"].get("selected") and c.get("has_timing")), None)
+    # the chosen lyrics are their own best reference when they are synced (e.g. the user's LRC)
+    ref = _pick_reference(cands, duration, getattr(args, "ref", None) or (chosen["id"] if chosen else None))
     if ref is not None:
-        ref_readings = [analysis.reading_of(l["text"]) for l in ref["lines"]]
-        mapping = analysis.map_to_reference(readings, ref_readings)
+        ref_readings = [_ref_key(l["text"], analysis.reading_of(l["text"])) for l in ref["lines"]]
+        mapping = analysis.map_to_reference([_ref_key(l["text"], r) for l, r in zip(lines, readings)], ref_readings)
         est = analysis.estimate_line_times(matches, mapping, [l.get("t") for l in ref["lines"]], activity, duration)
     else:
         est = [{"est": m.get("start") if m["score"] >= 0.5 else None, "source": "asr" if m.get("start") is not None else None,
@@ -561,6 +636,9 @@ def _save_view(store: JobStore, project, qa: dict | None = None) -> dict:
     return view
 
 
+OVERFLOW_NOTE = "超出画面宽度：用 edit split_line 拆成两行"
+
+
 def _run_qa(store: JobStore, project, line_scores: dict | None = None) -> dict:
     from . import analysis, media, sugbridge
 
@@ -587,6 +665,14 @@ def _run_qa(store: JobStore, project, line_scores: dict | None = None) -> dict:
     from . import weblayout
 
     weblayout.refresh(store)  # engine-exact overlay for the review page
+    wide = (read_json(store.path("render", "web_layout.json")) or {}).get("overflow") or []
+    if wide:  # the engine layout says these lines are wider than the frame
+        for i in wide:
+            if i in qa:
+                qa[i] = {**qa[i], "flag": "bad", "notes": list(qa[i].get("notes", [])) + [OVERFLOW_NOTE]}
+        view = _save_view(store, project, qa)
+        summary = {k: sum(1 for q in qa.values() if q["flag"] == k) for k in ("ok", "warn", "bad")}
+        store.update(lambda s: s["timing"].update(qa_summary=summary))
     return {"summary": summary, "qa": qa, "view": view}
 
 
@@ -687,6 +773,31 @@ def cmd_timing(args) -> int:
         sugbridge.save_project(project, sug_path)
         _save_view(store, project)
         store.step("pronounce", state="done", detail=f"{len(lines)} 行")
+        if str(st["song"].get("language") or "").lower().startswith("en") and not getattr(args, "aligner", False):
+            # English song: the forced aligner (Japanese model) smears English words; time every
+            # word from the word-level lyrics / English recognition instead (= realign --english)
+            from types import SimpleNamespace
+
+            store.step("align", state="running", detail="英文歌：按逐字歌词 / 英文识别给每个单词定时")
+            ns = SimpleNamespace(window=None, device=args.device, no_words=getattr(args, "no_words", False),
+                                 fresh_asr=False, asr_first=False)
+            res = _english_timing(store, store.load(), project, list(range(len(lines))), ns)
+            store.step("align", state="done", detail=res["mode"] + (
+                f"（逐字歌词偏移 {res['lyrics_offset']:+.2f} 秒，{res['lyrics_agree']:.0%} 单词与识别一致）"
+                if res.get("lyrics_offset") is not None else ""))
+            store.step("refine", state="done", detail="英文歌按单词时间定时，不做能量修正")
+            s = res["summary"]
+            store.step("qa", state="running", progress=0.5,
+                       detail=f"正常 {s['ok']} · 需注意 {s['warn']} · 疑似错误 {s['bad']}（等待 Agent 复核）")
+            store.update(lambda st2: st2["timing"].update(sug="timing/project.sug", aligned_at=time.time(),
+                                                          method="english"))
+            store.set_status("打轴完成，Agent 正在复核", "working")
+            bad = [li for li, v in res["lines"].items() if isinstance(v, str)]
+            _p({"method": "english", "mode": res["mode"], "lyrics_offset": res.get("lyrics_offset"),
+                "lyrics_agree": res.get("lyrics_agree"), "words": res["words"], "qa": s, "untimed_lines": bad,
+                "bad_lines": [i + 1 for i, q in res["qa"].items() if q["flag"] == "bad"],
+                "warn_lines": [i + 1 for i, q in res["qa"].items() if q["flag"] == "warn"]})
+            return 0
         # 4 align ---------------------------------------------------------
         store.step("align", state="running", detail="准备对齐模型")
         model_dir = sugbridge.ensure_align_model(lambda pct, msg: store.step("align", progress=pct / 1000.0, detail=f"下载对齐模型 {msg}"))
@@ -756,6 +867,13 @@ def cmd_timing(args) -> int:
         sugbridge.save_project(project, sug_path)
         _save_view(store, project)
         store.step("align", state="done", detail=f"{stats['tokens']} 个单元，用时 {time.time() - t0:.0f} 秒")
+        if any(l.get("words") for l in lines) and not getattr(args, "no_words", False):
+            anc = sugbridge.apply_word_anchors(project, lines)
+            store.update(lambda s2: s2["timing"].update(word_anchors={k: v for k, v in anc.items() if k != "lines"}))
+            store.log(anc.get("skipped") or (
+                f"逐字歌词校正：{anc['words']} 个单词中 {anc['agree']:.0%} 与对齐一致（来源整体偏移 {anc['offset_ms']:+d} ms），"
+                f"移动 {anc['moved']} 个单词（{len(anc['lines'])} 行）"))
+            sugbridge.save_project(project, sug_path)
         # 5 refine ---------------------------------------------------------
         store.step("refine", state="running", detail="按人声能量修正行首起唱点与尾音")
         rms = media.rms_envelope(vocals)
@@ -796,6 +914,8 @@ def cmd_realign(args) -> int:
     idx = _ranges(args.lines, n)
     if not idx:
         raise SystemExit("行号无效")
+    if getattr(args, "english", False):
+        return _realign_english(store, st, project, idx, args)
     if args.window:
         a, b = (float(x) for x in args.window.split(","))
     else:
@@ -813,6 +933,10 @@ def cmd_realign(args) -> int:
                             model_dir=model_dir, device=args.device or accel.profile()["align_device"],
                             window=(a, b), line_indices=idx,
                             ffmpeg=ffmpeg_exe())
+    lines, _singers = _timing_lines(st)
+    if len(lines) == n and any(lines[i].get("words") for i in idx) and not getattr(args, "no_words", False):
+        anc = sugbridge.apply_word_anchors(project, lines, line_indices=idx)
+        store.log(anc.get("skipped") or f"逐字歌词校正：移动 {anc['moved']} 个单词")
     from . import media
 
     sugbridge.refine_with_energy(project, media.rms_envelope(store.abs(st["media"]["vocals"])), line_indices=idx)
@@ -825,6 +949,327 @@ def cmd_realign(args) -> int:
     return 0
 
 
+def _english_words(line: dict) -> list[tuple[list[int], str]]:
+    """Words of a timed line: ([char indices], normalized lowercase word)."""
+    words, cur = [], []
+    chars = line["chars"]
+    for ci, ch in enumerate(chars + [{"c": " "}]):
+        if re.match(r"[A-Za-z0-9'’‘]", ch["c"]):
+            cur.append(ci)
+        elif cur:
+            words.append((cur, re.sub(r"[^a-z0-9]", "", "".join(chars[k]["c"] for k in cur).lower())))
+            cur = []
+    return words
+
+
+def _norm_word(w: str) -> str:
+    return re.sub(r"[^a-z0-9]", "", (w or "").lower())
+
+
+def _verbatim_offset(verb: dict[int, list], st_lines: list[dict], asr_words: list[dict],
+                     max_shift: float = 60.0) -> tuple[float, int, float]:
+    """The word-level lyrics' constant offset against the recognizer: every word is
+    paired with the same-spelled recognized words within ``max_shift`` seconds (a MAD
+    or an MV intro can shift the song by many seconds), the 0.1 s bin most words fall
+    into wins, and the offset is the median of the pairs near it. Returns (offset,
+    words paired, share of them within 0.25 s of the offset)."""
+    import collections
+    import statistics
+
+    pairs = []
+    for li, words in verb.items():
+        text = st_lines[li]["text"]
+        for w in words:
+            key = _norm_word(text[w[0]:w[1] + 1])
+            cands = [x["s"] - w[2] for x in asr_words if x["n"] == key and abs(x["s"] - w[2]) < max_shift]
+            if key and cands:
+                pairs.append(cands)
+    if len(pairs) < 5:
+        return 0.0, len(pairs), 0.0
+    hist = collections.Counter(b for c in pairs for b in {round(d, 1) for d in c})
+    mode = max(hist, key=lambda b: (hist[b] + 0.5 * (hist.get(round(b - 0.1, 1), 0) + hist.get(round(b + 0.1, 1), 0)),
+                                    -abs(b)))
+    # refine: the offset (within ±0.3 s of the fullest bin) that most words agree with, then the
+    # median of those words — the bin alone can sit beside the peak of a skewed distribution
+
+    def agreeing(o: float) -> list[float]:
+        return [d for d in (min(c, key=lambda d: abs(d - o)) for c in pairs) if abs(d - o) <= 0.25]
+
+    cand = [mode + k * 0.01 for k in range(-30, 31)]
+    peak = max(cand, key=lambda o: (len(agreeing(o)), -abs(o - mode)))
+    off = statistics.median(agreeing(peak)) if agreeing(peak) else peak
+    return off, len(pairs), len(agreeing(off)) / len(pairs)
+
+
+def _realign_english(store: JobStore, st: dict, project, idx: list[int], args) -> int:
+    _p(_english_timing(store, st, project, idx, args))
+    return 0
+
+
+def _english_timing(store: JobStore, st: dict, project, idx: list[int], args) -> dict:
+    """English lines: word times from an English recognizer (the forced aligner is built for
+    Japanese and smears English words), merged with the song's word-level lyrics (逐字歌词:
+    NetEase YRC / Kugou KRC, ``words`` of the stage-1 lines) when the chosen lyrics have them —
+    those place the words the recognizer missed, give karaoke word lengths (recognizer word
+    ends are vague) and the search window of every line. An English song re-uses the stage-1
+    English recognition of the whole vocal stem; otherwise the line windows are recognized
+    again. Without word-level lyrics each line is searched between the previous line's start
+    and the next line's end, so a repeated refrain matches its own occurrence."""
+    import subprocess
+    from difflib import SequenceMatcher
+
+    from . import analysis, sugbridge
+    from .paths import ffmpeg_exe
+
+    view = sugbridge.project_view(project)
+    lines = view["lines"]
+    n = len(lines)
+    st_lines, _singers = _timing_lines(st)
+    idx = sorted(idx)  # in order: a line's search starts after the previous line's last word (refrains)
+    verb_all = {}
+    if len(st_lines) == n and not getattr(args, "no_words", False):
+        verb_all = {li: st_lines[li]["words"] for li in range(n) if st_lines[li].get("words")
+                    and st_lines[li]["text"] == lines[li]["text"]}
+    verb = {li: verb_all[li] for li in idx if li in verb_all}
+    # 1 recognizer words -------------------------------------------------
+    asr_words = None
+    lang = str((st.get("song") or {}).get("language") or "ja").lower()
+    full = read_json(store.dir / "analysis" / "asr.json") if lang.startswith("en") and not args.window \
+        and not getattr(args, "fresh_asr", False) else None
+    if full and any(seg.get("words") for seg in full.get("segments", [])):
+        asr_words = [{"s": w["s"], "e": w["e"], "n": _norm_word(w["w"])}
+                     for seg in full["segments"] for w in seg.get("words") or []]
+    stored = (st.get("timing") or {}).get("word_offset") or {}
+    if verb and asr_words:  # the whole song's recognition: measure the offset song-wide
+        off, n_pairs, agree = _verbatim_offset(verb_all, st_lines, asr_words)
+        store.update(lambda s2: s2.setdefault("timing", {}).update(
+            word_offset={"offset": round(off, 3), "pairs": n_pairs, "agree": round(agree, 3)}))
+    elif verb and stored:  # re-recognizing a few lines: keep the song-wide value
+        off, n_pairs, agree = float(stored["offset"]), int(stored["pairs"]), float(stored["agree"])
+    else:
+        off, n_pairs, agree = 0.0, 0, 0.0
+    trusted = n_pairs >= 8 and agree >= 0.4
+    if verb and (asr_words or stored) and not trusted:
+        verb = {}  # the word-level lyrics do not line up with this audio (another version): don't use them
+    wins = {}
+    for li in idx:
+        if args.window:
+            a, b = (float(x) for x in args.window.split(","))
+        elif li in verb and (asr_words or stored):  # the word-level lyrics know where the line is
+            vw = verb[li]
+            a = vw[0][2] + off - 2.0
+            b = vw[-1][2] + off + (vw[-1][3] if len(vw[-1]) > 3 else 1.0) + 2.0
+        elif lines[li]["start"] is None and len(st_lines) == n:  # not timed yet: the stage-1 estimates
+            est = [((l.get("match") or {}).get("est")) for l in st_lines]
+            prev = next((est[i] for i in range(li - 1, -1, -1) if est[i] is not None), None)
+            nxt = next((est[i] for i in range(li + 1, n) if est[i] is not None), None)
+            here = est[li] if est[li] is not None else (prev if prev is not None else 0.0)
+            a = (prev if prev is not None else here - 4.0) - 1.0
+            b = (nxt if nxt is not None else here + 8.0) + 3.0
+        else:
+            prev = lines[li - 1] if li > 0 else None
+            nxt = lines[li + 1] if li + 1 < n else None
+            a = (prev["start"] if prev and prev["start"] is not None else (lines[li]["start"] or 4.0) - 4.0) - 1.0
+            b = (nxt["end"] if nxt and nxt["end"] else (lines[li]["end"] or a) + 6.0) + 1.0
+        wins[li] = (max(0.0, a), b)
+    if asr_words is None:
+        merged: list[list[float]] = []
+        for a, b in sorted(wins.values()):
+            if merged and a <= merged[-1][1]:
+                merged[-1][1] = max(merged[-1][1], b)
+            else:
+                merged.append([a, b])
+        # one recognizer run: the windows joined with 1.5 s of silence; map times back afterwards
+        tmp = store.path("analysis", "english")
+        tmp.mkdir(parents=True, exist_ok=True)
+        gap = 1.5
+        parts, offsets, pos = [], [], 0.0
+        for k, (a, b) in enumerate(merged):
+            parts.append(f"[0:a]atrim={a:.3f}:{b:.3f},asetpts=PTS-STARTPTS,aresample=16000,aformat=sample_fmts=fltp:sample_rates=16000:channel_layouts=mono[w{k}]")
+            offsets.append((pos, a, b - a))
+            pos += (b - a) + gap
+        concat = "".join(f"[w{k}][s{k}]" if k + 1 < len(merged) else f"[w{k}]" for k in range(len(merged)))
+        sil = ";".join(f"anullsrc=r=16000:cl=mono,atrim=0:{gap},aformat=sample_fmts=fltp:sample_rates=16000:channel_layouts=mono[s{k}]" for k in range(len(merged) - 1))
+        graph = ";".join(parts + ([sil] if sil else []))
+        graph += f";{concat}concat=n={2 * len(merged) - 1}:v=0:a=1[out]"
+        clip = tmp / "english_windows.wav"
+        subprocess.run([ffmpeg_exe(), "-v", "error", "-y", "-i", str(store.abs(st["media"]["vocals"])),
+                        "-filter_complex", graph, "-map", "[out]", "-ac", "1", "-ar", "16000", str(clip)], check=True)
+        store.set_status(f"英文识别：第 {', '.join(str(i + 1) for i in idx)} 行", "working")
+        out = analysis.run_asr(clip, tmp / "english_asr.json", language="en", device=args.device)
+        asr_words = []
+        for seg in read_json(out).get("segments", []):
+            for w in seg.get("words") or []:
+                for start, a, length in offsets:
+                    if start - 0.1 <= w["s"] <= start + length + 0.1:
+                        asr_words.append({"s": w["s"] - start + a, "e": w["e"] - start + a, "n": _norm_word(w["w"])})
+                        break
+        if verb and not stored:
+            off, n_pairs, agree = _verbatim_offset(verb, st_lines, asr_words)
+            if not (n_pairs >= 8 and agree >= 0.4):
+                verb = {}
+    # 2 per line: recognizer hits + word-level lyrics -----------------------
+    ops, report, planned = [], {}, {}
+    lyrics_first = bool(verb) and n_pairs >= 20 and agree >= 0.6 and not getattr(args, "asr_first", False)
+    used = {"asr": 0, "lyrics": 0, "lyric_ends": 0, "between": 0}
+    for li in idx:
+        words = _english_words(lines[li])
+        a, b = wins[li]
+        cand = [w for w in asr_words if a <= w["s"] <= b]
+        if li - 1 in planned:  # a repeated refrain must not match the previous line's occurrence
+            floor = planned[li - 1][1][-1][1] - 0.05
+            cand = [w for w in cand if w["s"] >= floor]
+        sm = SequenceMatcher(None, [w for _, w in words], [w["n"] for w in cand], autojunk=False)
+        hit = {}
+        for x, y, size in sm.get_matching_blocks():
+            for k in range(size):
+                hit[x + k] = cand[y + k]
+
+        def piece(c: int):
+            return next((w for w in verb.get(li, []) if w[0] <= c <= w[1]), None)
+
+        # a source word may be split into syllable pieces: start from the first, end with the last
+        vmap = {k: (piece(chars[0]), piece(chars[-1])) for k, (chars, _w) in enumerate(words)}
+        n_v = sum(1 for v0, _v1 in vmap.values() if v0 is not None)
+        known = sum(1 for k in range(len(words)) if k in hit or vmap[k][0] is not None)
+        enough = max(min(2, len(words)), (len(words) + 1) // 2)
+        if not words or known < enough:
+            report[li + 1] = f"识别到的单词不足（{len(hit)}/{len(words)}），未修改"
+            continue
+
+        def v_end(v0, v1, default: float) -> float:
+            last = v1 if v1 is not None and len(v1) > 3 else v0 if len(v0) > 3 else None
+            return last[2] + off + last[3] if last is not None else v0[2] + off + default
+
+        times: list = []
+        for k in range(len(words)):
+            v0, v1 = vmap[k]
+            if lyrics_first and v0 is not None and len(v0) > 3:
+                # a reliable word-level source (it agrees with the recognizer on most words):
+                # its starts and lengths are karaoke timing; the recognizer's word boundaries
+                # are contiguous and pull a line's first word back into the previous held note
+                s0 = v0[2] + off
+                times.append((s0, max(s0 + 0.08, v_end(v0, v1, 0.35))))
+                used["lyrics"] += 1
+            elif k in hit:
+                s0, e0 = hit[k]["s"], hit[k]["e"]
+                used["asr"] += 1
+                if v0 is not None and len(v0) > 3 and abs(v0[2] + off - s0) <= 0.3:
+                    e0 = max(s0 + 0.08, v_end(v0, v1, 0.35))  # karaoke word length from the lyric source
+                    used["lyric_ends"] += 1
+                times.append((s0, e0))
+            elif v0 is not None:
+                s0 = v0[2] + off
+                times.append((s0, max(s0 + 0.08, v_end(v0, v1, 0.35))))
+                used["lyrics"] += 1
+            else:
+                times.append(None)
+        k = 0  # one source piece covering several words (e.g. a missing space fixed later): split its time
+        while k < len(words):
+            j = k
+            while j + 1 < len(words) and vmap[k][0] is not None and vmap[j + 1][0] is vmap[k][0]:
+                j += 1
+            group = range(k, j + 1)
+            if j > k and all(times[x] for x in group) and (lyrics_first or not any(x in hit for x in group)):
+                s0, e0 = times[k][0], max(times[x][1] for x in group)
+                lens = [len(words[x][0]) for x in group]
+                acc = 0
+                for x, ln in zip(group, lens):
+                    a0 = s0 + (e0 - s0) * acc / sum(lens)
+                    acc += ln
+                    times[x] = (a0, s0 + (e0 - s0) * acc / sum(lens))
+            k = j + 1
+        for j, t in enumerate(times):  # still unknown: between their neighbours
+            if t:
+                continue
+            used["between"] += 1
+            prev = next((times[i] for i in range(j - 1, -1, -1) if times[i]), None)
+            nxt = next((times[i] for i in range(j + 1, len(times)) if times[i]), None)
+            s0 = prev[1] if prev else nxt[0] - 0.4
+            e0 = nxt[0] if nxt else prev[1] + 0.4
+            times[j] = (s0, max(s0 + 0.1, e0))
+        for j in range(1, len(times)):  # keep words in order (the two sources can disagree a little)
+            s0, e0 = times[j]
+            ps, pe = times[j - 1]
+            s0 = max(s0, ps + 0.05)
+            times[j - 1] = (ps, min(pe, s0))
+            times[j] = (s0, max(e0, s0 + 0.08))
+        times = [(max(0.0, s0), max(max(0.0, s0) + 0.08, e0)) for s0, e0 in times]  # SUG rejects t < 0
+        planned[li] = (words, times)
+        report[li + 1] = {"matched": f"{len(hit)}/{len(words)}", "lyrics_words": n_v}
+    # a held last word that runs a little into the next line ends where that line starts
+    # (bigger overlaps are kept: duet parts can really overlap)
+    clamped = 0
+    for li, (words, times) in planned.items():
+        nxt = planned[li + 1][1][0][0] if li + 1 in planned else (
+            lines[li + 1]["start"] if li + 1 < n and li + 1 not in idx else None)
+        s0, e0 = times[-1]
+        if nxt is not None and 0 < e0 + 0.1 - nxt <= 0.3:
+            times[-1] = (s0, max(s0 + 0.08, nxt - 0.12))
+            clamped += 1
+    for li, (words, times) in planned.items():
+        chars_all = lines[li]["chars"]
+        for ci, ch in enumerate(project.sentences[li].characters[:-1]):  # drop the old timing's pauses
+            if ch.is_sentence_end:
+                ops.append({"op": "set_pause", "line": li, "char": ci, "t": None})
+        for j, ((chars, _w), (s0, e0)) in enumerate(zip(words, times)):
+            sent_chars = project.sentences[li].characters  # check_count: also right before the first timing
+            cps = [(ci, c) for ci in chars for c in range(max(sent_chars[ci].check_count,
+                                                                 len(chars_all[ci].get("cp") or [])))]
+            for k, (ci, c) in enumerate(cps):
+                ops.append({"op": "set_char", "line": li, "char": ci, "cp": c,
+                            "t": round(s0 + (e0 - s0) * k / max(1, len(cps)), 3)})
+            if j + 1 < len(times) and times[j + 1][0] - e0 > 0.35:  # a rest before the next word
+                ops.append({"op": "set_pause", "line": li, "char": chars[-1], "t": round(e0 + 0.05, 3)})
+        ops.append({"op": "set_line_end", "line": li, "t": round(times[-1][1] + 0.1, 3)})
+        report[li + 1].update(start=round(times[0][0], 2), end=round(times[-1][1] + 0.1, 2))
+    used["clamped_line_ends"] = clamped
+    if ops:
+        sugbridge.apply_edits(project, ops)
+        sugbridge.save_project(project, store.dir / "timing" / "project.sug")
+    res = _run_qa(store, project)
+    src = (f"；逐字歌词偏移 {off:+.2f} 秒，{agree:.0%} 的单词与识别一致（{n_pairs} 个比对）"
+           + ("，以逐字歌词为主" if lyrics_first else "")) if verb else ""
+    store.log("英文行按英文识别重新对齐：" + "，".join(str(k) for k in report) + src)
+    return {"lines": report, "summary": res["summary"], "words": used,
+            "lyrics_offset": round(off, 3) if verb else None, "lyrics_agree": round(agree, 2) if verb else None,
+            "mode": "逐字歌词为主、识别补缺" if lyrics_first else "语音识别为主" + ("、逐字歌词补缺" if verb else ""),
+            "qa": res["qa"],
+            "next": "再用 realign --lines <前后的日文行> 让相邻日文行重新对齐（纯英文歌不需要）"}
+
+
+def _sync_split_stage1(store: JobStore, ops: list[dict]) -> None:
+    """``split_line`` on the timing project → split the stage-1 lyric line the same way (text and
+    furigana), so re-timing and the page keep matching the project. Ops apply in order."""
+    splits = [(int(o["line"]), int(o["char"])) for o in ops if o.get("op") == "split_line"]
+    if not splits:
+        return
+
+    def upd(st):
+        lines = st["lyrics"]["lines"]
+        for li, at in splits:
+            inc = [k for k, l in enumerate(lines) if l.get("include", True) and l["text"].strip()]
+            if li >= len(inc):
+                continue
+            k = inc[li]
+            line = lines[k]
+            text = line["text"]
+            a = len(text[:at].rstrip())
+            b = at + (len(text[at:]) - len(text[at:].lstrip()))
+            ruby = line.get("ruby") or []
+            words = line.get("words") or []  # word-level lyric times move with their characters
+            head = dict(line, text=text[:a], ruby=[r for r in ruby if r[1] < a],
+                        words=[[w[0], min(w[1], a - 1), *w[2:]] for w in words if w[0] < a])
+            tail = dict(line, text=text[b:], ruby=[[r[0] - b, r[1] - b, *r[2:]] for r in ruby if r[0] >= b],
+                        words=[[w[0] - b, w[1] - b, *w[2:]] for w in words if w[0] >= b])
+            for d in (head, tail):
+                d.pop("match", None)
+                d.pop("t", None)
+            lines[k:k + 1] = [head, tail]
+
+    store.update(upd)
+
+
 def cmd_edit(args) -> int:
     from . import sugbridge
 
@@ -834,12 +1279,83 @@ def cmd_edit(args) -> int:
     if isinstance(ops, dict):
         ops = [ops]
     ops = _resolve_auto_ops(store, project, ops)
+    if ops:
+        _snapshot(store, "Agent 编辑：" + "、".join(sorted({str(o.get("op")) for o in ops})))
     log = sugbridge.apply_edits(project, ops)
     sugbridge.save_project(project, store.dir / "timing" / "project.sug")
+    _sync_split_stage1(store, ops)
     res = _run_qa(store, project)
     for line in log:
         store.log("编辑：" + line)
     _p({"applied": log, "summary": res["summary"]})
+    return 0
+
+
+def cmd_singers(args) -> int:
+    """歌割り from a subtitle file / part-distribution source → per-character singers."""
+    import urllib.request
+
+    from . import parts, render, sugbridge
+
+    store = JobStore(args.job)
+    st = store.load()
+    view = read_json(store.dir / "timing" / "timed.json")
+    if not view:
+        raise SystemExit("尚未打轴：先完成打轴再导入歌割り")
+    mapping = {}
+    for item in args.map or []:
+        k, _, v = item.partition("=")
+        mapping[parts._hex(k) if k.strip().startswith(("#", "rgb")) else k.strip()] = v.strip()
+    source = args.source
+    if re.match(r"https?://", source):
+        ext = Path(source.split("?")[0]).suffix.lower()
+        ext = ext if ext in (".ass", ".ssa", ".lrc", ".txt", ".json") else ".html"
+        req = urllib.request.Request(source, headers={"User-Agent": "Mozilla/5.0"})
+        path = store.path("lyrics", "parts_source" + ext)
+        path.write_bytes(urllib.request.urlopen(req, timeout=30).read())
+    else:
+        path = Path(source)
+    song_singers = list(st["song"].get("singers") or [])
+    names = {s["name"] for s in song_singers} | {s["name"] for s in view.get("singers") or []}
+    runs = parts.read_runs(path, set(mapping) | names)
+    res = parts.plan(view, runs, mapping, names)
+    out = {k: res[k] for k in ("coverage", "singers", "uncovered", "weak", "keys")}
+    if res["unmapped"] and not args.ignore_unmapped:
+        _p({**out, "need_map": res["unmapped"],
+            "hint": "用 --map 键=歌手 指定每个键（颜色 / Name / Style / 前缀）对应的歌手，不需要的写 键=-；"
+                    "或加 --ignore-unmapped 忽略其余键"})
+        return 2
+    if args.dry_run or not res["singers"]:
+        _p({**out, "dry_run": True})
+        return 0
+    # singers: job colours (by name) + SUG singers
+    have = {s["name"] for s in song_singers}
+    for k, name in enumerate(n for n in res["singers"] if n not in have):
+        song_singers.append({"id": parts.singer_id(name), "name": name,
+                             "color": parts.PALETTE[(len(song_singers) + k) % len(parts.PALETTE)]})
+    color = {s["name"]: s.get("color") for s in song_singers}
+    ops = [{"op": "add_singer", "name": n, "color": color.get(n)} for n in res["singers"]]
+    ops += parts.edit_ops(res)
+    project = sugbridge.load_project(store.dir / "timing" / "project.sug")
+    sugbridge.apply_edits(project, ops)
+    sugbridge.save_project(project, store.dir / "timing" / "project.sug")
+    ids = {s["name"]: s["id"] for s in song_singers}
+    majority = [max(set(v), key=v.count) if v else None for v in res["lines"]]
+
+    def upd(s):
+        s["song"]["singers"] = song_singers
+        s["song"]["parts"] = {"source": args.source, "map": mapping, "coverage": res["coverage"],
+                              "time": time.strftime("%Y-%m-%d %H:%M:%S")}
+        inc = [l for l in s["lyrics"]["lines"] if l.get("include", True) and l["text"].strip()]
+        for line, who in zip(inc, majority):
+            if who:
+                line["singer"] = ids.get(who, line.get("singer"))
+
+    store.update(upd)
+    render.write_web_style(store, refresh=False)
+    qa = _run_qa(store, project)
+    store.log(f"歌割り：来自 {args.source}，覆盖 {res['coverage']:.0%}")
+    _p({**out, "applied": len(ops), "summary": qa["summary"]})
     return 0
 
 
@@ -865,8 +1381,12 @@ def cmd_qa(args) -> int:
     view = read_json(store.dir / "timing" / "timed.json")
     if not view:
         raise SystemExit("尚未打轴")
+    wide = set((read_json(store.path("render", "web_layout.json")) or {}).get("overflow") or [])
     for line in view["lines"]:
-        q = line.get("qa") or {}
+        q = dict(line.get("qa") or {})
+        if line["i"] in wide and OVERFLOW_NOTE not in (q.get("notes") or []):  # engine layout of the page
+            q["flag"] = "bad"
+            q["notes"] = list(q.get("notes", [])) + [OVERFLOW_NOTE]
         flag = {"ok": " ", "warn": "!", "bad": "✗"}.get(q.get("flag"), "?")
         t = f"{line['start']:7.2f}-{line['end']:7.2f}" if line["start"] is not None else "   -   "
         print(f"{line['i'] + 1:>3} {flag} {t} {line['text'][:28]:<28} {'；'.join(q.get('notes', []))}")
@@ -1056,6 +1576,94 @@ def cmd_mv_assets(args) -> int:
     return 0
 
 
+def cmd_mv_clips(args) -> int:
+    """Video-clip montage: footage (YouTube / Bilibili / local) → shots in the montage pool."""
+    from . import mv, mv_assets, mv_clips
+
+    store = JobStore(args.job)
+    out: dict = {}
+    if args.search:
+        items = mv_clips.youtube_search(args.search, args.n)
+        out["results"] = [{"k": k + 1, **{x: it.get(x) for x in ("title", "uploader", "duration", "views", "url")}}
+                          for k, it in enumerate(items)]
+    if args.info:
+        out["info"] = mv_clips.info(args.info)
+    crop = [float(x) for x in args.crop.split(",")] if args.crop else None
+    tags = [t.strip() for t in (args.tags or "").split(",") if t.strip()] or None
+    sections = mv_clips.parse_sections(args.sections)
+    opts = {"library": args.library, "min_score": args.min_score, "max_clips": args.max_clips, "crop": crop,
+            "tags": tags}
+    for src in args.add or []:
+        if re.match(r"https?://", src):
+            rec = mv_clips.download(store, src, sections=sections or None, max_height=args.max_height,
+                                    library=args.library, credit=args.credit)
+            out.setdefault("added", []).append(mv_clips.import_source(store, rec, sections=sections or None, **opts))
+        else:  # the user's own video: --sections (download parts) does not apply
+            rec = mv_clips.add_local(store, src, library=args.library, credit=args.credit)
+            out.setdefault("added", []).append(mv_clips.import_source(store, rec, **opts))
+    if args.from_library:
+        index = read_json(mv_clips.library_dir(store, args.library) / "sources.json", {}) or {}
+        for rec in index.values():
+            try:
+                out.setdefault("added", []).append(mv_clips.import_source(store, rec, **opts))
+            except Exception as exc:  # noqa: BLE001 - one bad source must not stop the rest
+                out.setdefault("failed", []).append({"source": rec.get("id"), "error": str(exc)})
+    if args.exclude:
+        ids = [x.strip() for x in args.exclude.split(",") if x.strip()]
+        if any(x.startswith(("#", "U")) for x in ids):  # "#12" / "U3" = tile of the last --sheet / --sheet-used
+            sheet = {}
+            for f in sorted(store.path("previews").glob("clip_sheet_*.json")):
+                sheet.update({f"#{e['n']}": e["id"] for e in read_json(f, [])})
+            for f in sorted(store.path("previews").glob("clip_used_*.json")):
+                sheet.update({e["n"]: e["id"] for e in read_json(f, [])})
+            ids = [sheet.get(x, x) for x in ids]
+        out["removed"] = mv_assets.remove(store, ids)
+    if args.tag:
+        out["tagged"] = mv_clips.set_tags(store, args.tag)
+    if args.avoid_from:
+        if not (Path(args.avoid_from) / "render" / "montage_plan.json").is_file():
+            raise SystemExit(f"--avoid-from：{args.avoid_from} 没有剪辑计划（render/montage_plan.json）")
+        ids = mv_clips.used_in(args.avoid_from)
+        spec = mv.load_spec(store, "montage") if mv.spec_path(store, "montage").is_file() \
+            else mv.preset_spec("game_montage")
+        if mv.montage_layer(spec) is None:
+            spec = mv.preset_spec("game_montage")
+        layer = mv.montage_layer(spec)
+        layer["avoid"] = sorted(set(layer.get("avoid") or []) | set(ids))  # keep e.g. subtitled shots in it
+        mv.save_spec(store, spec, "montage")
+        out["avoid"] = f"另一个工程已用的 {len(ids)} 个镜头排到最后（avoid 共 {len(layer['avoid'])} 个）"
+    if args.sheet:
+        out["sheets"] = mv_clips.contact_sheets(store)
+    if getattr(args, "mark_checked", False):  # after a used-sheet review (and its --exclude)
+        out["checked"] = mv_clips.mark_checked(store)
+    if getattr(args, "sheet_used", False):
+        if mv.montage_layer(mv.load_spec(store, "montage")) is not None:
+            mv.refresh_montage_plan(store)
+        out["used_sheets"] = mv_clips.used_sheets(store)
+    if args.credits:
+        out["credits"] = mv_clips.credits_by_source(store)
+    if getattr(args, "enhance", False):
+        out["enhance"] = mv_clips.enhance(
+            store, ids=[x.strip() for x in (getattr(args, "ids", None) or "").split(",") if x.strip()] or None,
+            only_used=getattr(args, "only_used", False), no_sr=getattr(args, "no_sr", False),
+            no_rife=getattr(args, "no_rife", False), sr_scale=args.sr_scale, rife_multi=args.rife_multi)
+    if args.list:
+        out["clips"] = [{k: a.get(k) for k in ("id", "name", "duration", "motion", "score", "tags")}
+                        for a in mv_clips.clips(store)]
+    out["pool"] = {"clips": len(mv_clips.clips(store)), "total": len(mv_assets.load_pool(store))}
+    media = store.load().get("media") or {}
+    if (args.add or args.from_library or args.exclude or args.avoid_from) and \
+            mv.montage_layer(mv.load_spec(store, "montage")) is not None and media.get("audio") \
+            and (media.get("source") or {}).get("duration"):
+        plan = mv.refresh_montage_plan(store)
+        out["plan"] = {k: plan.get(k) for k in ("bpm", "bars_per_shot", "clips", "unique_used", "ideal_unique",
+                                                "repeated_sections", "slow_motion", "fallback_repeats", "note")}
+        out["plan"]["shots"] = len(plan["shots"])
+    store.set_status(f"视频片段素材池：{out['pool']['clips']} 个镜头", None)
+    _p(out)
+    return 0
+
+
 def cmd_mv_video(args) -> int:
     """MV background downloaded from YouTube / Bilibili (Lin-K Lyrics' video downloader)."""
     from . import mvvideo
@@ -1190,6 +1798,132 @@ def apply_stage1(store: JobStore, payload: dict) -> None:
 
 
 # ================================================================== ui-action
+HISTORY_KEEP = 30
+
+
+def _snapshot(store: JobStore, label: str) -> None:
+    """Keep the timing project + singers before a manual change (stage-3 撤销)."""
+    hist = store.path("timing", "history")
+    hist.mkdir(parents=True, exist_ok=True)
+    stamp = time.strftime("%Y%m%d-%H%M%S") + f"-{int(time.time() * 1000) % 1000:03d}"
+    shutil.copy2(store.dir / "timing" / "project.sug", hist / f"{stamp}.sug")
+    st = store.load()
+    write_json(hist / f"{stamp}.json", {"label": label, "singers": st["song"].get("singers") or [],
+                                        "lyrics_lines": st["lyrics"]["lines"]})
+    snaps = sorted(hist.glob("*.sug"))
+    for old in snaps[:-HISTORY_KEEP]:
+        old.unlink(missing_ok=True)
+        old.with_suffix(".json").unlink(missing_ok=True)
+    store.update(lambda s: s["timing"].update(undo=len(snaps[-HISTORY_KEEP:]), undo_label=label))
+
+
+def _undo(store: JobStore) -> str | None:
+    from . import render, sugbridge
+
+    hist = store.path("timing", "history")
+    snaps = sorted(hist.glob("*.sug")) if hist.exists() else []
+    if not snaps:
+        return None
+    last = snaps[-1]
+    meta = read_json(last.with_suffix(".json")) or {}
+    shutil.copy2(last, store.dir / "timing" / "project.sug")
+    last.unlink()
+    last.with_suffix(".json").unlink(missing_ok=True)
+    rest = sorted(hist.glob("*.sug"))
+    prev = (read_json(rest[-1].with_suffix(".json")) or {}).get("label") if rest else None
+
+    def upd(s):
+        if meta.get("singers"):
+            s["song"]["singers"] = meta["singers"]
+        if meta.get("lyrics_lines"):
+            s["lyrics"]["lines"] = meta["lyrics_lines"]
+        s["timing"].update(undo=len(rest), undo_label=prev)
+
+    store.update(upd)
+    render.write_web_style(store, refresh=False)
+    _run_qa(store, sugbridge.load_project(store.dir / "timing" / "project.sug"))
+    return meta.get("label") or "上一次修改"
+
+
+def _ui_singers(store: JobStore, payload: dict) -> list[str]:
+    """Stage-3 singer edits: add / recolour singers and assign whole lines; choosing several
+    singers makes (or reuses) the chorus singer 「A＆B」, drawn in 拼色 with their colours."""
+    from . import parts, render, styles, sugbridge
+
+    st = store.load()
+    singers = [dict(s) for s in st["song"].get("singers") or []]
+    by_name = {s["name"]: s for s in singers}
+    log: list[str] = []
+    for add in payload.get("add") or []:
+        name = str(add.get("name") or "").strip()
+        if name and name not in by_name:
+            s = {"id": parts.singer_id(name), "name": name,
+                 "color": add.get("color") or parts.PALETTE[len(singers) % len(parts.PALETTE)]}
+            singers.append(s)
+            by_name[name] = s
+            log.append(f"新增歌手 {name}")
+    for name, color in (payload.get("colors") or {}).items():
+        if name in by_name and color:
+            by_name[name]["color"] = color
+            if by_name[name].get("colors") and len(by_name[name]["colors"]) > 1:
+                by_name[name].pop("colors")  # an explicit recolour turns 拼色 off for that singer
+            log.append(f"{name} 的颜色改为 {color}")
+    ops: list[dict] = []
+    assign = payload.get("assign")
+    lines: list[int] = []
+    target = None
+    if assign:
+        order = [s["name"] for s in singers]
+        names = sorted({n for n in assign.get("singers") or [] if n in by_name}, key=order.index)
+        if not names:
+            raise ValueError("没有选择歌手")
+        members: list[str] = []
+        for n in names:  # 「A＆B」 + C → A＆B＆C
+            sub = [p.strip() for p in re.split(r"[＆&]", n) if p.strip()]
+            sub = sub if len(sub) > 1 and all(p in by_name for p in sub) else [n]
+            members += [m for m in sub if m not in members]
+        target = members[0] if len(members) == 1 else "＆".join(members)
+        if target not in by_name:
+            s = {"id": parts.singer_id(target), "name": target,
+                 "color": styles.blend([by_name[m]["color"] for m in members])}
+            singers.append(s)
+            by_name[target] = s
+            log.append(f"新增合唱 {target}（拼色）")
+        lines = sorted({int(i) for i in assign.get("lines") or []})
+        op = {"op": "set_singer", "lines": lines, "singer": target}
+        if assign.get("chars") and len(lines) == 1:
+            op["chars"] = [int(x) for x in assign["chars"]]
+        ops = [{"op": "add_singer", "name": target, "color": by_name[target]["color"]}, op]
+    # chorus singers named after others follow their members' colours
+    for s in singers:
+        sub = [p.strip() for p in re.split(r"[＆&]", s["name"]) if p.strip()]
+        if len(sub) > 1 and all(p in by_name for p in sub) and not s.get("colors"):
+            s["color"] = styles.blend([by_name[p]["color"] for p in sub])
+    if ops:
+        log.append(f"第 {', '.join(str(i + 1) for i in lines)} 行 → {target}")
+    _snapshot(store, log[-1] if log else "歌手设置")
+    project = sugbridge.load_project(store.dir / "timing" / "project.sug")
+    if ops:
+        sugbridge.apply_edits(project, ops)
+        sugbridge.save_project(project, store.dir / "timing" / "project.sug")
+    ids = {s["name"]: s["id"] for s in singers}
+
+    def upd(s):
+        s["song"]["singers"] = singers
+        if target and not (assign or {}).get("chars"):
+            inc = [l for l in s["lyrics"]["lines"] if l.get("include", True) and l["text"].strip()]
+            for i in lines:
+                if i < len(inc):
+                    inc[i]["singer"] = ids[target]
+
+    store.update(upd)
+    render.write_web_style(store, refresh=False)  # colours by name; _run_qa rebuilds the overlay
+    _run_qa(store, project)
+    for line in log:
+        store.log("歌手：" + line)
+    return log
+
+
 def cmd_ui_action(args) -> int:
     store = JobStore(args.job)
     action = read_json(Path(args.action_file))
@@ -1199,12 +1933,20 @@ def cmd_ui_action(args) -> int:
         if kind == "edit_timing":
             from . import sugbridge
 
+            ops = payload.get("ops", [])
+            _snapshot(store, "平滑走字" if any(o.get("op") == "smooth" for o in ops) else "时间微调")
             project = sugbridge.load_project(store.dir / "timing" / "project.sug")
-            log = sugbridge.apply_edits(project, _resolve_auto_ops(store, project, payload.get("ops", [])))
+            log = sugbridge.apply_edits(project, _resolve_auto_ops(store, project, ops))
             sugbridge.save_project(project, store.dir / "timing" / "project.sug")
+            _sync_split_stage1(store, ops)
             _run_qa(store, project)
             for line in log:
                 store.log("手动微调：" + line)
+        elif kind == "singers":
+            _ui_singers(store, payload)
+        elif kind == "undo":
+            label = _undo(store)
+            store.log(f"已撤销：{label}" if label else "没有可撤销的修改")
         elif kind == "preview_styles":
             from . import render
 
@@ -1345,9 +2087,11 @@ DISPATCH = {
     "hires-source": cmd_hires_source,
     "mv-assets": cmd_mv_assets,
     "mv-video": cmd_mv_video,
+    "mv-clips": cmd_mv_clips,
     "timing": cmd_timing,
     "realign": cmd_realign,
     "edit": cmd_edit,
+    "singers": cmd_singers,
     "style": cmd_style,
     "qa": cmd_qa,
     "frame": cmd_frame,

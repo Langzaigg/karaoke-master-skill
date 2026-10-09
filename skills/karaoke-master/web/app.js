@@ -472,7 +472,7 @@ function renderLyrics() {
       el("input", { type: "checkbox", checked: dl.include, onclick: (ev) => { ev.stopPropagation(); dl.include = ev.target.checked; row.classList.toggle("off", !dl.include); touch("lines"); drawWave1(); } }),
       el("span", { class: "txt", html: rubyHtml(l.text, l.ruby) }),
       el("span", { class: "match" + (m.source === "asr" ? " hi" : m.source === "lrc" ? " mid" : "") }, matchTxt),
-      el("button", { class: "singer-chip", style: { background: sg ? sg.color : "#3a4166" }, onclick: (ev) => { ev.stopPropagation(); singerMenu(ev.target, i); } }, sg ? sg.name : "未指定"));
+      el("button", { class: "singer-chip", title: "点击切换演唱者", style: { background: sg ? sg.color : "#3a4166" }, onclick: (ev) => { ev.stopPropagation(); singerMenu(ev.target, i); } }, sg ? sg.name : "未指定"));
     row.addEventListener("click", () => { const md = $("#s1-media"); if (md && m.est !== null && m.est !== undefined) { md.currentTime = Math.max(0, m.est - 0.5); md.play(); } });
     list.append(row);
   });
@@ -566,7 +566,7 @@ function renderSingers() {
   });
 }
 
-const BG_TYPES = [["video", "视频"], ["mv", "AMV"], ["montage", "图片混剪"], ["subs", "仅 KTV 字幕"]];
+const BG_TYPES = [["video", "视频"], ["mv", "AMV"], ["montage", "混剪"], ["subs", "仅 KTV 字幕"]];
 function bgKind(t) { return t === "spectrum" ? "mv" : t === "source" ? "video" : t; }
 function setBackground(bg, notify = true) {
   const o = S.d1.options; o.background = bg; touch("options");
@@ -589,7 +589,7 @@ function renderOutput() {
   if (cur === "video" && hasVideo) extra.append(el("span", { class: "muted small" }, "使用素材原视频作为背景"));
   if (cur === "video" && !hasVideo) extra.append(renderMvVideo());
   if (cur === "mv") extra.append(el("span", { class: "muted small" }, "Agent 按歌曲主题设计画面 + 频谱 / 音频可视化，见下方「AMV 设计」"));
-  if (cur === "montage") extra.append(el("span", { class: "muted small" }, "图片按节拍剪辑（网上搜集 / 你的图包 / 混合），见下方「图片混剪」"));
+  if (cur === "montage") extra.append(el("span", { class: "muted small" }, "图片或游戏 / 动画视频片段按节拍剪辑（网上搜集 / 你的图包 / 混合），见下方「混剪设计」"));
   if (cur === "subs") {
     const col = o.background.color || "#000000";
     const sw = (c, label) => el("button", { class: "swatch" + (col.toLowerCase() === c.toLowerCase() ? " on" : ""), title: label, style: { background: c },
@@ -600,7 +600,7 @@ function renderOutput() {
   }
   if (!["video", "mv", "montage", "subs"].includes(cur)) extra.append(el("span", { class: "muted small" }, `当前背景：${o.background.type === "image" ? "图片" : "纯色"}（由 Agent 设置）`));
   $("#out-kind-mv").hidden = !(cur === "mv" || cur === "montage");
-  $("#out-kind-mv-label").textContent = cur === "montage" ? "图片混剪（无字幕版）" : "AMV（无字幕版）";
+  $("#out-kind-mv-label").textContent = cur === "montage" ? "混剪（无字幕版）" : "AMV（无字幕版）";
   $("#out-res").value = o.resolution;
   if (document.activeElement !== $("#out-cast")) $("#out-cast").value = o.cast_delay_ms === undefined ? 200 : o.cast_delay_ms;
   if (![30, 60].includes(+o.fps)) o.fps = 60;
@@ -662,8 +662,8 @@ function renderMV() {
   if (!kind) return;
   const pv = j.previews || {};
   const mv = (pv.designs || {})[kind] || {};
-  $("#mv-title").textContent = kind === "montage" ? "图片混剪设计" : "AMV 设计（静态 MV）";
-  $("#mv-sub").textContent = kind === "montage" ? "图片按节拍剪辑，叠加可视化特效；选一个风格作起点，或在右侧告诉 Agent 想要的效果"
+  $("#mv-title").textContent = kind === "montage" ? "混剪设计" : "AMV 设计（静态 MV）";
+  $("#mv-sub").textContent = kind === "montage" ? "图片或视频片段按节拍剪辑，叠加可视化特效；选一个风格作起点，或在右侧告诉 Agent 想要的效果"
     : "Agent 根据歌曲主题设计画面；可选预设作起点，或在右侧告诉 Agent 想要的意象";
   const labels = ["前奏", "主歌", "副歌高潮"];
   const box = $("#mv-stills"); box.innerHTML = "";
@@ -687,7 +687,7 @@ function renderMV() {
 }
 
 const WHY_LABEL = { new: "新素材", repeat: "重复段落沿用前面的画面", pin: "指定画面", fallback: "素材不足，复用", missing: "缺少素材" };
-const ORIGIN_LABEL = { user: "图包", web: "网络", video: "视频" };
+const ORIGIN_LABEL = { user: "图包", web: "网络", video: "视频", clip: "片段" };
 const SOURCE_OPTS = [["web", "Agent 上网搜集"], ["user", "我上传图包"], ["mixed", "两者混合"]];
 async function uploadPack(files) {
   const list = Array.from(files || []); if (!list.length) return;
@@ -737,9 +737,9 @@ function renderMontage(kind) {
   const need = showPlan ? (plan.needed || plan.shots.length) : 0;
   const avg = showPlan && plan.shots.length ? plan.shots.reduce((a, s) => a + s.t1 - s.t0, 0) / plan.shots.length : 0;
   $("#mv-montage-sum").textContent = showPlan
-    ? `${plan.bpm ? Math.round(plan.bpm) + " BPM · " : ""}${plan.shots.length} 个镜头（平均 ${avg.toFixed(1)} 秒一切） · 素材 ${pool.length} 张（${mix}），用到 ${plan.unique_used} 张` +
+    ? `${plan.bpm ? Math.round(plan.bpm) + " BPM · " : ""}${plan.shots.length} 个镜头（平均 ${avg.toFixed(1)} 秒一切） · 素材 ${pool.length} 个（${mix}），用到 ${plan.unique_used} 个` +
       (plan.repeated_sections ? ` · ${plan.repeated_sections} 个镜头在重复段落沿用前面的画面` : "")
-    : pool.length ? `素材 ${pool.length} 张（${mix}）` : "素材池是空的";
+    : pool.length ? `素材 ${pool.length} 个（${mix}）` : "素材池是空的";
   const note = $("#mv-montage-note");
   const short = showPlan && pool.length < need;
   const slow = showPlan && plan.ideal_unique && pool.length < plan.ideal_unique;
@@ -756,8 +756,8 @@ function renderMontage(kind) {
       el("img", { src: fileUrl(a.thumb), loading: "lazy" }),
       n ? el("span", { class: "uses" }, n > 1 ? `×${n}` : "✓") : null,
       el("span", { class: "origin o-" + (a.origin || "user") }, ORIGIN_LABEL[a.origin || "user"] || ""),
-      el("button", { class: "del", title: "移除这张图", onclick: () => { act("mv_asset_remove", { ids: [a.id] }); toast("已移除，正在重新排剪辑并渲染静帧…"); } }, "×"),
-      el("figcaption", {}, a.origin === "user" ? (a.name || "图包") : (a.credit || a.source || a.id))));
+      el("button", { class: "del", title: "移除这个素材", onclick: () => { act("mv_asset_remove", { ids: [a.id] }); toast("已移除，正在重新排剪辑并渲染静帧…"); } }, "×"),
+      el("figcaption", {}, a.origin === "user" ? (a.name || "图包") : a.origin === "clip" ? (a.name || a.credit || a.id) : (a.credit || a.source || a.id))));
   }
 }
 
@@ -907,7 +907,9 @@ function renderStage3() {
   if (S.engineRev === undefined) S.engineRev = ef ? ef.rev : null; // don't pop up a frame from a previous session
   if (ef && ef.rev !== S.engineRev) { S.engineRev = ef.rev; const img = $("#s3-engine"); img.src = fileUrl(ef.path) + "?r=" + ef.rev; img.hidden = false; $("#s3-engine-badge").hidden = false; $("#s3-engine-badge").textContent = `引擎渲染帧 @ ${fmtT(ef.t)} · 点击关闭`; }
   memo("exports", JSON.stringify(j.exports || []), renderExports);
-  memo("linetable", String(S.viewRev) + JSON.stringify((j.timing || {}).qa_summary || {}), renderLineTable);
+  memo("linetable", String(S.viewRev) + JSON.stringify((j.timing || {}).qa_summary || {}) + (S.ws ? S.ws.rev : ""), renderLineTable);
+  const t3 = j.timing || {};
+  memo("s3singers", JSON.stringify([(j.song || {}).singers, S.ws ? S.ws.rev : null, S.brush || [], t3.undo, t3.undo_label]), () => { renderS3Singers(); renderSelBar(); });
   loadPeaks();
 }
 
@@ -940,7 +942,7 @@ function renderExports() {
     act("export", { kinds: ["alpha"] }); toast("正在渲染透明字幕层（整首歌，体积较大）");
   } }, "透明字幕层 MOV"));
   $("#s3-hires").disabled = running || !(j.exports || []).some((e) => e.kind === "mp4" && e.state === "done");
-  $("#s3-hires").title = $("#s3-hires").disabled ? "请先导出成品 MP4" : "";
+  $("#s3-hires").title = $("#s3-hires").disabled ? "请先导出成品 MP4" : "以已导出的成品 MP4 为视频轨，音轨统一转为 FLAC 32bit / ≥48kHz，分别输出原唱与伴奏 MKV";
   const hr = (j.options || {}).hires || {};
   if (document.activeElement !== $("#s3-hires-on") && !$("#s3-hires-on").value) $("#s3-hires-on").value = hr.on || "";
   if (document.activeElement !== $("#s3-hires-off") && !$("#s3-hires-off").value) $("#s3-hires-off").value = (hr.off || []).join("; ");
@@ -968,11 +970,14 @@ function renderLineTable() {
   v.lines.forEach((l, i) => {
     const q = l.qa || {}; const flag = q.flag || "ok";
     const nud = (ms) => el("button", { onclick: (ev) => { ev.stopPropagation(); editLines([{ op: "shift_lines", lines: [i], ms }]); }, title: `整行${ms > 0 ? "推后" : "提前"} ${Math.abs(ms)} ms` }, (ms > 0 ? "+" : "−") + Math.abs(ms) / 1000);
-    const row = el("div", { class: "lrow", "data-i": i },
-      el("span", { class: "n" }, i + 1),
+    S.sel = S.sel || new Set();
+    const names = lineSingers(l);
+    const row = el("div", { class: "lrow" + (S.sel.has(i) ? " sel" : ""), "data-i": i },
+      el("span", { class: "n", title: "点击选中这一行（Shift 连选），再点上方歌手或按数字键分配", onclick: (ev) => { ev.stopPropagation(); toggleSel(i, ev.shiftKey); } }, i + 1),
       el("div", {},
-        el("div", { class: "tx", html: rubyFromChars(l.chars) }),
+        el("div", { class: "tx", html: rubyFromChars(l.chars, (c) => paintCss(paintOf(sgName(c.sg || l.singer)))) }),
         el("div", { class: "info" },
+          names.length ? el("span", { class: "sgs", title: names.join(" / ") }, ...names.map((n) => el("i", { style: { backgroundImage: paintCss(paintOf(n)) } })), names.join(" / ")) : null,
           el("span", { class: "flag " + flag }), `${fmtT(l.start)} → ${fmtT(l.end)}`,
           q.notes && q.notes.length ? el("span", { class: "qa" }, q.notes.join("；")) : null,
           el("span", { class: "nudge" }, nud(-100), nud(-20), nud(20), nud(100),
@@ -983,15 +988,95 @@ function renderLineTable() {
   box.scrollTop = keepScroll;
   if (S.activeLine !== null && S.activeLine !== undefined) { const a = $(`.lrow[data-i="${S.activeLine}"]`); if (a) a.classList.add("active"); }
 }
-function rubyFromChars(chars) {
+function rubyFromChars(chars, paint = null) {
   const esc = (s) => s.replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[c]);
-  let out = "", grp = "", rb = "";
+  let out = "", grp = "", rb = "", first = null;
   for (const c of chars) {
+    if (first === null) first = c;
     grp += c.c; rb += (c.r || []).join("").replace(/\^pause\^/g, "");
-    if (!c.link) { out += rb && rb !== grp ? `<ruby>${esc(grp)}<rt>${esc(rb)}</rt></ruby>` : esc(grp); grp = ""; rb = ""; }
+    if (!c.link) {
+      const h = rb && rb !== grp ? `<ruby>${esc(grp)}<rt>${esc(rb)}</rt></ruby>` : esc(grp);
+      out += paint && grp.trim() ? `<span class="sg" style="background-image:${esc(paint(first))}">${h}</span>` : h;
+      grp = ""; rb = ""; first = null;
+    }
   }
   return out + esc(grp);
 }
+/* ------------------------------------------------------------------ stage-3 singers (歌割り) */
+function paintOf(name) {
+  const w = S.ws && S.ws.by_name && S.ws.by_name[name];
+  const s = ((S.job.song || {}).singers || []).find((x) => x.name === name);
+  return { color: (w && w.color) || (s && s.color) || "#888888", bands: w && w.bands && w.bands.length > 1 ? w.bands : null };
+}
+function paintCss(p) {
+  if (p.bands) return "linear-gradient(to bottom, " + p.bands.map((c, i, a) => `${c} ${(i / a.length * 100).toFixed(1)}% ${((i + 1) / a.length * 100).toFixed(1)}%`).join(", ") + ")";
+  return `linear-gradient(${p.color}, ${p.color})`;
+}
+function sgName(sid) { const s = S.view && S.view.singers.find((x) => x.id === sid); return s ? s.name : null; }
+function lineSingers(l) { const out = []; for (const c of l.chars) { const n = sgName(c.sg || l.singer); if (n && c.c.trim() && !out.includes(n)) out.push(n); } return out; }
+function selLines() { S.sel = S.sel || new Set(); if (S.sel.size) return [...S.sel].sort((a, b) => a - b); return S.activeLine !== null && S.activeLine !== undefined ? [S.activeLine] : []; }
+function fmtLines(ls) {
+  const out = []; let a = null, b = null;
+  for (const i of ls) { if (a !== null && i === b + 1) { b = i; continue; } if (a !== null) out.push(a === b ? `${a + 1}` : `${a + 1}-${b + 1}`); a = b = i; }
+  if (a !== null) out.push(a === b ? `${a + 1}` : `${a + 1}-${b + 1}`);
+  return out.join(", ");
+}
+function toggleSel(i, range) {
+  S.sel = S.sel || new Set();
+  if (range && S.selAnchor !== undefined) { for (let k = Math.min(S.selAnchor, i); k <= Math.max(S.selAnchor, i); k++) S.sel.add(k); }
+  else { if (S.sel.has(i)) S.sel.delete(i); else S.sel.add(i); S.selAnchor = i; }
+  renderLineTable(); renderSelBar();
+}
+function toggleBrush(name) {
+  S.brush = S.brush || [];
+  S.brush = S.brush.includes(name) ? S.brush.filter((n) => n !== name) : S.brush.concat([name]);
+  renderS3Singers(); renderSelBar();
+}
+function assignSingers(names) {
+  const lines = selLines();
+  if (!names.length) { toast("先点上方的歌手（可以多选，多选 = 合唱拼色）"); return; }
+  if (!lines.length) { toast("先点行号选中要修改的行（Shift 连选），或在播放中直接按"); return; }
+  const sg = names.length === 1 && S.view.singers.find((s) => s.name === names[0]);
+  if (sg) { for (const i of lines) { const l = S.view.lines[i]; l.singer = sg.id; l.chars.forEach((c) => (c.sg = sg.id)); } renderLineTable(); }
+  act("singers", { assign: { lines, singers: names } });
+  toast(`第 ${fmtLines(lines)} 行 → ${names.join("＆")}${names.length > 1 ? "（合唱拼色）" : ""}`);
+}
+function renderS3Singers() {
+  const bar = $("#s3-singers"); if (!bar || !S.job) return;
+  const singers = (S.job.song || {}).singers || [];
+  S.brush = (S.brush || []).filter((n) => singers.some((s) => s.name === n));
+  bar.innerHTML = "";
+  bar.append(el("span", { class: "muted small" }, "歌手"));
+  singers.forEach((s, k) => {
+    const p = paintOf(s.name);
+    const sw = el("label", { class: "sw", style: { backgroundImage: paintCss(p) }, title: p.bands ? "合唱：颜色来自各位歌手" : "点击改颜色", onclick: (ev) => { if (!p.bands) ev.stopPropagation(); } },
+      p.bands ? null : el("input", { type: "color", value: /^#[0-9a-f]{6}$/i.test(s.color || "") ? s.color : "#888888",
+        onchange: (ev) => { act("singers", { colors: { [s.name]: ev.target.value } }); toast(`正在更新 ${s.name} 的颜色`); } }));
+    bar.append(el("span", { class: "sgchip" + (S.brush.includes(s.name) ? " on" : ""),
+      title: (k < 9 ? `按 ${k + 1}：把选中行直接设为「${s.name}」。` : "") + "点击加入 / 移出画笔，选多位 = 合唱（拼色）",
+      onclick: () => toggleBrush(s.name) }, sw, k < 9 ? el("kbd", {}, k + 1) : null, s.name));
+  });
+  bar.append(el("button", { class: "btn ghost sm", title: "新增歌手", onclick: () => {
+    const name = (prompt("新歌手的名字") || "").trim();
+    if (name) { act("singers", { add: [{ name }] }); toast(`正在新增歌手 ${name}（点色块可改颜色）`); }
+  } }, "＋ 歌手"));
+}
+function renderSelBar() {
+  const bar = $("#s3-selbar"); if (!bar || !S.job) return;
+  S.sel = S.sel || new Set();
+  const n = S.sel.size, brush = S.brush || [], t = S.job.timing || {};
+  bar.innerHTML = "";
+  bar.append(el("span", { class: "muted small" }, n ? `已选 ${n} 行` : "未选行时作用于正在播放的行"));
+  bar.append(el("button", { class: "btn primary sm", disabled: !brush.length, title: brush.length ? "" : "先点上方的歌手（可多选）",
+    onclick: () => assignSingers(brush) }, brush.length ? `设为 ${brush.join("＆")}${brush.length > 1 ? "（拼色）" : ""}` : "设为…"));
+  bar.append(el("button", { class: "btn ghost sm", disabled: !S.view, onclick: () => { S.view.lines.forEach((_, i) => S.sel.add(i)); renderLineTable(); renderSelBar(); } }, "全选"));
+  bar.append(el("button", { class: "btn ghost sm", disabled: !n, onclick: () => { S.sel.clear(); renderLineTable(); renderSelBar(); } }, "清除选择"));
+  bar.append(el("button", { class: "btn ghost sm", title: "让相邻字的走字速度更均匀：每个检查点最多挪 80 ms，行首、停顿和长音不动；选中行时只处理选中的行，可多点几次",
+    onclick: () => { const ls = n ? selLines() : null; act("edit_timing", { ops: [ls ? { op: "smooth", lines: ls } : { op: "smooth" }] }); toast(`正在平滑走字（${ls ? "第 " + fmtLines(ls) + " 行" : "全部歌词"}）`); } }, "平滑走字"));
+  bar.append(el("button", { class: "btn ghost sm", disabled: !t.undo, title: t.undo ? `撤销：${t.undo_label || "上一次修改"}` : "没有可撤销的修改",
+    onclick: () => { act("undo", {}); toast("正在撤销：" + (t.undo_label || "上一次修改")); } }, "↶ 撤销"));
+}
+
 async function editLines(ops) {
   // optimistic update of the local view
   for (const op of ops) if (op.op === "shift_lines") for (const i of op.lines) {
@@ -1004,6 +1089,7 @@ async function editLines(ops) {
 
 function bindStage3() {
   const vid = $("#s3-video");
+  $("#export-head").addEventListener("click", (ev) => { if (ev.target.closest("button")) return; $("#export-card").classList.toggle("open"); });
   $("#s3-play").addEventListener("click", () => (vid.paused ? vid.play() : vid.pause()));
   vid.addEventListener("play", () => ($("#s3-play").textContent = "❚❚"));
   vid.addEventListener("pause", () => ($("#s3-play").textContent = "▶"));
@@ -1051,6 +1137,13 @@ function bindStage3() {
     S.zoom = nb - na >= dur * 0.98 ? null : [na, nb];
   }, { passive: false });
   document.addEventListener("keydown", (ev) => { if (S.viewing === 3 && ev.code === "Space" && !["TEXTAREA", "INPUT"].includes(document.activeElement.tagName)) { ev.preventDefault(); vid.paused ? vid.play() : vid.pause(); } });
+  document.addEventListener("keydown", (ev) => {  // 1–9: singer k for the selected lines (or the playing line) · Esc: clear selection
+    if (S.viewing !== 3 || ["TEXTAREA", "INPUT", "SELECT"].includes(document.activeElement.tagName) || ev.ctrlKey || ev.metaKey || ev.altKey) return;
+    const k = /^Digit[1-9]$/.test(ev.code) ? +ev.code.slice(5) : 0;
+    const s = k && ((S.job.song || {}).singers || [])[k - 1];
+    if (s) { ev.preventDefault(); assignSingers([s.name]); }
+    else if (ev.key === "Escape" && S.sel && S.sel.size) { S.sel.clear(); renderLineTable(); renderSelBar(); }
+  });
 }
 
 function hiresPayload() {
@@ -1118,7 +1211,7 @@ function drawOverlay() {
     const y = w.row === 0 ? baseY - fs - gap - (ws.ruby ? rfs : 0) : baseY;
     const x = w.row === 0 ? bx + margin : bx + bw - margin - total;
     const sg = S.view.singers.find((s) => s.id === l.singer); const scol = sg && ws.by_name && ws.by_name[sg.name];
-    const after = scol ? { ...ws.after, top: scol.top, bottom: scol.bottom } : ws.after;
+    const after = scol ? { ...ws.after, top: scol.top, bottom: scol.bottom, bands: scol.bands } : ws.after;
     drawKaraLine(ctx, l, widths, x, y, fs, rfs, ws, ws.before, null, t, k);
     // wipe clip
     ctx.save(); ctx.beginPath(); let cx = x;
@@ -1130,7 +1223,9 @@ function drawOverlay() {
 }
 
 function drawKaraLine(ctx, l, widths, x, y, fs, rfs, ws, col, glow, t, k) {
-  const grad = ctx.createLinearGradient(0, y - fs * 0.85, 0, y + fs * 0.1); grad.addColorStop(0, col.top); grad.addColorStop(1, col.bottom);
+  const grad = ctx.createLinearGradient(0, y - fs * 0.85, 0, y + fs * 0.1);
+  if (col.bands && col.bands.length > 1) col.bands.forEach((c, i, a) => { grad.addColorStop(i / a.length, c); grad.addColorStop(Math.max(i / a.length, (i + 1) / a.length - 0.001), c); }); // 拼色
+  else { grad.addColorStop(0, col.top); grad.addColorStop(1, col.bottom); }
   ctx.lineJoin = "round"; ctx.textBaseline = "alphabetic";
   const strokeW = ws.stroke * k, stroke2W = (ws.stroke2 || 0) * k;
   const passes = (font, size, yy, text, cx) => {
