@@ -611,11 +611,13 @@ def plan_montage(store: JobStore, feat: dict, layer: dict, duration: float) -> d
     def reuse(s: dict, counts: dict, avoid_id) -> str:
         """Fallback for a shot no unused clip can fill: the least-used long-enough
         clip (not the previous shot's); when none is long enough, rotate among the
-        longest ones instead of giving every such shot the same clip."""
-        ok = [i for i in ids if long_enough(i, need_of(s)) and i != avoid_id]
+        longest ones instead of giving every such shot the same clip. With clips in
+        the pool an image never fills this fallback (video first)."""
+        cand = [i for i in ids if i in clips] if clips else ids
+        ok = [i for i in cand if long_enough(i, need_of(s)) and i != avoid_id]
         if not ok:
-            longest = sorted(ids, key=lambda i: -dur_of(i))
-            ok = [i for i in longest[:max(3, len(ids) // 4)] if i != avoid_id] or longest[:1]
+            longest = sorted(cand, key=lambda i: -dur_of(i))
+            ok = [i for i in longest[:max(3, len(cand) // 4)] if i != avoid_id] or longest[:1]
         return min(ok, key=lambda i: (counts.get(i, 0), -dur_of(i)))
 
     def take(unused: list[str], s: dict, last: dict) -> str | None:
@@ -626,7 +628,10 @@ def plan_montage(store: JobStore, feat: dict, layer: dict, duration: float) -> d
         need = need_of(s)
         usable = [cid for cid in unused if cid in clips and long_enough(cid, need)] if clips else []
         if not usable:
-            # no clip can fill this shot — an image fills it (manual order when given)
+            # an image fills the shot a clip cannot take — but never over the intro:
+            # the opening stays on video (the fallback repeats a long clip instead)
+            if clips and s["t0"] < duration * 0.12:
+                return None
             cands = [i for i in unused if i not in clips]
             if manual_ids is not None:
                 rank = {cid: k for k, cid in enumerate(manual_ids)}
@@ -701,7 +706,10 @@ def plan_montage(store: JobStore, feat: dict, layer: dict, duration: float) -> d
             if clips and section_of(t) == "instrumental" and pace.get("instrumental", 1.0) >= 2.0:
                 span_end = next((b for a, b, k in section_spans
                                  if k == "instrumental" and a <= t < b), t + max_shot)
-                max_here = max(max_shot, min(span_end, t + 20.0))
+                # cap at what the longest clip can still fill (slowed ≥ 0.72×), else the
+                # shot falls through to an image — video leads even over the intro
+                clip_cap = max((float(c.get("duration") or 0) for c in clips.values()), default=0.0) / 0.72
+                max_here = max(max_shot, min(span_end - t, 20.0, clip_cap))
             target = min(t + max(0.5 if fine else 1.0, n_bars) * bar_len, t + max_here)
             nxt = next((f for f in forced if t + min_shot <= f <= target + 0.01), None)
             if nxt is None:
