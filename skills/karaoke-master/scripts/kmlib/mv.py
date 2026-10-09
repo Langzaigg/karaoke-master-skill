@@ -623,6 +623,15 @@ def plan_montage(store: JobStore, feat: dict, layer: dict, duration: float) -> d
         usable = [cid for cid in unused if long_enough(cid, need)]
         if not usable:
             return None
+        # clips from one source appear in source order: candidates that jump backwards
+        # only enter the pool when nothing continues (or starts fresh) instead
+        lin = last.get("in") or {}
+        in_order = [cid for cid in usable
+                    if cid not in clips
+                    or (clips[cid].get("library_id") or "") not in lin
+                    or float(clips[cid].get("t_in") or 0) >= lin.get(clips[cid].get("library_id"), 0.0)]
+        if in_order:
+            usable = in_order
         window = [cid for cid in unused[:14] if cid in usable] or usable[:14]
         best, best_q = window[0], -1e9
         for j, cid in enumerate(window):
@@ -631,8 +640,15 @@ def plan_montage(store: JobStore, feat: dict, layer: dict, duration: float) -> d
                 continue
             fit = 1.0 if c["duration"] >= need else max(0.0, (c["duration"] / need - 0.55) / 0.45)
             match = math.exp(-abs(math.log(max(1e-4, float(c.get("motion") or 0.01)) / want)))
+            # clips from one source should appear in source order — jumping back and forth
+            # inside a video reads as a editing mistake (a strong tag/motion fit overrules it)
+            src = c.get("library_id")
+            prev_in = (last.get("in") or {}).get(src) if src else None
+            order_term = (0.9 if prev_in is not None and float(c.get("t_in") or 0) >= prev_in
+                          else -0.9 if prev_in is not None else 0.0)
             q = (1.3 * fit + 0.8 * match + 0.5 * clip_quality(c, layer.get("prefer_tags")) - 0.3 * j / 14
                  + (0.6 if set(c.get("tags") or []) & (sec_tags.get(sec) or set()) else 0.0)
+                 + order_term
                  - (0.6 if c.get("library_id") and c.get("library_id") == last.get("src") else 0.0))
             if q > best_q:
                 best, best_q = cid, q
@@ -712,6 +728,8 @@ def plan_montage(store: JobStore, feat: dict, layer: dict, duration: float) -> d
                 prev_asset = s["asset"]
             if s.get("asset") in clips:
                 last["src"] = clips[s["asset"]].get("library_id")
+                if last["src"]:
+                    last.setdefault("in", {})[last["src"]] = float(clips[s["asset"]].get("t_in") or 0.0)
         missing = sum(1 for s in shots if s["why"] == "missing")
         return shots, missing
 

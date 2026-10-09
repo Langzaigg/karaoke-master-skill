@@ -55,7 +55,7 @@ TEMPLATES: list[dict[str, Any]] = [
         "weight": 800, "size": 92, "spacing": 2,
         "before": {"text": "#EAF6FF", "stroke": "#0B1530", "stroke2": "#3BE7FF", "shadow": "#3BE7FF"},
         "after": {"text": "#6CF7FF", "stroke": "#0B1530", "stroke2": "#FF4FD8", "shadow": "#00D5FF"},
-        "stroke": 9, "stroke2": 3, "stroke2_on": True, "decoration": "glow", "glow": 16, "glow_level": 2,
+        "stroke": 9, "stroke2": 3, "stroke2_on": True, "decoration": "glow", "glow": 10, "glow_level": 1,
     },
     {
         "id": "mincho",
