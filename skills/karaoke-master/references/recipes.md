@@ -174,6 +174,10 @@ ground, a `lyrics_band`), put busy motifs above. Presets (`--list-presets`): `st
 | `pins` | force an image onto a moment (a character's solo line, the title drop) |
 | `beat_cuts` | `true`: in loud parts shots may end on any beat, not only on bar starts (faster 卡点) |
 | `avoid` | clip / image ids to use last (`mv-clips --avoid-from <project>` fills it with another song's shots) |
+| `sources` | ingredient types of the montage: `["image", "clip"]` (default, freely mixed) · `["image"]` images only · `["clip"]` video clips only |
+| `section_pace` | per-section shot-length multiplier, e.g. `{"chorus": 0.5, "verse": 1.0, "instrumental": 2.0}` (default) — the chorus cuts fastest, instrumental passages slow down; `{}` disables. Sections: a repeated passage and its source = chorus, other sung blocks = verse, sung gaps / intro / outro = instrumental; the hottest sung block counts as chorus even without repeated lyrics |
+| `section_motion` | per-section clip-motion preference, e.g. `{"chorus": "high", "instrumental": "low"}` (default): the chorus takes the most dynamic clips, quiet passages the calmest |
+| `section_tags` | per-section tag affinity for images and clips, e.g. `{"chorus": ["battle", "concert"], "instrumental": ["calm"]}` — shots whose tags match the section are preferred |
 | `clip_zoom` | slow push-in on video clips over a shot (e.g. 0.04); images keep their Ken Burns move |
 | `cut_energy` | clips: hard cut only where the music's energy is at least this (default 0.4), crossfade below — raise it (0.6) for a gentle song so only the loudest choruses cut hard |
 | `max_scale` | how far a small pool may lengthen the shots (default 4.0); 1.0 keeps the designed pacing and repeats the least-used clips instead (better for 卡点 than slowing short clips down) |

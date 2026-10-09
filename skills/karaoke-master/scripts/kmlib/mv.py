@@ -263,7 +263,7 @@ DEFAULT_PRESET = "spectrum_classic"
 KINDS = ("mv", "montage")  # AMV design / image montage
 # bump when the montage planner's output changes for the same inputs (the design
 # signature below includes it so a stale rendered background is not reused)
-PLANNER_VERSION = 2
+PLANNER_VERSION = 3
 DEFAULT_PRESETS = {"mv": DEFAULT_PRESET, "montage": "anime_montage"}
 KIND_LABEL = {"mv": "AMV", "montage": "混剪"}
 
@@ -436,8 +436,13 @@ def lyric_sections(store: JobStore) -> list[dict]:
                 b["repeat_of"] = src
         for key in b["keys"]:
             seen.setdefault(key, bi)
+    # a repeated passage is the chorus — and so is the passage it repeats
+    for b in blocks:
+        if "repeat_of" in b:
+            b["kind"] = "chorus"
+            blocks[b["repeat_of"]]["kind"] = "chorus"
     return [{"start": round(b["start"], 2), "end": round(b["end"], 2), "lines": len(b["keys"]),
-             "repeat_of": b.get("repeat_of")} for b in blocks]
+             "repeat_of": b.get("repeat_of"), "kind": b.get("kind", "verse")} for b in blocks]
 
 
 def lyric_repeats(store: JobStore) -> list[dict]:
@@ -484,6 +489,13 @@ def plan_montage(store: JobStore, feat: dict, layer: dict, duration: float) -> d
         ids = [i for i in layer["images"] if i in ids]
     origins = {a["id"]: mv_assets.origin_of(a) for a in pool}
     clips = {a["id"]: a for a in pool if a.get("kind") == "clip"}
+    # one montage module for images and video clips: ``sources`` picks the ingredient
+    # types (default both, user uploads and found material freely mixed)
+    by_id = {a["id"]: a for a in pool}
+    sources = set(layer.get("sources") or ("image", "clip"))
+    if sources != {"image", "clip"}:
+        ids = [i for i in ids if (i in clips) == ("clip" in sources)]
+        clips = {i: c for i, c in clips.items() if "clip" in sources}
     if clips and not isinstance(layer.get("images"), list):
         ids = clip_order(ids, clips, set(layer.get("avoid", [])), layer.get("prefer_tags"))
     grid = beat_grid(feat)
@@ -497,6 +509,50 @@ def plan_montage(store: JobStore, feat: dict, layer: dict, duration: float) -> d
     trans = float(layer.get("trans", 0.5))
     sections = lyric_sections(store)
     repeats = lyric_repeats(store)
+    # section-aware pacing: chorus (a repeated passage and its source) / verse /
+    # instrumental (sung gaps > 3.5 s, incl. intro/outro). ``section_pace`` scales the
+    # shot length per kind, ``section_motion`` steers clip motion per kind; {} disables.
+    section_spans: list[tuple[float, float, str]] = []
+    prev_end = 0.0
+    for sec in sorted(sections, key=lambda x: x["start"]):
+        if sec["start"] - prev_end > 3.5:
+            section_spans.append((prev_end, sec["start"], "instrumental"))
+        section_spans.append((sec["start"], sec["end"], sec.get("kind") or "verse"))
+        prev_end = max(prev_end, sec["end"])
+    if duration - prev_end > 3.5:
+        section_spans.append((prev_end, duration, "instrumental"))
+    # energy-based chorus upgrade: the hottest sung block is the song's high point
+    # even when its lyrics never repeat verbatim (lyric repeats already marked theirs)
+    verse_idx = [i for i, (_, _, k) in enumerate(section_spans) if k == "verse"]
+    if verse_idx:
+        fps0 = feat["fps"]
+        en = np.asarray(feat["energy"])
+        means = []
+        for i in verse_idx:
+            a, b, _ = section_spans[i]
+            seg = en[int(a * fps0):int(b * fps0)]
+            means.append(float(seg.mean()) if len(seg) else 0.0)
+        threshold = sorted(means)[max(0, int(len(means) * 0.7) - (0 if len(means) > 1 else 1))]
+        for i, m in zip(verse_idx, means):
+            if m >= threshold and m > 0:
+                a, b, _ = section_spans[i]
+                section_spans[i] = (a, b, "chorus")
+    pace = {"chorus": 0.5, "verse": 1.0, "instrumental": 2.0}
+    pace.update(layer.get("section_pace") or {})
+    sec_motion = {"chorus": "high", "instrumental": "low"}
+    sec_motion.update(layer.get("section_motion") or {})
+    # per-section tag affinity (images and clips alike): e.g. {"chorus": ["battle"]}
+    sec_tags = {k: set(v) for k, v in (layer.get("section_tags") or {}).items()}
+    clip_motions = sorted(float(c.get("motion") or 0.01) for c in clips.values())
+    motion_hi = clip_motions[int(len(clip_motions) * 0.7)] if clip_motions else 0.02
+    motion_lo = clip_motions[int(len(clip_motions) * 0.25)] if clip_motions else 0.005
+
+    def section_of(t: float) -> str:
+        for a, b, k in section_spans:
+            if a <= t < b:
+                return k
+        return "verse"
+
     fps = feat["fps"]
     energy = np.asarray(feat["energy"])
     flux = np.asarray(feat["flux"])
@@ -543,15 +599,23 @@ def plan_montage(store: JobStore, feat: dict, layer: dict, duration: float) -> d
         return min(ok, key=lambda i: (counts.get(i, 0), -dur_of(i)))
 
     def take(unused: list[str], s: dict, last: dict) -> str | None:
-        """Images: front to back. Clips: among the next few in order that are long
-        enough, the one whose length fits the shot and whose motion suits the music
-        there, preferring another source than the previous shot. None = no clip is
-        long enough (the shot then repeats a long-enough one, see fallback)."""
+        """Images: front to back, preferring this section's tags. Clips: among the next
+        few in order that are long enough, the one whose length fits the shot and whose
+        motion suits the music there, preferring another source than the previous shot.
+        None = no clip is long enough (the shot then repeats a long-enough one, see fallback)."""
+        sec = section_of(s["t0"])
         if not clips or unused[0] not in clips:
+            want_tags = sec_tags.get(sec) or set()
+            if want_tags:
+                hit = next((i for i in unused[:6] if set(by_id[i].get("tags") or []) & want_tags), None)
+                if hit is not None:
+                    unused.remove(hit)
+                    return hit
             return unused.pop(0)
         need = need_of(s)
         e = float(energy[min(len(energy) - 1, int(s["t0"] * fps))])
-        want = 0.008 + 0.05 * e
+        m = sec_motion.get(sec)
+        want = motion_hi if m == "high" else motion_lo if m == "low" else 0.008 + 0.05 * e
         usable = [cid for cid in unused if long_enough(cid, need)]
         if not usable:
             return None
@@ -564,6 +628,7 @@ def plan_montage(store: JobStore, feat: dict, layer: dict, duration: float) -> d
             fit = 1.0 if c["duration"] >= need else max(0.0, (c["duration"] / need - 0.55) / 0.45)
             match = math.exp(-abs(math.log(max(1e-4, float(c.get("motion") or 0.01)) / want)))
             q = (1.3 * fit + 0.8 * match + 0.5 * clip_quality(c, layer.get("prefer_tags")) - 0.3 * j / 14
+                 + (0.6 if set(c.get("tags") or []) & (sec_tags.get(sec) or set()) else 0.0)
                  - (0.6 if c.get("library_id") and c.get("library_id") == last.get("src") else 0.0))
             if q > best_q:
                 best, best_q = cid, q
@@ -575,7 +640,8 @@ def plan_montage(store: JobStore, feat: dict, layer: dict, duration: float) -> d
         t = 0.0
         while t < duration - min_shot:
             e = float(energy[min(len(energy) - 1, int(t * fps))])
-            n_bars = layer.get("bars", 2) * scale * (0.5 if e > 0.72 else 2.0 if e < 0.28 else 1.0)
+            n_bars = (layer.get("bars", 2) * scale * (0.5 if e > 0.72 else 2.0 if e < 0.28 else 1.0)
+                      * pace.get(section_of(t), 1.0))
             fine = bool(layer.get("beat_cuts")) and n_bars < 1.0  # 卡点 on beats, not only bar starts
             target = min(t + max(0.5 if fine else 1.0, n_bars) * bar_len, t + max_shot)
             nxt = next((f for f in forced if t + min_shot <= f <= target + 0.01), None)
@@ -667,6 +733,7 @@ def plan_montage(store: JobStore, feat: dict, layer: dict, duration: float) -> d
         i0 = int(s["t0"] * fps)
         s["strength"] = round(float(flux[max(0, i0 - 1):i0 + 2].max()) if len(flux) else 0.0, 2)
         s["section_start"] = any(abs(s["t0"] - f) < 0.05 for f in forced)
+        s["section_kind"] = section_of((s["t0"] + s["t1"]) / 2)
         s["energy"] = round(float(energy[min(len(energy) - 1, i0)]), 2)
     new = sum(1 for s in shots if s["why"] == "new")
     need_more = sum(1 for s in shots if s["why"] == "fallback")

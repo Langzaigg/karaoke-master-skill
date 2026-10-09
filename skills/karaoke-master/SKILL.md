@@ -330,10 +330,16 @@ Exported alone as `<name> (混剪).mp4`.
   `--from-video N` (distinct scenes from the source video). `--remove <id|all>`, `--list`,
   `--credits` (put them in the video description and tell the user).
 - What the planner does: cuts land on bar downbeats of the detected beat grid; section starts and
-  repeated passages force a cut; loud parts cut faster, quiet ones slower; every image is used once,
+  repeated passages force a cut; loud parts cut faster, quiet ones slower; on top of that the plan
+  is **section-aware** — a repeated passage (and its source) or the hottest sung block is the
+  chorus and cuts fastest with the most dynamic clips, verses run at normal pace, and instrumental
+  gaps / the intro slow down with the calmest clips (`section_pace` / `section_motion` /
+  `section_tags` tune or disable this). Every image is used once,
   **except** that a repeated lyric passage (e.g. the last chorus) reuses, in order, the images shown
   the first time; if the pool is still too small, the least-used images repeat and the plan says
-  so. Knobs on the layer: `bars`, `min_shot`, `max_shot`, `transitions`, `punch`, `dim`, `fit`,
+  so. One pool feeds the montage: images (user packs, web finds, video stills) and video clips mix
+  freely; `sources: ["image"]` / `["clip"]` restricts it to one kind. Knobs on the layer: `bars`,
+  `min_shot`, `max_shot`, `transitions`, `punch`, `dim`, `fit`,
   `prefer`, `exclude`, `images`, `pins` (recipes.md).
 - Keep montages **smooth** by default: crossfades and slow pans only (`transitions: "auto"`, no `punch`,
   no `flash` layer). Beat zooms / white flashes on still images look like twitching — use the `beat`
