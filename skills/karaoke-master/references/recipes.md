@@ -174,6 +174,7 @@ ground, a `lyrics_band`), put busy motifs above. Presets (`--list-presets`): `st
 | `pins` | force an image onto a moment (a character's solo line, the title drop) |
 | `beat_cuts` | `true`: in loud parts shots may end on any beat, not only on bar starts (faster 卡点) |
 | `avoid` | clip / image ids to use last (`mv-clips --avoid-from <project>` fills it with another song's shots) |
+| | planner: clips from one source play in source order (a backwards jump only happens when nothing else can fill the shot); pins / section tags / a strong motion fit can overrule it |
 | `sources` | ingredient types of the montage: `["image", "clip"]` (default, freely mixed) · `["image"]` images only · `["clip"]` video clips only |
 | `section_pace` | per-section shot-length multiplier — defaults differ by ingredient: video clips `{"chorus": 0.75, "verse": 1.5, "instrumental": 3.0}` (a calm interlude may hold one long clip shot, up to 20 s), images `{"chorus": 0.5, "verse": 1.0, "instrumental": 1.25}` (stills never linger too long). Sections: a repeated passage and its source = chorus, other sung blocks = verse, sung gaps / intro / outro = instrumental; the hottest sung block counts as chorus even without repeated lyrics |
 | `section_motion` | per-section clip-motion preference, e.g. `{"chorus": "high", "instrumental": "low"}` (default): the chorus takes the most dynamic clips, quiet passages the calmest |
