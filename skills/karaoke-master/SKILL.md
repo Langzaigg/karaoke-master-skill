@@ -393,19 +393,13 @@ is busy enough) and adapt it to the song.
      `U1`…) — subtitles, UI pop-ups and fades that appear mid-clip only show up here.
      `--exclude "U5,U8" --mark-checked`, re-plan (`mv --spec` or `--sheet-used` again, which
      only shows the newly used clips) until a round comes back clean.
-   - **Long recordings lie about their content**: a 4-hour "ALTDEUS Longplay" can end in another
-     game or a stream outro. After `--add` of sectioned long videos, spot-check one frame per
-     section (`ffmpeg -ss`) before trusting the pool — exclude whole sections whose content is
-     off-topic, and delete them from the library so sibling projects never import them.
-   - **Trailers carry burned-in marketing**: official trailers / PVs often end in release-date
-     cards, character-name cards or "ON SALE" banners, and some uploads are tutorial reels or
-     carry channel logos throughout. Sample a few frames across the whole video (the end card
-     hides in the last seconds) and exclude those shots — or the whole source when the overlays
-     are everywhere. In-game dialogue subtitles of a visual novel are part of the show; keep
-     those shots unless the user objects, but prefer them last (`avoid`).
-   - **Facecams drift**: a streamer who keeps the camera in the side panel early may move it
-     over the game picture later. A `--crop` that hid it stops working then — when one spotted
-     shot shows a face, drop the whole source rather than playing whack-a-mole per clip.
+   - Footage can lie about its content: a "game longplay" may end in another game or a stream
+     outro, trailers hide release-date / name cards in their last seconds, a streamer's overlay
+     or camera can drift over the game picture mid-video. Spot-check a frame per section
+     (`ffmpeg -ss`) before trusting the pool; exclude the whole off-topic section or source, and
+     delete it from the library so sibling projects never import it. In-game dialogue subtitles
+     of a visual novel are part of the show; keep those shots unless the user objects, but prefer
+     them last (`avoid`).
 5. **Design and plan**: `KM mv <job> --kind montage --preset game_montage`, then a spec of your own
    (theme / notes in Chinese). The planner cuts on bar downbeats (faster in loud parts; layer
    `beat_cuts: true` allows cuts on single beats), fills each shot with an unused clip whose
