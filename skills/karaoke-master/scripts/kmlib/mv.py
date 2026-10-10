@@ -841,6 +841,7 @@ def plan_montage(store: JobStore, feat: dict, layer: dict, duration: float) -> d
             "repeated_sections": sum(1 for s in shots if s["why"] == "repeat"),
             "fallback_repeats": need_more,
             "clips": len(clips),
+            "_seg_clips": {cid: c for cid, c in clips.items() if cid.startswith("seg")},
             "slow_motion": sum(1 for s in shots if (s.get("speed") or 1.0) < 0.999),
             "note": (f"素材不足：仍有 {need_more} 个镜头重复使用素材，建议再补 {need_more} 个以上" if need_more
                      else "")}
@@ -1997,10 +1998,6 @@ def make_renderer(store: JobStore, st: dict, spec: dict, w: int, h: int, feat: d
             layer["_plan"] = plan
             layer["_files"] = {a["id"]: str(pool_d / a["file"]) for a in pool if a.get("file")}
             layer["_clips"] = {a["id"]: a for a in pool if a.get("kind") == "clip"}
-            # continuous takes (``segments``) live only in the plan's virtual clips
-            for s in plan.get("shots", []):
-                if s.get("why") == "segment" and s.get("asset") in plan.get("_seg_clips", {}):
-                    layer["_clips"][s["asset"]] = plan["_seg_clips"][s["asset"]]
             # continuous takes (``segments``) live only in the plan's virtual clips
             for s in plan.get("shots", []):
                 if s.get("why") == "segment" and s.get("asset") in plan.get("_seg_clips", {}):
