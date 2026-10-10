@@ -247,6 +247,14 @@ def cmd_set(args) -> int:
             st.setdefault("agent", {})["waiting_for"] = f"stage{st.get('stage', 1)}"
 
     store.update(apply)
+    if args.stage and args.stage >= 3:
+        # 进入审阅阶段 = Agent 复核结束：收尾阶段二流水线的质检 / 生成工程步骤
+        for x in (store.load().get("progress") or {}).get("steps", []):
+            if x["id"] == "qa" and x["state"] == "running":
+                store.step("qa", state="done",
+                           detail=(x.get("detail") or "").replace("（等待 Agent 复核）", "（Agent 复核完成）"))
+            if x["id"] == "project" and x["state"] not in ("done", "skipped"):
+                store.step("project", state="done", detail="已生成 SUG 打轴工程")
     if args.status:
         store.log(args.status)
     return 0
@@ -673,6 +681,14 @@ def _run_qa(store: JobStore, project, line_scores: dict | None = None) -> dict:
         view = _save_view(store, project, qa)
         summary = {k: sum(1 for q in qa.values() if q["flag"] == k) for k in ("ok", "warn", "bad")}
         store.update(lambda s: s["timing"].update(qa_summary=summary))
+    # 流水线「Agent 质检」步骤随质检结果收尾：无疑似错误即视为复核通过
+    if any(x["id"] == "qa" for x in (store.load().get("progress") or {}).get("steps", [])):
+        if summary["bad"]:
+            store.step("qa", state="running", progress=0.5,
+                       detail=f"正常 {summary['ok']} · 需注意 {summary['warn']} · 疑似错误 {summary['bad']}（等待 Agent 复核）")
+        else:
+            store.step("qa", state="done",
+                       detail=f"正常 {summary['ok']} · 需注意 {summary['warn']} · 无疑似错误")
     return {"summary": summary, "qa": qa, "view": view}
 
 
@@ -787,8 +803,7 @@ def cmd_timing(args) -> int:
                 if res.get("lyrics_offset") is not None else ""))
             store.step("refine", state="done", detail="英文歌按单词时间定时，不做能量修正")
             s = res["summary"]
-            store.step("qa", state="running", progress=0.5,
-                       detail=f"正常 {s['ok']} · 需注意 {s['warn']} · 疑似错误 {s['bad']}（等待 Agent 复核）")
+            store.step("project", state="done", detail="已生成 SUG 打轴工程")
             store.update(lambda st2: st2["timing"].update(sug="timing/project.sug", aligned_at=time.time(),
                                                           method="english"))
             store.set_status("打轴完成，Agent 正在复核", "working")
@@ -886,8 +901,7 @@ def cmd_timing(args) -> int:
         store.step("qa", state="running", detail="逐行质检")
         res = _run_qa(store, project, stats.get("token_scores"))
         s = res["summary"]
-        store.step("qa", state="running", progress=0.5,
-                   detail=f"正常 {s['ok']} · 需注意 {s['warn']} · 疑似错误 {s['bad']}（等待 Agent 复核）")
+        store.step("project", state="done", detail="已生成 SUG 打轴工程")
         store.update(lambda st2: st2["timing"].update(sug="timing/project.sug", aligned_at=time.time(),
                                                       mean_score=stats.get("mean_score")))
         store.set_status("对齐完成，Agent 正在复核", "working")
@@ -1270,6 +1284,31 @@ def _sync_split_stage1(store: JobStore, ops: list[dict]) -> None:
     store.update(upd)
 
 
+def _sync_text_stage1(store: JobStore, project, ops: list[dict]) -> None:
+    """``set_text`` / ``set_ruby`` on the timing project → same change on the stage-1 lyric line."""
+    idxs = [int(o["line"]) for o in ops if o.get("op") in ("set_text", "set_ruby")]
+    if not idxs:
+        return
+    from . import sugbridge
+
+    def upd(st):
+        lines = st["lyrics"]["lines"]
+        for li in idxs:
+            inc = [k for k, l in enumerate(lines) if l.get("include", True) and l["text"].strip()]
+            if li >= len(inc):
+                continue
+            line = lines[inc[li]]
+            s = project.sentences[li]
+            text = s.text if hasattr(s, "text") else "".join(c.char for c in s.characters)
+            if line["text"] != text:
+                line["text"] = text
+                line.pop("words", None)  # word-level anchors index into the old text
+                line.pop("match", None)
+            line["ruby"] = [list(r[:3]) for r in sugbridge.ruby_spans_from_project(sugbridge._OneLine(s))[0]]
+
+    store.update(upd)
+
+
 def cmd_edit(args) -> int:
     from . import sugbridge
 
@@ -1284,6 +1323,7 @@ def cmd_edit(args) -> int:
     log = sugbridge.apply_edits(project, ops)
     sugbridge.save_project(project, store.dir / "timing" / "project.sug")
     _sync_split_stage1(store, ops)
+    _sync_text_stage1(store, project, ops)
     res = _run_qa(store, project)
     for line in log:
         store.log("编辑：" + line)
@@ -1390,6 +1430,16 @@ def cmd_qa(args) -> int:
         flag = {"ok": " ", "warn": "!", "bad": "✗"}.get(q.get("flag"), "?")
         t = f"{line['start']:7.2f}-{line['end']:7.2f}" if line["start"] is not None else "   -   "
         print(f"{line['i'] + 1:>3} {flag} {t} {line['text'][:28]:<28} {'；'.join(q.get('notes', []))}")
+    # 复核结果同步到流水线步骤：无疑似错误则「Agent 质检」完成
+    st = store.load()
+    summ = (st.get("timing") or {}).get("qa_summary")
+    steps = (st.get("progress") or {}).get("steps") or []
+    if summ and any(x["id"] == "qa" and x["state"] != "done" for x in steps):
+        if summ.get("bad"):
+            store.step("qa", state="running", progress=0.5,
+                       detail=f"正常 {summ['ok']} · 需注意 {summ['warn']} · 疑似错误 {summ['bad']}（等待 Agent 复核）")
+        else:
+            store.step("qa", state="done", detail=f"正常 {summ['ok']} · 需注意 {summ['warn']} · 无疑似错误")
     return 0
 
 
@@ -1481,7 +1531,7 @@ def cmd_mv(args) -> int:
 
 def set_background(store: JobStore, background: dict) -> dict:
     """Stage-1 background choice (also writable later with ``style``): source /
-    video / mv / montage / subs. Prepares the design stills the page shows."""
+    video / mv / montage / subs / oped. Prepares the design stills the page shows."""
     from . import mv
 
     bg = {k: v for k, v in (background or {}).items() if v is not None}
@@ -1491,6 +1541,12 @@ def set_background(store: JobStore, background: dict) -> dict:
         if not p.is_file():
             raise SystemExit(f"找不到视频文件：{p}")
         bg["path"] = str(p)
+    if kind == "oped":
+        op = (store.load().get("media") or {}).get("oped") or {}
+        video = op.get("video")
+        p = (store.abs(video) if video and not Path(video).is_absolute() else Path(video)) if video else None
+        if p is None or not p.is_file():
+            raise SystemExit("尚未生成 OPED 拼接背景，请先运行 KM oped <job> --render")
     store.update(lambda s: s.setdefault("options", {}).update(background=bg))
     from .render import BACKGROUND_TYPES
 
@@ -1717,6 +1773,14 @@ def cmd_mv_video(args) -> int:
         store.update(lambda s: s["media"].update(mv_video={"file": str(p), "title": p.stem, "source": "本地文件"}))
         out["use"] = mvvideo.align(store, p)
     _p(out)
+    return 0
+
+
+def cmd_oped(args) -> int:
+    """OP/ED 拼接背景：多段 OP/ED 视频各自波形对齐到歌曲，按添加顺序拼接。"""
+    from . import oped
+
+    _p(oped.main(JobStore(args.job), args))
     return 0
 
 
@@ -1961,11 +2025,13 @@ def cmd_ui_action(args) -> int:
             from . import sugbridge
 
             ops = payload.get("ops", [])
-            _snapshot(store, "平滑走字" if any(o.get("op") == "smooth" for o in ops) else "时间微调")
+            _snapshot(store, "歌词 / 注音修改" if any(o.get("op") in ("set_text", "set_ruby") for o in ops)
+                      else "平滑走字" if any(o.get("op") == "smooth" for o in ops) else "时间微调")
             project = sugbridge.load_project(store.dir / "timing" / "project.sug")
             log = sugbridge.apply_edits(project, _resolve_auto_ops(store, project, ops))
             sugbridge.save_project(project, store.dir / "timing" / "project.sug")
             _sync_split_stage1(store, ops)
+            _sync_text_stage1(store, project, ops)
             _run_qa(store, project)
             for line in log:
                 store.log("手动微调：" + line)
@@ -2114,6 +2180,7 @@ DISPATCH = {
     "hires-source": cmd_hires_source,
     "mv-assets": cmd_mv_assets,
     "mv-video": cmd_mv_video,
+    "oped": cmd_oped,
     "mv-clips": cmd_mv_clips,
     "timing": cmd_timing,
     "realign": cmd_realign,

@@ -231,6 +231,11 @@ Run these in this order; start the slow one first.
    - **MV 视频**（audio projects）— the song's MV downloaded from YouTube / Bilibili with Lin-K
      Lyrics' video downloader, or a local video; only its picture is used, aligned to the song (see
      "MV from the web" below). Typical for "I have the lossless song, use the official MV / anime OP·ED".
+   - **OPED 拼接** — several OP/ED videos of the song (short ver / opening size / long ver …), each
+     waveform-aligned onto the song's timeline and stitched in add order (first added wins on
+     overlaps), neighbouring parts cross-fade, and stretches no source covers are filled with the
+     previous part's last frame (black at the very start). Typical for "动画 OP 的 short ver 开头 +
+     long ver / 另一份 OP 补剩余" (see "OP/ED 拼接背景" below).
    - **AMV** — a themed scene you design for the song (default for audio-only jobs), see
      "AMV design" below.
    - **混剪** — a beat-synced montage of images (found online, the user's image packs, or both;
@@ -282,6 +287,41 @@ own choice). Then `KM mv-video <job> --use "#k"` (or a URL; Bilibili URLs work t
 
 All audio (karaoke MP4, on / off vocal, Hi-Res) still comes from the song file. `--local <path>`
 does the same alignment for a video the user already has.
+
+### OP/ED 拼接背景（oped 模式）
+
+One `mv-video` background is a single video; when the song's OP/ED footage comes in several pieces
+(a short ver covering the opening, a long ver or another OP/ED for the rest, extra footage the user
+supplies), the `oped` command stitches them onto the song's timeline:
+
+1. `KM oped <job> --add <视频路径或URL> --label "…" --credit "…" [--section A-B]` — registers one
+   source (repeatable; **先添加的优先** when segments overlap). Local files are referenced in place,
+   URLs are downloaded (≤1080p) into `media/oped_src/`. `--section A-B`（视频内时间，秒或 m:ss）uses
+   only that part of the source — the covered song interval becomes `[shift+src_start, shift+src_end]`;
+   a source can be added several times with different sections (e.g. the short ver's final passage
+   cut out with `--section 96.7-124.0` and re-placed at the song's end via `--shift`). `--speed X`
+   （缺省 1.0；X<1 = 慢放拉长，如 0.55）stretches a section to fill 间奏等无词空缺 — it wins over the
+   freeze / black gap fill, and the covered interval becomes `shift+src_start +
+   (src_end-src_start)/X`. Every add
+   immediately waveform-aligns the source against the song and prints its shift / confidence /
+   covered song interval. Confidence < 20 % = probably a different song or version → check with
+   the user, or override with `--shift sN=SEC`. When waveform alignment fails outright (OP-size
+   剪辑版 / 不同录音), anchor the sections by where the lyric passages appear instead: ASR both the
+   song and the videos, compare per-line times, and place each section with `--section` + `--shift`.
+2. `KM oped <job> --list` — per segment: id, label, source section, duration, shift, confidence,
+   covered song interval `[max(0, shift+src_start), shift+src_end]`; plus the fade and whether
+   `media/oped_bg.mp4` exists.
+3. `KM oped <job> --render` — stitches `media/oped_bg.mp4` (picture only, song length, output
+   resolution / fps): highest-priority segment at every moment, `xfade` cross-fades between parts
+   (`--fade 秒`, default 0.7), uncovered stretches filled with the previous part's last frame (the
+   beginning stays black), and sets `background: {"type": "oped"}`. Results are cached by a
+   signature of the segments (file + shift + section) + fade + output format; `--force` re-renders.
+   `--remove sN` / `--clear` edit the segment list (re-render afterwards).
+
+Generalization notes: put the complete MV (usually the short ver) **first**; after alignment, its
+tail beyond the song may need a separate cut, and footage the long ver lacks can be covered by
+another video (user-supplied or a second OP/ED) added later to fill the gaps. Low-confidence
+alignments and uncovered intervals are printed by `--list` and stored in `media.oped.notes`.
 
 ### AMV design (static MV for a song without a video)
 
@@ -492,7 +532,10 @@ You run the wait loop and handle `prompt`s:
 
 - Timing: "第 12 行晚了 0.2 秒" → `edit` `[{"op":"shift_lines","lines":[11],"ms":-200}]`;
   "整体提前 0.1 秒" → `shift_all`; "这句" uses `active_line` / `t` from the payload.
-- Readings: `edit` `set_ruby` then `realign --lines N`.
+- Readings: `edit` `set_ruby` then `realign --lines N`. **The page can do text and ruby edits
+  itself**: the ✎ button on each line of the stage-3 table opens an editor for the lyric text and
+  its readings (UtaTen inline syntax `漢字(かな)`); it submits `set_text` / `set_ruby` ops — timing
+  is kept when the text is unchanged, and undo (「↶ 撤销」) covers these edits too.
 - Singers on the page: click line numbers to select (Shift = range; none = the playing line),
   click one or more singers in the bar (several = chorus 「A＆B」, drawn in 拼色), then 「设为…」 or
   press 1–9; a singer's colour dot recolours it, 「＋ 歌手」 adds one. In chat use `KM singers` /
@@ -573,6 +616,7 @@ with the skill venv and loads the exported project.
 | `hires-source JOB [--on F] [--off F …] [--no-align] [--clear]` | stage-1 lossless source → timing audio |
 | `mv JOB [--kind mv\|montage] [--list-presets] [--preset ID] [--spec @f] [--show] [--stills] [--gallery] [--video] [--seconds N]` | AMV / montage designer (alias `spectrum`) |
 | `mv-video JOB [--search Q] [--n N] [--info URL\|#k] [--use URL\|#k] [--local PATH] [--max-height H]` | MV background from YouTube / Bilibili or a local video, aligned to the song |
+| `oped JOB [--add PATH\|URL [--label L] [--credit C] [--section A-B] [--speed X]] … [--shift sN=SEC] [--remove sN] [--clear] [--list] [--render [--fade S] [--force]]` | OP/ED 拼接背景: each source waveform-aligned, stitched in add order with cross-fades, gaps freeze-filled; `--section` uses only part of a source, `--speed` slow-stretches it |
 | `mv-clips JOB [--search Q] [--info URL] [--add URL\|PATH … [--sections a-b,…] [--credit C] [--crop x,y,w,h] [--max-height H]] [--library L] [--from-library] [--min-score S] [--max-clips N] [--sheet] [--sheet-used] [--mark-checked] [--exclude IDS\|#N\|UN] [--tag ID=t] [--avoid-from PROJECT] [--enhance [--only-used] [--ids IDS] [--no-sr] [--no-rife] [--sr-scale N] [--rife-multi N]] [--list] [--credits]` | video-clip montage: footage library → shots in the montage pool; review sheets; AI enhance (RIFE + Real-ESRGAN) for low-quality sources |
 | `mv-assets JOB [--add URL\|IMAGE\|FOLDER\|ZIP …] [--origin user\|web\|video] [--source U] [--credit C] [--tags a,b] [--from-video N] [--remove ID] [--list] [--credits] [--plan]` | montage image pool / cut plan |
 | `previews JOB [--only templates\|effects\|singers]` | engine-rendered galleries |

@@ -213,6 +213,24 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--local", metavar="PATH", help="改用本机视频文件作 MV 背景（同样自动对齐）")
     p.add_argument("--max-height", type=int, default=1080)
 
+    p = sub.add_parser("oped", help="OP/ED 拼接背景：多段 OP/ED 视频各自波形对齐到歌曲时间轴，按添加顺序优先级拼接成整首歌的背景")
+    p.add_argument("job")
+    p.add_argument("--add", action="append", metavar="PATH|URL",
+                   help="添加拼接源（本地路径直接引用，http(s) 网址下载；可多次，先添加的优先）")
+    p.add_argument("--label", action="append", help="与 --add 按出现顺序配对的段名")
+    p.add_argument("--credit", action="append", help="与 --add 按出现顺序配对的署名 / 出处")
+    p.add_argument("--section", action="append", metavar="A-B",
+                   help="与 --add 按出现顺序配对的源区间（视频内时间，秒或 m:ss；缺省 = 整段视频）")
+    p.add_argument("--speed", action="append", metavar="X",
+                   help="与 --add 按出现顺序配对的播放速度（缺省 1.0；<1 = 慢放拉长，如 0.55 铺满间奏空缺）")
+    p.add_argument("--shift", action="append", metavar="sN=SEC", help="手动覆盖某段的对齐偏移（对齐失败时的逃生门）")
+    p.add_argument("--remove", action="append", metavar="sN", help="移除某段")
+    p.add_argument("--clear", action="store_true", help="清空全部拼接段")
+    p.add_argument("--list", action="store_true", help="列出各段的对齐与歌曲时间轴覆盖区间")
+    p.add_argument("--render", action="store_true", help="拼接生成 media/oped_bg.mp4 并设为当前背景")
+    p.add_argument("--fade", type=float, help="段间交叉淡化秒数（默认 0.7）")
+    p.add_argument("--force", action="store_true", help="忽略缓存强制重渲")
+
     p = sub.add_parser("mv-clips", help="视频片段混剪：下载游戏 / 动画素材视频（YouTube·B站 / 本地），切成镜头加入混剪素材池")
     p.add_argument("job")
     p.add_argument("--search", help="搜索 YouTube（PV / 实况 / 过场 / 剪辑）")

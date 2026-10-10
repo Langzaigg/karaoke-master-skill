@@ -393,3 +393,8 @@ canvas { width: 100%; display: block; border-radius: 9px; background: var(--bg-2
   .grid.two, .grid.s2, .grid.s3 { grid-template-columns: 1fr; }
   .brand, .status { min-width: 0; }
 }
+
+/* stage-3 line editor (歌词 / 注音) */
+.ledit { margin: 2px 0 8px 34px; padding: 10px; border: 1px solid var(--line-2); border-radius: 9px; background: var(--bg-2); display: flex; flex-direction: column; gap: 6px; }
+.ledit .row { align-items: center; }
+.ledit .row > span { min-width: 32px; }

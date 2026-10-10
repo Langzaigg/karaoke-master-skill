@@ -19,7 +19,8 @@ milliseconds (`ms`). Several ops can go in one list; checkpoints are kept monoto
 | `split_line` | `line`, `char` (first character of the new line, 0-based) | a timed line wider than the frame (qa 「超出画面宽度」); timing kept, stage-1 line split too |
 | `set_singer` | `lines`, `singer` (SUG singer id or name from `timing/timed.json → singers`), optional `chars: [first, last]` (0-based, inclusive) | duet re-assignment after timing; part of a line (a trio entering mid-line) |
 | `add_singer` | `name`, `color` | a new singer, e.g. 「A＆B」 for parts sung together (also add it to `song.singers` with `set --song` so it gets its colour) |
-| `set_ruby` | `line, ruby: [[start, end, "かな"]]` | fix a reading; then `KM realign <job> --lines i+1` |
+| `set_ruby` | `line, ruby: [[start, end, "かな"]]` or `inline: "漢字(かな)"` (UtaTen inline syntax, plain text must equal the line) | fix a reading; timing is kept when the text is unchanged, otherwise `KM realign <job> --lines i+1` |
+| `set_text` | `line, text` | fix lyric text after timing: equal length → same times; length change → chars before the edit keep their times, the rest spread linearly over the line's old span; ruby spans shift / truncate with the edit (stage-1 line text is synced too) |
 
 Payload of a page `prompt` includes `t` (playhead seconds) and `active_line` (0-based line being
 sung at the playhead) — use them for "这句 / 这里 / 刚才那句".
@@ -40,7 +41,7 @@ sung at the playhead) — use them for "这句 / 这里 / 刚才那句".
 | 两首歌别用同样的镜头 | `mv-clips <job2> --avoid-from <job1>` |
 | 走字不够平滑 / 忽快忽慢 | `edit` `[{"op":"smooth"}]` (strength 0.5, ≤ 80 ms per checkpoint; again for more) |
 | 第 3、5、8 行是合唱 | page: select the line numbers, click both singers, 「设为」; chat: `KM singers`/`set_singer` with a 「A＆B」 singer |
-| 「明日」应该读 あした | `set_ruby` on that line, then `realign` |
+| 「明日」应该读 あした | `set_ruby` on that line（文本没变时时间轴保留，一般无需 realign；页面行表的 ✎ 可直接改） |
 | 第 3–6 行是美雲唱的 | before timing: `lines --singer 3-6=mikumo`; after: `set_singer` with the SUG id |
 | 这句后半是三个人合唱 | `add_singer` (once) + `[{"op":"set_singer","lines":[11],"singer":"A＆B＆C","chars":[2,7]}]` |
 | 按这个字幕 / 歌割り分歌手 | `singers JOB --from parts.ass` (or the パート分け URL) → read `need_map` → re-run with `--map "#ff2125=A" --map "#000000=和声" --map "#ffcc00=-"` |

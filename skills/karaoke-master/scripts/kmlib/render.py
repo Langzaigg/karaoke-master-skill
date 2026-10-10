@@ -129,7 +129,7 @@ def video_frame(path: Path, t: float, w: int, h: int, cache_dir: Path | None = N
 
 BACKGROUND_TYPES = {
     "source": "原视频", "video": "视频", "mv": "AMV", "montage": "图片混剪", "subs": "仅 KTV 字幕",
-    "color": "纯色", "image": "图片",
+    "oped": "OPED 拼接", "color": "纯色", "image": "图片",
 }
 
 
@@ -161,6 +161,18 @@ def background_spec(store: JobStore, st: dict) -> dict:
         return {"kind": "color", "color": "#101426", "pending_design": dk}
     if kind == "subs":
         return {"kind": "color", "color": bg.get("color") or "#000000", "subs": True}
+    if kind == "oped":
+        op = (st.get("media") or {}).get("oped") or {}
+        video = op.get("video")
+        if video:
+            p = Path(video)
+            p = p if p.is_absolute() else store.abs(video)
+            if p.is_file():
+                return {"kind": "video", "path": str(p), "external": True}
+        still = op.get("still")
+        if still and store.abs(still).is_file():
+            return {"kind": "image", "path": str(store.abs(still))}
+        return {"kind": "color", "color": "#101426"}
     if kind == "image" and bg.get("path"):
         p = Path(bg["path"])
         return {"kind": "image", "path": str(p if p.is_absolute() else store.abs(bg["path"]))}

@@ -304,7 +304,7 @@ function renderStage1() {
   memo("lyrics", JSON.stringify([j.lyrics, d.lines, d.singers.map((s) => [s.id, s.name, s.color])]), renderLyrics);
   memo("galleries", JSON.stringify([j.previews, d.options.template, d.options.effect]), renderGalleries);
   memo("singers", JSON.stringify([d.singers, (j.previews || {}).singers, d.lines]), renderSingers);
-  memo("output", JSON.stringify([d.options, j.media.design_still, j.media.hires, j.media.mv_video,
+  memo("output", JSON.stringify([d.options, j.media.design_still, j.media.hires, j.media.mv_video, j.media.oped,
     (j.previews || {}).mv_video_candidates]), renderOutput);
   memo("mv", JSON.stringify([d.options.background, (j.previews || {}).designs, (j.previews || {}).design_gallery,
     (j.previews || {}).mv_catalog, (j.previews || {}).montage, (j.previews || {}).mv_assets, (j.options || {}).montage_source,
@@ -349,8 +349,15 @@ function drawWaves() {
 }
 
 function prepCanvas(cv) {
-  const r = cv.getBoundingClientRect(); const dpr = window.devicePixelRatio || 1;
-  const w = Math.max(10, Math.round(r.width * dpr)), h = Math.max(10, Math.round(cv.height === 150 ? 120 * dpr : (+cv.getAttribute("height")) * dpr));
+  const dpr = window.devicePixelRatio || 1;
+  // 设计高度（CSS px）只在首次记录：位图高度 = 设计高度 × dpr，若每次从已写回的
+  // height 属性再乘 dpr，高倍屏上每次重绘画布都会变高一次（页面被无限拉长）。
+  if (!cv.dataset.cssh) {
+    cv.dataset.cssh = cv.getAttribute("height") || Math.round(cv.getBoundingClientRect().height) || 120;
+    cv.style.height = cv.dataset.cssh + "px";
+  }
+  const r = cv.getBoundingClientRect();
+  const w = Math.max(10, Math.round(r.width * dpr)), h = Math.max(10, Math.round(+cv.dataset.cssh * dpr));
   if (cv.width !== w || cv.height !== h) { cv.width = w; cv.height = h; }
   const ctx = cv.getContext("2d"); ctx.setTransform(1, 0, 0, 1, 0, 0);
   return { ctx, w, h, dpr };
@@ -566,7 +573,7 @@ function renderSingers() {
   });
 }
 
-const BG_TYPES = [["video", "视频"], ["mv", "AMV"], ["montage", "混剪"], ["subs", "仅 KTV 字幕"]];
+const BG_TYPES = [["video", "视频"], ["mv", "AMV"], ["montage", "混剪"], ["oped", "OPED 拼接"], ["subs", "仅 KTV 字幕"]];
 function bgKind(t) { return t === "spectrum" ? "mv" : t === "source" ? "video" : t; }
 function setBackground(bg, notify = true) {
   const o = S.d1.options; o.background = bg; touch("options");
@@ -588,6 +595,7 @@ function renderOutput() {
   const extra = $("#bg-extra"); extra.innerHTML = "";
   if (cur === "video" && hasVideo) extra.append(el("span", { class: "muted small" }, "使用素材原视频作为背景"));
   if (cur === "video" && !hasVideo) extra.append(renderMvVideo());
+  if (cur === "oped") extra.append(renderOped());
   if (cur === "mv") extra.append(el("span", { class: "muted small" }, "Agent 按歌曲主题设计画面 + 频谱 / 音频可视化，见下方「AMV 设计」"));
   if (cur === "montage") extra.append(el("span", { class: "muted small" }, "图片或游戏 / 动画视频片段按节拍剪辑（网上搜集 / 你的图包 / 混合），见下方「混剪设计」"));
   if (cur === "subs") {
@@ -598,7 +606,7 @@ function renderOutput() {
       el("input", { type: "color", value: col, onchange: (ev) => setBackground({ type: "subs", color: ev.target.value }) }),
       el("span", { class: "muted small" }, "只有字幕；建议同时勾选「透明字幕层 MOV」，可直接叠加到剪辑软件"));
   }
-  if (!["video", "mv", "montage", "subs"].includes(cur)) extra.append(el("span", { class: "muted small" }, `当前背景：${o.background.type === "image" ? "图片" : "纯色"}（由 Agent 设置）`));
+  if (!["video", "mv", "montage", "oped", "subs"].includes(cur)) extra.append(el("span", { class: "muted small" }, `当前背景：${o.background.type === "image" ? "图片" : "纯色"}（由 Agent 设置）`));
   $("#out-kind-mv").hidden = !(cur === "mv" || cur === "montage");
   $("#out-kind-mv-label").textContent = cur === "montage" ? "混剪（无字幕版）" : "AMV（无字幕版）";
   $("#out-res").value = o.resolution;
@@ -649,6 +657,29 @@ function renderMvVideo() {
     const p = loc.value.trim().replace(/^"|"$/g, ""); if (!p) return; act("mv_video_local", { path: p }); toast("正在对齐本机视频…");
   } }, "使用本机视频")));
   box.append(el("span", { class: "muted small" }, "只取视频画面，音频始终用你的歌曲文件（无损时 on / off vocal 都是无损源）。"));
+  return box;
+}
+
+// "OPED 拼接" background: segments added and stitched by the agent (KM oped); the page only shows them
+function renderOped() {
+  const j = S.job; const op = (j.media || {}).oped || null;
+  const box = el("div", { class: "mvv" });
+  if (!op || !(op.segments || []).length) {
+    box.append(el("span", { class: "muted small" }, "由 agent 用 KM oped 命令添加并拼接 OP/ED 视频"));
+    return box;
+  }
+  const D = (j.media.source || {}).duration || 0;
+  const card = el("div", { class: "mvv-cur" },
+    op.still ? el("img", { src: fileUrl(op.still) }) : null,
+    el("div", {}, el("b", {}, op.video ? "OP/ED 拼接背景已生成" : "尚未拼接"),
+      ...op.segments.map((s) => {
+        const a = Math.max(0, s.shift || 0), b = Math.min(D, (s.shift || 0) + (s.duration || 0));
+        const conf = s.confidence === null || s.confidence === undefined ? "手动偏移" : `置信 ${Math.round(s.confidence * 100)}%`;
+        const shift = s.shift === null || s.shift === undefined ? "未对齐" : `偏移 ${s.shift >= 0 ? "+" : ""}${(+s.shift).toFixed(2)}s`;
+        return el("div", { class: "muted small" }, `${s.id} · ${s.label || s.file}：覆盖 ${fmtT(a)}–${fmtT(b)} · ${shift} · ${conf}`);
+      }),
+      (op.notes || []).length ? el("div", { class: "small mvv-notes" + (op.notes.some((n) => n.startsWith("⚠")) ? " warn" : "") }, op.notes.join("\n")) : null));
+  box.append(card);
   return box;
 }
 
@@ -899,7 +930,8 @@ function renderStage3() {
   let src = m.player;
   const dv = dk && ((m.designs || {})[dk] || {}).video;
   if (dv && bk !== "subs") src = dv;
-  const poster = dk && (m.design_still || {})[dk] ? (m.design_still || {})[dk] : m.thumb;
+  const poster = bk === "oped" && (m.oped || {}).still ? m.oped.still
+    : dk && (m.design_still || {})[dk] ? (m.design_still || {})[dk] : m.thumb;
   if (vid.dataset.src !== src) { vid.dataset.src = src; vid.src = fileUrl(src); vid.poster = poster && bk !== "subs" ? fileUrl(poster) : ""; }
   vid.style.opacity = bk === "subs" ? 0 : 1;
   $("#s3-player").style.background = bk === "subs" ? (bg.color || "#000") : "";
@@ -981,12 +1013,54 @@ function renderLineTable() {
           el("span", { class: "flag " + flag }), `${fmtT(l.start)} → ${fmtT(l.end)}`,
           q.notes && q.notes.length ? el("span", { class: "qa" }, q.notes.join("；")) : null,
           el("span", { class: "nudge" }, nud(-100), nud(-20), nud(20), nud(100),
-            el("button", { title: "让本行从当前播放位置开始", onclick: (ev) => { ev.stopPropagation(); const t = $("#s3-video").currentTime; editLines([{ op: "shift_lines", lines: [i], ms: Math.round((t - l.start) * 1000) }]); } }, "⇤ 播放头")))));
+            el("button", { title: "让本行从当前播放位置开始", onclick: (ev) => { ev.stopPropagation(); const t = $("#s3-video").currentTime; editLines([{ op: "shift_lines", lines: [i], ms: Math.round((t - l.start) * 1000) }]); } }, "⇤ 播放头"),
+            el("button", { title: "修改歌词文本 / 注音", onclick: (ev) => { ev.stopPropagation(); S.editing = S.editing === i ? null : i; S.editDraft = null; renderLineTable(); } }, "✎")))));
     row.addEventListener("click", () => { const vid = $("#s3-video"); vid.currentTime = Math.max(0, l.start - 1.2); vid.play(); });
     box.append(row);
+    if (S.editing === i) box.append(lineEditor(l, i));
   });
   box.scrollTop = keepScroll;
   if (S.activeLine !== null && S.activeLine !== undefined) { const a = $(`.lrow[data-i="${S.activeLine}"]`); if (a) a.classList.add("active"); }
+}
+
+// UtaTen-style inline ruby for the line editor: 「漢字(かんじ)」 per word (chars joined by ・link)
+function inlineRubyOf(l) {
+  let out = "", gt = "", gr = "";
+  for (const c of l.chars) {
+    gt += c.c; gr += (c.r || []).join("").replace(/\^pause\^/g, "");
+    if (!c.link) { out += gr && gr !== gt ? `${gt}(${gr})` : gt; gt = ""; gr = ""; }
+  }
+  return out;
+}
+
+function lineEditor(l, i) {
+  const origRuby = inlineRubyOf(l);
+  const iniRuby = (S.editDraft && S.editDraft.i === i) ? S.editDraft.ruby : origRuby;
+  const iniText = (S.editDraft && S.editDraft.i === i) ? S.editDraft.text : l.text;
+  const txt = el("input", { type: "text", class: "grow", value: iniText, oninput: () => { S.editDraft = { i, text: txt.value, ruby: rub.value }; } });
+  const rub = el("input", { type: "text", class: "grow mono", value: iniRuby, placeholder: "漢字(かんじ)", oninput: () => { S.editDraft = { i, text: txt.value, ruby: rub.value }; } });
+  const close = () => { S.editing = null; S.editDraft = null; renderLineTable(); };
+  return el("div", { class: "ledit", onclick: (ev) => ev.stopPropagation() },
+    el("div", { class: "row gap" }, el("span", { class: "muted small" }, "歌词"), txt),
+    el("div", { class: "row gap" }, el("span", { class: "muted small" }, "注音"), rub),
+    el("div", { class: "muted small" }, "注音语法：在要注音的字后面跟 (かな)，如 違(たが)う；留空 = 清除该行全部注音"),
+    el("div", { class: "row gap" },
+      el("button", { class: "btn primary sm", onclick: async (ev) => {
+        ev.stopPropagation();
+        const ops = [];
+        const t = txt.value;
+        if (t !== l.text) ops.push({ op: "set_text", line: i, text: t });
+        const r = rub.value.trim();
+        if (r !== origRuby.trim()) {
+          if (!r && origRuby.trim() && !confirm("注音框留空：清除该行的全部注音？")) return;
+          ops.push({ op: "set_ruby", line: i, inline: r });
+        }
+        if (!ops.length) { toast("没有改动"); close(); return; }
+        await act("edit_timing", { ops });
+        close();
+        toast(`已更新第 ${i + 1} 行`);
+      } }, "保存"),
+      el("button", { class: "btn ghost sm", onclick: (ev) => { ev.stopPropagation(); close(); } }, "取消")));
 }
 function rubyFromChars(chars, paint = null) {
   const esc = (s) => s.replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[c]);

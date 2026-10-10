@@ -621,6 +621,76 @@ def auto_release_ms(project, line: int, char: int, rms_hop) -> int | None:
 
 
 # --------------------------------------------------------------------------- edits
+def _copy_char_timing(dst, src) -> None:
+    """Timing of one character onto its rebuilt counterpart (same text position)."""
+    ts = list(src.timestamps or [])
+    if len(ts) > dst.check_count:
+        dst.set_check_count(len(ts))  # keep every checkpoint of the old timing
+    while 0 < len(ts) < dst.check_count:
+        ts.append(ts[-1])
+    dst.timestamps = ts
+    dst.is_sentence_end = src.is_sentence_end
+    dst.sentence_end_ts = src.sentence_end_ts
+    dst.linked_to_next = src.linked_to_next
+    if dst.has_ruby and dst.ruby is not None:
+        dst.ruby.timestamps = list(ts)
+
+
+def _port_line_timing(old, new, prefix: int = 0) -> None:
+    """Port a rebuilt line's timing from the old one: characters before the edit
+    point keep their times; the rest are spread linearly (by check count, in
+    order) over the old tail's [first timestamp, line end]."""
+    oc, nc = old.characters, new.characters
+    if len(oc) == len(nc):  # equal length: every character keeps its time
+        for d, s in zip(nc, oc):
+            _copy_char_timing(d, s)
+        return
+    for k in range(min(prefix, len(oc), len(nc))):
+        _copy_char_timing(nc[k], oc[k])
+    tail_old = oc[prefix:]
+    starts = [t for ch in tail_old for t in (ch.timestamps or [])]
+    ends = [ch.sentence_end_ts for ch in oc if ch.is_sentence_end and ch.sentence_end_ts is not None]
+    if not starts and not ends:  # untimed line: nothing to port
+        return
+    if starts:
+        t0 = min(starts)
+    else:  # pure append at the line end: spread the added characters after the old end
+        t0 = max([t for ch in oc for t in (ch.timestamps or [])] + ends)
+    t1 = max(starts + ends)
+    if t1 <= t0:
+        t1 = t0 + 500
+    slots = [ch for ch in nc[prefix:] if ch.char.strip()]
+    total_w = sum(max(1, ch.check_count) for ch in slots)
+    acc = 0
+    for ch in slots:
+        w = max(1, ch.check_count)
+        a = t0 + (t1 - t0) * acc / total_w
+        acc += w
+        b = t0 + (t1 - t0) * acc / total_w
+        n = max(1, ch.check_count)
+        ch.timestamps = [int(a + (b - a) * (j + 1) / n) for j in range(n)]
+        ch.is_sentence_end = False
+        ch.sentence_end_ts = None
+    for ch in reversed(nc):
+        if ch.char.strip():
+            ch.is_sentence_end = True
+            ch.sentence_end_ts = t1
+            break
+
+
+def _rebuild_line(project, li: int, text: str, ruby: list) -> None:
+    """Replace sentence ``li`` with a fresh build of ``text`` + ``ruby`` spans,
+    keeping its id and singer."""
+    old = project.sentences[li]
+    rebuilt = build_project([{"text": text, "ruby": ruby}]).sentences[0]
+    rebuilt.singer_id = old.singer_id
+    for ch in rebuilt.characters:
+        ch.singer_id = old.singer_id
+    rebuilt.id = old.id
+    project.sentences[li] = rebuilt
+    return old, rebuilt
+
+
 def apply_edits(project, edits: list[dict]) -> list[str]:
     """Deterministic timing edits used by the review page and by the agent.
 
@@ -631,7 +701,10 @@ def apply_edits(project, edits: list[dict]) -> list[str]:
     set_line_end {line, t} · set_pause {line, char, t|None} ·
     set_singer {lines, singer (id or name), chars?: [first, last]} (chars = 0-based, inclusive:
     only that part of the line, e.g. a trio entering mid-line) · add_singer {name, color} ·
-    set_ruby {line, ruby: [[start, end, reading]]} (rebuilds the line; realign it afterwards)
+    set_text {line, text} (equal length → same times; length change → chars before the edit keep
+    theirs, the rest spread linearly over the line's old span; ruby spans shift / truncate) ·
+    set_ruby {line, ruby: [[start, end, reading]] | inline: "漢字(かな)"} (rebuilds the line;
+    timing is kept when the text is unchanged, otherwise realign it afterwards)
     """
     log = []
     sentences = project.sentences
@@ -729,22 +802,71 @@ def apply_edits(project, edits: list[dict]) -> list[str]:
                 ch.is_sentence_end = True
                 ch.sentence_end_ts = int(float(ed["t"]) * 1000)
                 log.append(f"第 {int(ed['line']) + 1} 行第 {int(ed['char']) + 1} 字在 {ed['t']} 秒收音（换气）")
-        elif op == "set_ruby":
-            # replace readings of one line, then the line must be re-aligned
+        elif op == "set_text":
+            # replace a line's text (review page ✎). Equal length → same times;
+            # otherwise chars before the edit keep theirs, the rest are spread
+            # linearly over the old tail; ruby spans shift / truncate with the edit
             li = int(ed["line"])
             old = sentences[li]
+            old_text = old.text if hasattr(old, "text") else "".join(c.char for c in old.characters)
+            new_text = str(ed["text"])
+            if not new_text.strip():
+                raise ValueError(f"第 {li + 1} 行文本不能为空")
+            if new_text == old_text:
+                continue
             spans = ruby_spans_from_project(_OneLine(old))[0]
-            new = [[int(a), int(b), str(r)] for a, b, r in ed["ruby"]]
+            p = 0
+            while p < min(len(old_text), len(new_text)) and old_text[p] == new_text[p]:
+                p += 1
+            s = 0
+            while s < min(len(old_text) - p, len(new_text) - p) \
+                    and old_text[len(old_text) - 1 - s] == new_text[len(new_text) - 1 - s]:
+                s += 1
+            old_end = len(old_text) - s  # edited region: old [p, old_end) → new [p, len(new_text)-s)
+            delta = len(new_text) - len(old_text)
+            kept = [[a, b, r] for a, b, r in spans if b < p] + \
+                   [[a + delta, b + delta, r] for a, b, r in spans if a >= old_end]
+            kept.sort(key=lambda x: x[0])
+            dropped = len(spans) - len(kept)
+            old_s, rebuilt = _rebuild_line(project, li, new_text, kept)
+            _port_line_timing(old_s, rebuilt, prefix=p)
+            note = f"第 {li + 1} 行文本已更新（时间轴保留）" if delta == 0 else \
+                f"第 {li + 1} 行文本已更新：第 {p + 1} 字起的时间按行内原范围重排（建议复查该行）"
+            if dropped:
+                note += f"；{dropped} 处注音与改动区域重叠被移除"
+            log.append(note)
+        elif op == "set_ruby":
+            # replace readings of one line; timing is kept when the text is unchanged
+            li = int(ed["line"])
+            old = sentences[li]
+            old_text = old.text if hasattr(old, "text") else "".join(c.char for c in old.characters)
+            if "inline" in ed:  # UtaTen-style 漢字(かな) from the review page
+                raw = str(ed.get("inline") or "").strip()
+                if not raw:
+                    new = []
+                else:
+                    from . import lyrics as _lyrics
+
+                    parsed = _lyrics.parse_user_lyrics(raw)
+                    if len(parsed) != 1 or parsed[0]["text"] != old_text:
+                        raise ValueError(f"第 {li + 1} 行注音与歌词文本不一致："
+                                         f"解析得到「{parsed[0]['text'] if parsed else raw}」")
+                    new = [[int(a), int(b), str(r)] for a, b, r in parsed[0]["ruby"]]
+            else:
+                new = [[int(a), int(b), str(r)] for a, b, r in ed["ruby"]]
+            spans = ruby_spans_from_project(_OneLine(old))[0]
             for a, b, _r in new:
                 spans = [sp for sp in spans if sp[1] < a or sp[0] > b]
             spans = sorted(spans + [sp for sp in new if sp[2]], key=lambda x: x[0])
-            rebuilt = build_project([{"text": old.text, "ruby": spans}]).sentences[0]
-            rebuilt.singer_id = old.singer_id
-            for ch in rebuilt.characters:
-                ch.singer_id = old.singer_id
-            rebuilt.id = old.id
-            sentences[li] = rebuilt
-            log.append(f"第 {li + 1} 行读音已更新（需运行 realign --lines {li + 1}）")
+            old_s, rebuilt = _rebuild_line(project, li, old_text, spans)
+            same_shape = len(rebuilt.characters) == len(old_s.characters) and \
+                all(d.char == s.char for d, s in zip(rebuilt.characters, old_s.characters))
+            if same_shape:
+                for d, s2 in zip(rebuilt.characters, old_s.characters):
+                    _copy_char_timing(d, s2)
+                log.append(f"第 {li + 1} 行读音已更新（时间轴保留）")
+            else:
+                log.append(f"第 {li + 1} 行读音已更新（需运行 realign --lines {li + 1}）")
         elif op == "add_singer":
             if not any(sg.name == ed["name"] for sg in project.singers):
                 from strange_uta_game.backend.domain.entities import Singer

@@ -502,6 +502,18 @@ def plan_montage(store: JobStore, feat: dict, layer: dict, duration: float) -> d
         clips = {i: c for i, c in clips.items() if "clip" in sources}
     if clips and not isinstance(layer.get("images"), list):
         ids = clip_order(ids, clips, set(layer.get("avoid", [])), layer.get("prefer_tags"))
+    # ``segments``: [{"t0","t1","src","in"}] — a passage played as one continuous take from
+    # that library file / absolute path (an official PV section matching the song section);
+    # no cuts inside, the take starts `in` seconds into the source
+    segs: list[dict] = []
+    for i, seg in enumerate(layer.get("segments") or []):
+        cid = f"seg{i}"
+        t0, t1 = float(seg["t0"]), float(seg["t1"])
+        clips[cid] = {"id": cid, "kind": "clip", "src": seg["src"], "t_in": float(seg.get("in") or 0),
+                      "t_out": float(seg.get("in") or 0) + (t1 - t0), "duration": t1 - t0,
+                      "library_id": None, "motion": 0.02, "score": 1.0, "crop": None,
+                      "name": f"整段 {seg.get('name') or seg['src']}"}
+        segs.append({"t0": t0, "t1": t1, "cid": cid})
     grid = beat_grid(feat)
     bars = [b for b in grid["bars"] if b < duration - 0.5]
     beats = [b for b in grid["beats"] if b < duration - 0.5]
@@ -697,6 +709,12 @@ def plan_montage(store: JobStore, feat: dict, layer: dict, duration: float) -> d
         cuts = [0.0]
         t = 0.0
         while t < duration - min_shot:
+            # a ``segments`` take: no cuts inside, the next cut is its end
+            inside = next((sg for sg in segs if sg["t0"] <= t < sg["t1"]), None)
+            if inside is not None:
+                cuts.append(round(inside["t1"], 3))
+                t = inside["t1"]
+                continue
             e = float(energy[min(len(energy) - 1, int(t * fps))])
             n_bars = (layer.get("bars", 2) * scale * (0.5 if e > 0.72 else 2.0 if e < 0.28 else 1.0)
                       * pace.get(section_of(t), 1.0))
@@ -710,6 +728,10 @@ def plan_montage(store: JobStore, feat: dict, layer: dict, duration: float) -> d
                 # shot falls through to an image — video leads even over the intro
                 clip_cap = max((float(c.get("duration") or 0) for c in clips.values()), default=0.0) / 0.72
                 max_here = max(max_shot, min(span_end - t, 20.0, clip_cap))
+            # a segment start also caps the current shot (the take begins exactly there)
+            seg_next = next((sg["t0"] for sg in segs if t < sg["t0"]), None)
+            if seg_next is not None:
+                max_here = min(max_here, seg_next - t)
             target = min(t + max(0.5 if fine else 1.0, n_bars) * bar_len, t + max_here)
             nxt = next((f for f in forced if t + min_shot <= f <= target + 0.01), None)
             if nxt is None:
@@ -754,6 +776,9 @@ def plan_montage(store: JobStore, feat: dict, layer: dict, duration: float) -> d
                 s["asset"], s["why"] = pin["asset"], "pin"
                 if pin["asset"] in unused:
                     unused.remove(pin["asset"])
+            elif segs and (sg := next((g for g in segs if s["t0"] >= g["t0"] - 0.01 and s["t1"] <= g["t1"] + 0.01), None)):
+                # a continuous take from an official PV (segments): the whole passage is one shot
+                s["asset"], s["why"] = sg["cid"], "segment"
             elif prev is not None and long_enough(prev["asset"], need_of(s)):
                 s["asset"], s["why"] = prev["asset"], "repeat"
             else:  # (a repeat whose first-occurrence clip is too short for this longer shot takes a new one)
@@ -1972,6 +1997,14 @@ def make_renderer(store: JobStore, st: dict, spec: dict, w: int, h: int, feat: d
             layer["_plan"] = plan
             layer["_files"] = {a["id"]: str(pool_d / a["file"]) for a in pool if a.get("file")}
             layer["_clips"] = {a["id"]: a for a in pool if a.get("kind") == "clip"}
+            # continuous takes (``segments``) live only in the plan's virtual clips
+            for s in plan.get("shots", []):
+                if s.get("why") == "segment" and s.get("asset") in plan.get("_seg_clips", {}):
+                    layer["_clips"][s["asset"]] = plan["_seg_clips"][s["asset"]]
+            # continuous takes (``segments``) live only in the plan's virtual clips
+            for s in plan.get("shots", []):
+                if s.get("why") == "segment" and s.get("asset") in plan.get("_seg_clips", {}):
+                    layer["_clips"][s["asset"]] = plan["_seg_clips"][s["asset"]]
             layer["_fps"] = fps
             if publish:  # gallery thumbnails of other presets must not replace the project's plan
                 publish_montage_plan(store, plan)
