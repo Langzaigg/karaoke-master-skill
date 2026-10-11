@@ -255,7 +255,7 @@ def line_readings(project) -> list[dict]:
         segs: list[dict] = []
         group_text, group_ruby = "", ""
         for ch in sentence.characters:
-            r = "".join(_ruby_parts(ch)).replace("^pause^", "")
+            r = "".join(_ruby_parts(ch)).replace("^pause^", "").replace("^", "")
             group_text += ch.char
             group_ruby += r
             if not ch.linked_to_next:
@@ -285,7 +285,7 @@ def ruby_spans_from_project(project) -> list[list[list]]:
         i = 0
         while i < len(chars):
             ch = chars[i]
-            reading = "".join(_ruby_parts(ch)).replace("^pause^", "")
+            reading = "".join(_ruby_parts(ch)).replace("^pause^", "").replace("^", "")
             if not reading or reading == ch.char or _is_kana(ch.char):
                 i += 1
                 continue
@@ -294,7 +294,7 @@ def ruby_spans_from_project(project) -> list[list[list]]:
                 nxt = chars[end + 1]
                 if _is_kana(nxt.char) or nxt.char.isspace():
                     break
-                reading += "".join(_ruby_parts(nxt)).replace("^pause^", "")
+                reading += "".join(_ruby_parts(nxt)).replace("^pause^", "").replace("^", "")
                 end += 1
             spans.append([i, end, reading])
             i = end + 1

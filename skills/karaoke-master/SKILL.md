@@ -506,6 +506,10 @@ is busy enough) and adapt it to the song.
      (release at the last voiced moment), or realign with a tighter window. A long held **final**
      note is normal.
    - "语速过快" (squeezed) / "与下一行重叠" → realign that line together with its neighbour.
+   - "读音待确认"（读音 QA：注音与 ASR 在该词时间窗实际听到的发音不一致）→ 逐条核对，**以音源
+     实际演唱为准**——当て字 / 原唱与翻唱读法不同很常见（实例：違う→たがう、瞬間（とき）、
+     理由（わけ）；UtaTen 的注音可能来自翻唱版）。确认错了用 `edit` `set_ruby` 改后
+     `realign --lines N`；确认无误（ASR 听错）就直接放过，不用改。
    - **English lines in a Japanese song** (refrains, English verses): the aligner is built for
      Japanese and QA flags miss its mistakes — a word stretched over an interlude, the next words
      squeezed into a few frames, neighbours shifted. Compare every English line and its neighbours

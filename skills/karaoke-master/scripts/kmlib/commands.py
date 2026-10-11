@@ -664,11 +664,21 @@ def _run_qa(store: JobStore, project, line_scores: dict | None = None) -> dict:
     scores = {int(k): v for k, v in old.items()}
     scores.update(line_scores or {})
     qa = analysis.timing_qa(view, vocal_rms=rms, asr_matches=asr_m, line_scores=scores)
+    # 读音审查：注音与 ASR 实际听到的读音不符 → warn（当て字/原唱与翻唱读法不同）
+    if str(st["song"].get("language") or "ja").lower().startswith("ja"):
+        try:
+            for li, rnotes in analysis.ruby_qa(st, view, store.dir / "analysis" / "asr.json").items():
+                if li in qa:
+                    qa[li] = {**qa[li], "flag": "warn" if qa[li]["flag"] == "ok" else qa[li]["flag"],
+                              "notes": list(qa[li]["notes"]) + rnotes}
+        except Exception as exc:  # 读音审查失败不阻断 QA
+            store.log(f"读音审查跳过：{exc}")
     view = _save_view(store, project, qa)
     summary = {"ok": sum(1 for q in qa.values() if q["flag"] == "ok"),
                "warn": sum(1 for q in qa.values() if q["flag"] == "warn"),
                "bad": sum(1 for q in qa.values() if q["flag"] == "bad")}
-    store.update(lambda s: s["timing"].update(qa_summary=summary, line_scores={str(k): v for k, v in scores.items()},
+    store.update(lambda s: s["timing"].update(qa_summary=summary,
+                                              line_scores={str(k): v for k, v in scores.items()},
                                               view="timing/timed.json", revision=int(time.time())))
     from . import weblayout
 
@@ -1304,7 +1314,15 @@ def _sync_text_stage1(store: JobStore, project, ops: list[dict]) -> None:
                 line["text"] = text
                 line.pop("words", None)  # word-level anchors index into the old text
                 line.pop("match", None)
-            line["ruby"] = [list(r[:3]) for r in sugbridge.ruby_spans_from_project(sugbridge._OneLine(s))[0]]
+            spans = [list(r[:3]) for r in sugbridge.ruby_spans_from_project(sugbridge._OneLine(s))[0]]
+            merged: list[list] = []  # 相邻逐字 span 合并回词级（[12,12,'と'],[13,13,'き'] → [12,13,'とき']）
+            for sp in spans:
+                if merged and sp[0] == merged[-1][1] + 1:
+                    merged[-1][1] = sp[1]
+                    merged[-1][2] += sp[2]
+                else:
+                    merged.append(sp)
+            line["ruby"] = merged
 
     store.update(upd)
 

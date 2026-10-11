@@ -470,3 +470,106 @@ def timing_qa(view: dict, *, vocal_rms: tuple[np.ndarray, float] | None = None,
         flag = ("ok", "warn", "bad")[level]
         qa[i] = {"flag": flag, "notes": notes, "score": None if score is None else round(float(score), 3)}
     return qa
+
+
+# ------------------------------------------------------------------ ruby QA
+def _norm_kana(s: str) -> str:
+    """ひらがな归一化比较用：カタカナ→ひらがな，づ→ず，ぢ→じ。"""
+    out = []
+    for ch in s:
+        o = ord(ch)
+        if 0x30A1 <= o <= 0x30F6:
+            ch = chr(o - 0x60)
+        out.append(ch)
+    return "".join(out).replace("づ", "ず").replace("ぢ", "じ")
+
+
+def _is_hira(ch: str) -> bool:
+    return bool(ch) and all(0x3040 <= ord(c) <= 0x309F or c in "ー" for c in ch)
+
+
+def ruby_qa(st: dict, view: dict, asr_path: Path) -> dict[int, list[str]]:
+    """读音审查：行号 → warn notes。
+
+    对每个注音词（阶段一歌词的 ruby span + 送り仮名），按其时间窗收集 ASR 听到的词，
+    转成假名后与注音比较；相似度 < 0.5 时给出「读音待确认」warn。当て字 / 原唱与翻唱
+    读法不同（違う→たがう、瞬間→とき、理由→わけ）都靠这个信号浮出来。不用分析器的
+    默认读音做基准（脱离上下文误读多：描く→かく、霞ませる→かすみませる）。
+    """
+    import difflib
+    import json as _json
+
+    from .paths import ensure_repo_on_path
+
+    ensure_repo_on_path()
+    from strange_uta_game.backend.infrastructure.parsers.ruby_analyzer import create_analyzer
+
+    analyzer = create_analyzer()
+    words: list[tuple[float, float, str]] = []
+    try:
+        data = _json.loads(Path(asr_path).read_text(encoding="utf-8"))
+        for seg in data.get("segments", []):
+            for w in seg.get("words") or []:
+                t = str(w["w"])
+                latin = sum(1 for c in t if ord(c) < 0x2E80)  # 间奏幻觉的英文词不参与
+                if float(w.get("p") or 1.0) >= 0.3 and latin * 2 <= len(t):
+                    words.append((float(w["s"]), float(w["e"]), t))
+    except Exception:
+        pass
+    if not words:
+        return {}
+
+    def best_sim(a: str, b: str) -> float:
+        """a（注音）对 b（ASR，可能带前后文）的最佳局部相似度。"""
+        if not a or not b:
+            return 0.0
+        if len(b) <= len(a):
+            return difflib.SequenceMatcher(None, a, b).ratio()
+        return max(difflib.SequenceMatcher(None, a, b[k:k + len(a)]).ratio()
+                   for k in range(len(b) - len(a) + 1))
+
+    stage1 = [l for l in st["lyrics"]["lines"] if l.get("include", True) and l["text"].strip()]
+    heard: dict[int, list[str]] = {}
+    for line, src_line in zip(view["lines"], stage1):
+        if line["text"] != src_line["text"] or line.get("start") is None:
+            continue
+        i, text, chars = line["i"], line["text"], line["chars"]
+        spans = [list(r[:3]) for r in src_line.get("ruby") or []]
+        merged: list[list] = []  # 相邻逐字 span 合并回词级再比
+        for sp in spans:
+            if merged and sp[0] == merged[-1][1] + 1:
+                merged[-1][1] = sp[1]
+                merged[-1][2] += sp[2]
+            else:
+                merged.append(sp)
+        for s, e, reading in merged:
+            reading = str(reading).replace("^pause^", "").replace("^", "")  # ^ = 停顿检查点标记
+            if not reading:
+                continue
+            ee = e + 1  # 送り仮名一起比（違う→たがう 的 う）
+            while ee < len(text) and _is_hira(text[ee]):
+                ee += 1
+            surface, full = text[s:ee], reading + text[e + 1:ee]
+            full_n = _norm_kana(full)
+            if len(full_n) < 2:
+                continue
+            timed = [c for c in chars[s:ee] if c.get("s") is not None and c.get("e") is not None]
+            if not timed:
+                continue
+            # Whisper 词起点在唱段上常早 1 秒以上（SKILL.md 已知偏差），窗口向前放宽
+            t0 = timed[0]["s"] - 1.5
+            t1 = min(timed[-1]["e"] + 0.5, timed[0]["s"] + 4.0)  # 长音尾巴会把间奏幻觉卷进来
+            got = "".join(w for a, b, w in words if a < t1 and b > t0)
+            if not got:
+                continue
+            if surface in got:
+                continue  # ASR 写出了同一个词：读音无分歧
+            try:
+                heard_n = _norm_kana(analyzer.get_reading(got))
+            except Exception:
+                continue
+            if not heard_n:
+                continue
+            if best_sim(full_n, heard_n) < 0.5:
+                heard.setdefault(i, []).append(f"读音待确认：「{surface}」注音 {full}，ASR 听到「{got}」")
+    return heard
