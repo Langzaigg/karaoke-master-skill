@@ -12,3 +12,7 @@ output/
 
 # agent session state
 .claude/
+
+# SUG 运行时本机文件（勿提交）
+krok_helper/lyrics_timing/config.json
+krok_helper/lyrics_timing/dictionary.json
