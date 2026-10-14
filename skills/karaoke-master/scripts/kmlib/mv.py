@@ -37,6 +37,7 @@ from pathlib import Path
 import numpy as np
 
 from .jobstore import JobStore, read_json, write_json
+from . import media
 from .media import load_mono
 from .paths import ffmpeg_exe, hidden_subprocess_kwargs
 
@@ -1944,11 +1945,9 @@ def _output_wh(st: dict) -> tuple[int, int]:
 
 
 def _output_fps(st: dict, spec: dict) -> int:
-    """The spec may pin a frame rate; otherwise follow the karaoke output (30 / 60)."""
-    if spec.get("fps"):
-        return int(spec["fps"])
-    fps = int((st.get("options") or {}).get("fps") or 60)
-    return fps if fps in (30, 60) else 60
+    """The spec may pin a frame rate (a number, or ``"source"`` for the source
+    video's own rate); otherwise follow the karaoke output setting."""
+    return media.resolve_fps(st, spec.get("fps"))
 
 
 def publish_montage_plan(store: JobStore, plan: dict | None) -> None:

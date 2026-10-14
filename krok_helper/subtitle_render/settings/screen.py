@@ -28,7 +28,7 @@ class ScreenSettings:
     fps: int = 60
 
 
-SCREEN_FPS_OPTIONS = (60, 120)
+SCREEN_FPS_OPTIONS = (24, 25, 30, 50, 60, 120)
 SCREEN_PRESETS: tuple[ScreenPreset, ...] = (
     ScreenPreset("hd_540", "HD 540", 960, 540),
     ScreenPreset("hdv_720", "HDV 720", 1280, 720),

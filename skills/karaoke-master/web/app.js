@@ -19,6 +19,13 @@ const el = (tag, attrs = {}, ...kids) => {
   return n;
 };
 const fileUrl = (rel) => (rel ? "/files/" + rel.split("?")[0].split("/").map(encodeURIComponent).join("/") + (rel.includes("?") ? "?" + rel.split("?")[1] : "") : "");
+// 输出帧率：24 / 30 / 60，或 "source" 跟随素材帧率
+const fpsChoice = (v) => {
+  const s = String(v === null || v === undefined ? "" : v).trim();
+  if (s === "source" || s === "跟随素材") return "source";
+  return [24, 30, 60].includes(+s) ? +s : 60;
+};
+const sourceFps = (j) => { const f = +(((j || {}).media || {}).source || {}).fps; return f > 0 ? Math.round(f) : 0; };
 const fmtT = (t, cs = true) => {
   if (t === null || t === undefined || isNaN(t)) return "—";
   const m = Math.floor(t / 60), s = t - m * 60;
@@ -242,7 +249,7 @@ function ensureDraft1() {
       effect: opts.effect || "classic",
       background: opts.background || { type: hasVideo ? "source" : "mv" },
       resolution: opts.resolution || "1920x1080",
-      fps: [30, 60].includes(+opts.fps) ? +opts.fps : 60,
+      fps: fpsChoice(opts.fps),
       cast_delay_ms: opts.cast_delay_ms === undefined || opts.cast_delay_ms === null ? 200 : +opts.cast_delay_ms,
       outputs: opts.outputs || ["mp4", "sug", "yurika", "onoff"],
       ruby: opts.ruby !== false,
@@ -611,8 +618,16 @@ function renderOutput() {
   $("#out-kind-mv-label").textContent = cur === "montage" ? "混剪（无字幕版）" : "AMV（无字幕版）";
   $("#out-res").value = o.resolution;
   if (document.activeElement !== $("#out-cast")) $("#out-cast").value = o.cast_delay_ms === undefined ? 200 : o.cast_delay_ms;
-  if (![30, 60].includes(+o.fps)) o.fps = 60;
-  $$("#out-fps button").forEach((b) => b.classList.toggle("on", +b.dataset.v === +o.fps));
+  if (o.fps === undefined || o.fps === null) o.fps = 60;
+  o.fps = fpsChoice(o.fps);
+  const sfps = sourceFps(j);
+  const srcBtn = $('#out-fps button[data-v="source"]');
+  if (srcBtn) {
+    srcBtn.textContent = sfps ? `跟随素材（${sfps}）` : "跟随素材";
+    srcBtn.disabled = !sfps;
+    srcBtn.title = sfps ? `跟随素材帧率：输出 ${sfps} fps（源视频帧率）` : "素材没有视频轨，无法跟随素材帧率";
+  }
+  $$("#out-fps button").forEach((b) => b.classList.toggle("on", String(b.dataset.v) === String(o.fps)));
   $$("#out-kinds input").forEach((c) => (c.checked = o.outputs.includes(c.value)));
   $("#opt-ruby").checked = o.ruby; $("#opt-title").checked = o.title;
   const hr = o.hires || {};
@@ -834,7 +849,7 @@ function bindStage1() {
     const v = Math.round(+ev.target.value || 0); S.d1.options.cast_delay_ms = v; touch("options");
     act("set_option", { cast_delay_ms: v });
   });
-  $$("#out-fps button").forEach((b) => b.addEventListener("click", () => { S.d1.options.fps = +b.dataset.v; touch("options"); renderOutput(); }));
+  $$("#out-fps button").forEach((b) => b.addEventListener("click", () => { S.d1.options.fps = b.dataset.v === "source" ? "source" : +b.dataset.v; touch("options"); renderOutput(); }));
   $$("#out-kinds input").forEach((c) => c.addEventListener("change", () => { S.d1.options.outputs = $$("#out-kinds input").filter((x) => x.checked).map((x) => x.value); touch("options"); renderOutput(); }));
   const regHires = () => {
     const h = S.d1.options.hires || {};

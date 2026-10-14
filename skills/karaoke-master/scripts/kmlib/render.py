@@ -16,7 +16,7 @@ import time
 from dataclasses import replace
 from pathlib import Path
 
-from . import styles
+from . import media, styles
 from .jobstore import JobStore, read_json, write_json
 from .paths import ensure_repo_on_path, ffmpeg_exe, hidden_subprocess_kwargs
 
@@ -385,8 +385,7 @@ def _output_size(st: dict) -> tuple[int, int, int]:
     opts = st.get("options", {})
     res = str(opts.get("resolution") or "1920x1080")
     w, h = (int(x) for x in res.lower().split("x"))
-    fps = int(opts.get("fps") or 60)
-    return w, h, fps if fps in (30, 60, 120) else 60
+    return w, h, media.resolve_fps(st)
 
 
 def _first_line_start(store: JobStore) -> float | None:
@@ -544,7 +543,7 @@ def _save_yurika(store, st, path: Path, sug: Path, track, extras, style, bg, w, 
         video_path=Path(bg["path"]) if bg["kind"] == "video" else None,
         background_source=source, audio_path=audio, style=style, role_names=roles)
     preset = "hdtv_1080" if (w, h) == (1920, 1080) else "custom"
-    fps = fps if fps in (60, 120) else 60  # Lin-K Lyrics step 5 offers 60 / 120 fps only
+    fps = max(int(fps), 1)  # Lin-K Lyrics keeps a custom frame rate as-is (24 / 30 / 60 …)
     data = doc.to_project_data(
         screen=screen_settings_to_dict(ScreenSettings(preset_key=preset, width=w, height=h, fps=fps)),
         selected_scheme_key="global",

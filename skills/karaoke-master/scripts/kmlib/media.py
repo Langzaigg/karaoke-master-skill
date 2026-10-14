@@ -56,6 +56,49 @@ def probe(path: str | Path) -> dict:
     return info
 
 
+FPS_OPTIONS = (24, 25, 30, 50, 60, 120)
+"""Common output frame rates offered in the UI."""
+
+SOURCE_FPS_ALIASES = {"source", "auto", "material", "素材", "跟随素材", "维持素材"}
+"""``options.fps`` values meaning "follow the source video's own frame rate"."""
+
+_NTSC_SNAP = ((23.976, 24), (29.97, 30), (59.94, 60), (119.88, 120))
+
+
+def normalize_fps(value: object) -> int:
+    """Frame rate as a positive int; 23.976 → 24, 29.97 → 30 …; 0 when unusable."""
+    try:
+        fps = float(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return 0
+    if fps <= 0:
+        return 0
+    for rate, snapped in _NTSC_SNAP:
+        if abs(fps - rate) < 0.02:
+            return snapped
+    return max(1, int(round(fps)))
+
+
+def source_fps(st: dict) -> int:
+    """Frame rate of the job's source video (0 for audio-only / unknown)."""
+    src = (st.get("media") or {}).get("source") or {}
+    return normalize_fps(src.get("fps"))
+
+
+def resolve_fps(st: dict, value: object = None, default: int = 60) -> int:
+    """Output frame rate for a job.
+
+    ``value`` (default: ``options.fps``) may be a number, ``"source"`` /
+    ``"跟随素材"`` to echo the source video, or empty — anything unusable falls
+    back to ``default``.
+    """
+    if value is None:
+        value = (st.get("options") or {}).get("fps")
+    if isinstance(value, str) and value.strip().lower() in SOURCE_FPS_ALIASES:
+        return source_fps(st) or default
+    return normalize_fps(value) or default
+
+
 def extract_audio(src: str | Path, dst: str | Path, *, sample_rate: int = 44100, channels: int = 2,
                   start: float | None = None, end: float | None = None) -> Path:
     dst = Path(dst)

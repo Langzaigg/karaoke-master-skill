@@ -8,7 +8,7 @@ description: >-
   ② auto-time the lyrics (vocal separation + ASR + forced alignment) with live progress;
   ③ review in the browser, apply natural-language tweaks, export .sug / .yurika / LRC / MP4,
   on vocal + off vocal versions, a transparent subtitle MOV and optional Hi-Res (lossless FLAC)
-  MKVs, at 30 or 60 fps. Backgrounds: the source video, the song's MV downloaded from YouTube /
+  MKVs, at 24 / 30 / 60 fps (or the source video's own rate). Backgrounds: the source video, the song's MV downloaded from YouTube /
   Bilibili and aligned to the user's audio, an AMV designed for the song (themed scene
   + audio visualizers), a beat-synced montage of images (found online, the user's image packs, or
   both) or of video clips cut from a game's / anime's footage on YouTube (trailers, gameplay
@@ -245,7 +245,7 @@ Run these in this order; start the slow one first.
    - **仅 KTV 字幕** — subtitles only on a plain colour (`{"type": "subs", "color": "#000000"}`;
      green `#00B140` for keying); pair it with export kind `alpha` = a transparent ProRes 4444 MOV
      to lay over the user's own footage in an editor.
-   - Frame rate **30 or 60 fps** (`options.fps`), resolution, export kinds.
+   - Frame rate **24 / 30 / 60 fps** (`options.fps`), or `"source"` to follow the material's own frame rate; resolution, export kinds.
    Set it with `KM style <job> @patch.json` → `{"background": {...}}` (validates a video path and
    prepares AMV / montage stills) or let the user click in the page (`set_background` action).
 7. **Previews:** AMV / montage jobs first make the design (below) so previews have a background.
@@ -549,12 +549,12 @@ You run the wait loop and handle `prompt`s:
   starts, pauses and held notes, moves no checkpoint more than `max_ms` (80). Every manual change
   on the page can be undone (「↶ 撤销」 / ui-action `undo`, last 30 changes).
 - Look: `KM style <job> @patch.json` with `template`, `effect`, `overrides` (Style fields),
-  `singer_styles {id: {color}}`, `ruby`, `title`, `background`, `resolution`, `fps` (30 / 60).
+  `singer_styles {id: {color}}`, `ruby`, `title`, `background`, `resolution`, `fps` (24 / 30 / 60, or `"source"` = the material's own rate).
   English lyrics: `"ruby": false` and a Latin font in `overrides` — `font_family_latin`
   (`Segoe UI`, `Georgia` …; the templates' Japanese fonts are wide for Latin), `space_width_percent`
   ≈ 28, `font_size_px` 86–88 so a 34-letter line fits; check the longest line with `KM frame`.
 - Export: `KM export <job> --kinds sug,yurika,mp4,onoff` (the default; add `lrc`, `alpha`, `mv`,
-  `hires`). MP4 ≈ 1–1.5× song length on 8 CPU cores, at the chosen 30 / 60 fps. `--clip 25` first
+  `hires`). MP4 ≈ 1–1.5× song length on 8 CPU cores, at the chosen frame rate. `--clip 25` first
   renders a 25-second trial `<name> (preview).mp4` (and `(透明字幕 preview).mov` with `alpha`) —
   offer it before a long full render (the page has "试看 25 秒").
 - `alpha` = `<name> (透明字幕).mov`: subtitles only, ProRes 4444 with alpha + PCM audio, for PR / AE /

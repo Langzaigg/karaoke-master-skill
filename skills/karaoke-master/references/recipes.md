@@ -89,7 +89,7 @@ Colours per state live in the template; for a one-off colour change prefer switc
 `singer_styles`. `cast_delay_ms` (投屏延迟, default 200) is an export option. Background types: `source` (the job's video), `video` (`path`: another local
 video, picture only), `mv` (the AMV design; audio-only default — `spectrum` is an old alias),
 `montage` (the montage design: images and / or video clips), `subs` (subtitles only, `color`), plus `color` and `image`
-(`path` relative to the job, e.g. an upload). `fps`: 30 or 60.
+(`path` relative to the job, e.g. an upload). `fps`: 24 / 30 / 60, or `"source"` to follow the material's own frame rate.
 
 ## QA flags (`KM qa`)
 
@@ -110,7 +110,7 @@ Two designs per job: the AMV (`render/mv_spec.json`) and the image montage
 (`render/montage_spec.json`); a spec with a `montage` layer is saved as the montage design. Write
 one with `KM mv <job> --spec @spec.json` (`--kind` to force), print it with `KM mv <job> --show
 [--kind montage]`. A spec with only `"preset"` (+ `theme`/`notes`/`palette`) is completed from that
-preset. Without `fps` the background renders at the output frame rate (30 / 60).
+preset. Without `fps` the background renders at the output frame rate (24 / 30 / 60 / source).
 
 ```json
 {"preset": "starry_prayer", "theme": "祈愿 · 星空 · 生命", "notes": "歌词围绕祈祷与生命……",

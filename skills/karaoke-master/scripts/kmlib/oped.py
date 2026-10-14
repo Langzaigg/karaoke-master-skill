@@ -20,6 +20,7 @@ import time
 from pathlib import Path
 
 from .jobstore import JobStore
+from . import media
 from .paths import ffmpeg_exe, hidden_subprocess_kwargs
 
 DEFAULT_FADE = 0.7
@@ -311,7 +312,7 @@ def render(store: JobStore, *, force: bool = False) -> dict:
     duration = _song_duration(st)
     fade = _fade(st)
     w, h = (int(x) for x in str((st.get("options") or {}).get("resolution") or "1920x1080").lower().split("x"))
-    fps = int((st.get("options") or {}).get("fps") or 60)
+    fps = media.resolve_fps(st)
     sig = _sig(segments, fade, w, h, fps, duration)
     out = store.path("media", "oped_bg.mp4")
     if not force and _state(st).get("sig") == sig and out.is_file():

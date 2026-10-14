@@ -144,7 +144,7 @@ def align(store: JobStore, video: Path, *, progress=None) -> dict:
     notes.append(f"MV 画面对齐：{shift:+.2f} 秒（置信 {info_['confidence']:.0%}）")
     w, h = (int(x) for x in str((st.get("options") or {}).get("resolution") or "1920x1080").lower().split("x"))
     vinfo = media.probe(video)
-    fps = min(60.0, float(vinfo.get("fps") or 30.0))
+    fps = min(60.0, float(media.resolve_fps(st)), float(vinfo.get("fps") or 30.0))
     out = store.path("media", "mv_bg.mp4")
     cmd = [ffmpeg_exe(), "-y", "-v", "error"]
     if shift < 0:
