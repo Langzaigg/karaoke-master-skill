@@ -1075,6 +1075,10 @@ def _english_timing(store: JobStore, st: dict, project, idx: list[int], args) ->
     trusted = n_pairs >= 8 and agree >= 0.4
     if verb and (asr_words or stored) and not trusted:
         verb = {}  # the word-level lyrics do not line up with this audio (another version): don't use them
+    # Search windows. Computed in one pass, but a line's lower bound prefers the
+    # PREVIOUS line's NEW end when that line is re-timed in the same run: with a
+    # stale window a repeated phrase can match a later occurrence, and the error
+    # then propagates to every following line of the batch.
     wins = {}
     for li in idx:
         if args.window:
@@ -1093,8 +1097,26 @@ def _english_timing(store: JobStore, st: dict, project, idx: list[int], args) ->
         else:
             prev = lines[li - 1] if li > 0 else None
             nxt = lines[li + 1] if li + 1 < n else None
-            a = (prev["start"] if prev and prev["start"] is not None else (lines[li]["start"] or 4.0) - 4.0) - 1.0
-            b = (nxt["end"] if nxt and nxt["end"] else (lines[li]["end"] or a) + 6.0) + 1.0
+            # Anchor the window on the LYRIC source time, not on the current timing.
+            # With a repeated phrase the current timing may sit on the wrong
+            # occurrence, and a window derived from it makes every following line
+            # inherit that error - a whole batch drifts. The lyric anchor is fixed,
+            # so each line is searched where its text is actually sung.
+            def _anchor(j):
+                if j is None or not (0 <= j < len(st_lines)):
+                    return None
+                m = (st_lines[j].get("match") or {}) if len(st_lines) == n else {}
+                return m.get("est") if m.get("est") is not None else lines[j]["start"]
+            pa, na = _anchor(li - 1), _anchor(li + 1)
+            here = lines[li]["start"]
+            base_a = pa if pa is not None else ((here or 4.0) - 4.0)
+            # never reach back past the line before it, never past the next one
+            a = base_a - 1.0
+            if here is not None:
+                a = min(a, here + 1.0)
+            b = (na if na is not None else ((nxt["end"] if nxt and nxt["end"] else None)
+                                            or (lines[li]["end"] or a) + 6.0)) + 1.0
+            b = max(b, a + 1.5)
         wins[li] = (max(0.0, a), b)
     if asr_words is None:
         merged: list[list[float]] = []
@@ -1145,9 +1167,27 @@ def _english_timing(store: JobStore, st: dict, project, idx: list[int], args) ->
             cand = [w for w in cand if w["s"] >= floor]
         sm = SequenceMatcher(None, [w for _, w in words], [w["n"] for w in cand], autojunk=False)
         hit = {}
+        taken = set()
         for x, y, size in sm.get_matching_blocks():
             for k in range(size):
                 hit[x + k] = cand[y + k]
+                taken.add(y + k)
+        # A recognizer often drops or alters a syllable in a sung word ("become" ->
+        # "be", "come" -> "Come"), which leaves the remaining words of that line with
+        # no time and freezes the wipe for seconds. Accept a near match when one side
+        # is a prefix of the other, which covers those sung-word variants without
+        # inventing matches between unrelated words.
+        for i, (_cs, w) in enumerate(words):
+            if i in hit or not w:
+                continue
+            for j, c in enumerate(cand):
+                if j in taken:
+                    continue
+                b_ = c["n"]
+                if b_ and (w.startswith(b_) or b_.startswith(w)):
+                    hit[i] = c
+                    taken.add(j)
+                    break
 
         def piece(c: int):
             return next((w for w in verb.get(li, []) if w[0] <= c <= w[1]), None)
@@ -1173,14 +1213,26 @@ def _english_timing(store: JobStore, st: dict, project, idx: list[int], args) ->
                 # its starts and lengths are karaoke timing; the recognizer's word boundaries
                 # are contiguous and pull a line's first word back into the previous held note
                 s0 = v0[2] + off
-                times.append((s0, max(s0 + 0.08, v_end(v0, v1, 0.35))))
+                e_lyric = v_end(v0, v1, 0.35)
+                e0 = max(s0 + 0.08, e_lyric)
+                if k in hit:
+                    # the recognizer heard this word end: keep the shorter of the two,
+                    # a lyric word length can far exceed what is actually sung
+                    e0 = max(s0 + 0.08, min(e0, max(hit[k]["e"], s0 + 0.08)))
+                times.append((s0, e0))
                 used["lyrics"] += 1
             elif k in hit:
                 s0, e0 = hit[k]["s"], hit[k]["e"]
                 used["asr"] += 1
                 if v0 is not None and len(v0) > 3 and abs(v0[2] + off - s0) <= 0.3:
-                    e0 = max(s0 + 0.08, v_end(v0, v1, 0.35))  # karaoke word length from the lyric source
-                    used["lyric_ends"] += 1
+                    # The lyric source's word LENGTH is unreliable: a held or melisma
+                    # syllable is written far longer than it is sung, and taking it as
+                    # the word end drags the wipe seconds past the vocal. Use it only
+                    # to refine a recognizer end that is already close.
+                    e_lyric = v_end(v0, v1, 0.35)
+                    if abs(e_lyric - e0) <= 0.45:
+                        e0 = max(s0 + 0.08, e_lyric)
+                        used["lyric_ends"] += 1
                 times.append((s0, e0))
             elif v0 is not None:
                 s0 = v0[2] + off
@@ -1238,18 +1290,13 @@ def _english_timing(store: JobStore, st: dict, project, idx: list[int], args) ->
             if ch.is_sentence_end:
                 ops.append({"op": "set_pause", "line": li, "char": ci, "t": None})
         for j, ((chars, _w), (s0, e0)) in enumerate(zip(words, times)):
-            # A character holds exactly `check_count` checkpoints (1 by default), so a
-            # multi-glyph word can only light one glyph per word: the wipe jumps from
-            # word to word. Give the first glyph of a multi-glyph word the whole span,
-            # split evenly over its glyphs, so the wipe sweeps through the word.
-            head = sent_chars[chars[0]]
-            need = len(chars) if len(chars) > 1 else 1
-            if head.check_count < need:
-                ops.append({"op": "set_check_count", "line": li, "char": chars[0], "count": need})
-            cps = [(chars[0], c) for c in range(need)]
-            for k, (ci, c) in enumerate(cps):
-                ops.append({"op": "set_char", "line": li, "char": ci, "cp": c,
-                            "t": round(s0 + (e0 - s0) * k / max(1, len(cps)), 3)})
+            # The renderer lights one glyph per timestamp: a multi-glyph word whose
+            # glyphs share a single timestamp wipes as a jump, and giving the whole
+            # span to the head glyph strands the rest of the word. Give every glyph
+            # of the word its own slice of the word's time instead.
+            span = max(1, len(chars))
+            for k, ci in enumerate(chars):
+                sent_chars[ci].timestamps = [int(round((s0 + (e0 - s0) * k / span) * 1000))]
             if j + 1 < len(times) and times[j + 1][0] - e0 > 0.35:  # a rest before the next word
                 ops.append({"op": "set_pause", "line": li, "char": chars[-1], "t": round(e0 + 0.05, 3)})
         ops.append({"op": "set_line_end", "line": li, "t": round(times[-1][1] + 0.1, 3)})

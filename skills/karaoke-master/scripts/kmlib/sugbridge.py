@@ -758,6 +758,10 @@ def apply_edits(project, edits: list[dict]) -> list[str]:
             ch = sentences[int(ed["line"])].characters[int(ed["char"])]
             cp = int(ed.get("cp", 0))
             ms = int(float(ed["t"]) * 1000)
+            if cp >= ch.check_count:
+                # writing past a character's capacity silently fails deep in the
+                # domain layer; grow it here so callers can just write checkpoints
+                ch.set_check_count(cp + 1, force=True, ruby_split_mode="direct")
             if cp < len(ch.timestamps):
                 ch.timestamps[cp] = ms
             else:
