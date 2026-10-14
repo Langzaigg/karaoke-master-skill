@@ -128,7 +128,7 @@ def video_frame(path: Path, t: float, w: int, h: int, cache_dir: Path | None = N
 
 
 BACKGROUND_TYPES = {
-    "source": "原视频", "video": "视频", "mv": "AMV", "montage": "图片混剪", "subs": "仅 KTV 字幕",
+    "source": "原视频", "video": "视频", "mv": "可视化", "montage": "混剪", "subs": "仅 KTV 字幕",
     "oped": "OPED 拼接", "color": "纯色", "image": "图片",
 }
 
@@ -136,7 +136,16 @@ BACKGROUND_TYPES = {
 def background_spec(store: JobStore, st: dict) -> dict:
     """Effective background: {"kind": video|image|color, "path"?, "color"?} plus
     ``design`` (a rendered AMV / montage video), ``pending_design`` (not rendered
-    yet: its still stands in) or ``subs`` (subtitles only on a plain colour)."""
+    yet: its still stands in) or ``subs`` (subtitles only on a plain colour).
+
+    With ``options.background.visualize`` on, a 视频 / OPED / 图片 background gets the
+    乐曲可视化 composited on as one extra layer (see ``_visualize_background``); design
+    backgrounds carry their own visualisation layers instead."""
+    out = _base_background(store, st)
+    return _apply_visualize_bg(store, st, out)
+
+
+def _base_background(store: JobStore, st: dict) -> dict:
     opts = st.get("options", {})
     bg = dict(opts.get("background") or {})
     has_video = st["media"].get("source", {}).get("has_video")
@@ -183,6 +192,108 @@ def background_spec(store: JobStore, st: dict) -> dict:
         p = Path(bg["path"])
         return {"kind": "image", "path": str(p if p.is_absolute() else store.abs(bg["path"]))}
     return {"kind": "color", "color": bg.get("color") or "#0E1022"}
+
+
+# ------------------------------------------------- visualiser as an extra layer
+# ``options.background.visualize``: the 乐曲可视化 is an independent layer over whatever
+# background plays. How the background is prepared under it follows the material's own
+# quality (``options.background.visualize_mode``: auto / overlay / dim / blur).
+VISUALIZE_MODES = {"overlay": "直接叠加", "dim": "背景变淡", "blur": "模糊毛玻璃"}
+
+
+def resolve_visualize_mode(bg: dict, h: int, fps: int) -> str:
+    """overlay / dim / blur for this background. ``auto`` reads the material: the closer
+    it is to the output spec, the less it needs hiding under the visualiser."""
+    mode = str(bg.get("visualize_mode") or "auto").lower()
+    if mode in VISUALIZE_MODES:
+        return mode
+    try:
+        info = media.probe(bg["path"]) if bg.get("path") else {}
+    except Exception:
+        return "dim"
+    hh = float(info.get("height") or 0)
+    if not hh:
+        return "dim"
+    hr = min(1.0, hh / max(1, h))
+    fr = min(1.0, float(info.get("fps") or 0) / max(1, fps)) if info.get("fps") else 1.0
+    score = hr * (0.9 + 0.1 * fr)
+    return "overlay" if score >= 0.93 else ("dim" if score >= 0.55 else "blur")
+
+
+def _apply_visualize_bg(store: JobStore, st: dict, out: dict) -> dict:
+    bg = dict((st.get("options") or {}).get("background") or {})
+    if not bg.get("visualize") or out.get("design") or out.get("pending_design") or out.get("subs"):
+        return out
+    if out.get("kind") not in ("video", "image") or not out.get("path"):
+        return out
+    try:
+        return _visualize_background(store, st, out, bg.get("visualize_mode"))
+    except Exception as exc:  # a failed overlay must never take the export down
+        store.log(f"可视化叠加失败，改用未叠加的背景：{exc}")
+        return out
+
+
+def _visualize_background(store: JobStore, st: dict, bg: dict, want_mode: str | None = None) -> dict:
+    """Composite the visualiser onto a video / image background (cached).
+
+    One ffmpeg pass per song: prepare the background per the treatment, then screen-blend
+    the overlay (rendered once on black — black contributes nothing). The result is a
+    plain background file, so nothing downstream needs to know about the visualiser.
+    """
+    import hashlib
+
+    from . import mv
+
+    w, h, _ = _output_size(st)
+    fps = media.resolve_fps(st)
+    # the treatment the user picked lives in ``options.background``, not in the effective dict
+    probe = {**bg, "visualize_mode": want_mode} if want_mode else bg
+    mode = resolve_visualize_mode(probe, h, fps)
+    src = Path(bg["path"])
+    # The prepared file plays from 0, so a start offset has to be consumed here ("start
+    # N s in" is how a title card is skipped without re-encoding the material).
+    off = float(bg.get("offset") or 0.0) if bg["kind"] == "video" else 0.0
+    plain = {k: v for k, v in bg.items() if k != "offset"}
+    overlay = store.path("render", "visual_overlay.mp4")
+    mv.render_overlay(store, st, overlay)      # cached on its own (spec / size / fps / audio)
+    try:
+        ostamp = f"{overlay.stat().st_mtime_ns}:{overlay.stat().st_size}"
+    except OSError:
+        ostamp = "0"
+    try:
+        stamp = f"{src.stat().st_mtime_ns}:{src.stat().st_size}"
+    except OSError:
+        stamp = "0"
+    sig = hashlib.sha1(f"{src}|{stamp}|{mode}|{w}x{h}@{fps}|{off:.3f}|{ostamp}".encode()).hexdigest()[:16]
+    dst = store.path("render", f"bg_vis_{mode}.mp4")
+    meta = dst.with_suffix(".mp4.sig")
+    if dst.is_file() and meta.is_file():
+        try:
+            if meta.read_text(encoding="utf-8").strip() == sig:
+                return {**plain, "path": str(dst), "visualize_mode": mode}
+        except OSError:
+            pass
+
+    treat = {"overlay": "null", "dim": "eq=brightness=-0.10:saturation=0.90",
+             "blur": "boxblur=18:2,eq=brightness=-0.06:saturation=0.95"}[mode]
+    if bg["kind"] == "image":
+        base = (f"[0:v]scale={w}:{h}:force_original_aspect_ratio=increase,crop={w}:{h},{treat},format=gbrp[t]")
+        inputs = ["-loop", "1", "-framerate", str(fps), "-i", str(src)]
+    else:
+        base = f"[0:v]{treat},format=gbrp[t]"
+        inputs = (["-ss", f"{off:.3f}"] if off else []) + ["-i", str(src)]
+    # Screen-blend in RGB: in YUV the chroma planes would be screened too and a black
+    # overlay would tint the whole frame instead of adding nothing.
+    cmd = [ffmpeg_exe(), "-v", "error", "-y", *inputs, "-i", str(overlay), "-filter_complex",
+           f"{base};[1:v]format=gbrp[o];[t][o]blend=all_mode=screen:shortest=1,format=yuv420p[out]",
+           "-map", "[out]", "-map", "0:a?", "-c:a", "copy", "-c:v", "libx264", "-preset", "veryfast",
+           "-crf", "18", "-movflags", "+faststart", str(dst)]
+    r = subprocess.run(cmd, capture_output=True)
+    if r.returncode != 0 or not dst.is_file():
+        raise RuntimeError((r.stderr or b"").decode("utf-8", "replace")[-400:])
+    meta.write_text(sig, encoding="utf-8")
+    store.log(f"乐曲可视化已叠加（{VISUALIZE_MODES[mode]}）：{dst.name}")
+    return {**plain, "path": str(dst), "visualize_mode": mode}
 
 
 def paint_background(img, bg: dict, t: float, cache_dir: Path | None = None):

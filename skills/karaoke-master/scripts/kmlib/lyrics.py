@@ -200,7 +200,7 @@ def _candidate_dict(c, idx: int) -> dict:
 
 
 def _utaten_variants(queries: list[str]) -> list[str]:
-    """UtaTen's search misses titles with decorations (``ALIVE～祈りの唄～``):
+    """UtaTen's search misses titles with decorations (``曲名～副題～``, ``曲名（……）``):
     also try the query without ～…～ / bracketed parts, then main title + artist."""
     out: list[str] = []
     for q in queries:

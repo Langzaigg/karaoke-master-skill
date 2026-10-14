@@ -580,10 +580,15 @@ function renderSingers() {
   });
 }
 
-const BG_TYPES = [["video", "视频"], ["mv", "AMV"], ["montage", "混剪"], ["oped", "OPED 拼接"], ["subs", "仅 KTV 字幕"]];
+// 三种背景模式：视频（原视频/选定视频直接铺底）· 混剪（素材按节拍剪辑，可选乐曲可视化）
+// · OPED（长视频/官方 PV 分段拼接）。仅字幕是导出用的小工具，不属这三种之一。
+const BG_TYPES = [["video", "视频"], ["montage", "混剪"], ["oped", "OPED 拼接"], ["subs", "仅 KTV 字幕"]];
 function bgKind(t) { return t === "spectrum" ? "mv" : t === "source" ? "video" : t; }
 function setBackground(bg, notify = true) {
-  const o = S.d1.options; o.background = bg; touch("options");
+  const o = S.d1.options;
+  const prev = o.background || {};
+  if (bg.visualize === undefined && prev.visualize !== undefined) bg = Object.assign({ visualize: prev.visualize }, bg);
+  o.background = bg; touch("options");
   if (bg.type === "subs" && !o.outputs.includes("alpha") && !S.d1.alphaAsked) { o.outputs = o.outputs.concat(["alpha"]); S.d1.alphaAsked = true; }
   renderOutput(); renderMV();
   if (notify) act("set_background", { background: bg });
@@ -591,8 +596,9 @@ function setBackground(bg, notify = true) {
 function renderOutput() {
   const j = S.job; const o = S.d1.options; const hasVideo = !!(j.media.source && j.media.source.has_video);
   const cur = bgKind(o.background.type);
+  const curBtn = cur === "mv" ? "montage" : cur;   // 旧的 AMV 背景并入「混剪」
   const ctl = $("#bg-type"); ctl.innerHTML = "";
-  for (const [v, label0] of BG_TYPES) { const label = v === "video" && !hasVideo ? "MV 视频" : label0; ctl.append(el("button", { class: cur === v ? "on" : "", onclick: () => {
+  for (const [v, label0] of BG_TYPES) { const label = v === "video" && !hasVideo ? "MV 视频" : label0; ctl.append(el("button", { class: curBtn === v ? "on" : "", onclick: () => {
     if (v === "video") {
       if (hasVideo) setBackground({ type: "source" });
       else { o.background = { type: "video", path: o.background.path || "" }; touch("options"); renderOutput(); renderMV(); }
@@ -603,8 +609,9 @@ function renderOutput() {
   if (cur === "video" && hasVideo) extra.append(el("span", { class: "muted small" }, "使用素材原视频作为背景"));
   if (cur === "video" && !hasVideo) extra.append(renderMvVideo());
   if (cur === "oped") extra.append(renderOped());
-  if (cur === "mv") extra.append(el("span", { class: "muted small" }, "Agent 按歌曲主题设计画面 + 频谱 / 音频可视化，见下方「AMV 设计」"));
-  if (cur === "montage") extra.append(el("span", { class: "muted small" }, "图片或游戏 / 动画视频片段按节拍剪辑（网上搜集 / 你的图包 / 混合），见下方「混剪设计」"));
+  if (["video", "oped", "mv", "montage"].includes(cur)) extra.append(renderVisualizeToggle());
+  if (cur === "mv") extra.append(el("span", { class: "muted small" }, "旧版 AMV 背景：点「混剪」可并入混剪模式"));
+  if (cur === "montage") extra.append(el("span", { class: "muted small" }, "图片或游戏 / 动画视频片段按节拍剪辑（网上搜集 / 你的图包 / 混合），可叠加乐曲可视化，见下方「混剪设计」"));
   if (cur === "subs") {
     const col = o.background.color || "#000000";
     const sw = (c, label) => el("button", { class: "swatch" + (col.toLowerCase() === c.toLowerCase() ? " on" : ""), title: label, style: { background: c },
@@ -615,7 +622,7 @@ function renderOutput() {
   }
   if (!["video", "mv", "montage", "oped", "subs"].includes(cur)) extra.append(el("span", { class: "muted small" }, `当前背景：${o.background.type === "image" ? "图片" : "纯色"}（由 Agent 设置）`));
   $("#out-kind-mv").hidden = !(cur === "mv" || cur === "montage");
-  $("#out-kind-mv-label").textContent = cur === "montage" ? "混剪（无字幕版）" : "AMV（无字幕版）";
+  $("#out-kind-mv-label").textContent = cur === "montage" ? "混剪（无字幕版）" : "可视化（无字幕版）";
   $("#out-res").value = o.resolution;
   if (document.activeElement !== $("#out-cast")) $("#out-cast").value = o.cast_delay_ms === undefined ? 200 : o.cast_delay_ms;
   if (o.fps === undefined || o.fps === null) o.fps = 60;
@@ -676,6 +683,38 @@ function renderMvVideo() {
 }
 
 // "OPED 拼接" background: segments added and stitched by the agent (KM oped); the page only shows them
+function renderVisualizeToggle() {
+  // 乐曲可视化是独立的一层：视频 / 混剪 / OPED 三种背景都能开。
+  // 混剪 / 可视化设计里它是设计的一部分；视频 / OPED 上由背景预处理叠加上去，
+  // 处理方式默认按素材质量自动决定（高 → 直接叠加，中 → 背景变淡，低 → 模糊毛玻璃）。
+  const o = S.d1.options;
+  const bg = o.background || {};
+  const cur0 = bgKind(bg.type);
+  const design = cur0 === "mv" || cur0 === "montage";
+  const on = design ? bg.visualize !== false : bg.visualize === true;
+  const box = el("div", { class: "row gap", style: { alignItems: "center" } });
+  const ctl = el("div", { class: "seg-ctl" });
+  for (const [v, label] of [[true, "开"], [false, "关"]]) {
+    ctl.append(el("button", { class: on === v ? "on" : "", onclick: () => {
+      setBackground(Object.assign({}, bg, { visualize: v }));
+      toast(v ? "已开启乐曲可视化（叠加在背景上）" : "已关闭乐曲可视化");
+    } }, label));
+  }
+  box.append(el("span", { class: "muted small", title: "频谱 / 波形，叠加在背景画面上" }, "频谱可视化"), ctl);
+  if (bg.visualize === true && !design) {
+    const cur = bg.visualize_mode || "auto";
+    const c2 = el("div", { class: "seg-ctl" });
+    for (const [v, label] of [["auto", "按素材质量自动"], ["overlay", "直接叠加"], ["dim", "背景变淡"], ["blur", "模糊毛玻璃"]]) {
+      c2.append(el("button", { class: cur === v ? "on" : "", onclick: () => {
+        setBackground(Object.assign({}, bg, { visualize_mode: v }));
+        if (v !== "auto") toast("叠加方式：" + label);
+      } }, label));
+    }
+    box.append(el("span", { class: "muted small" }, "叠加方式"), c2);
+  }
+  return box;
+}
+
 function renderOped() {
   const j = S.job; const op = (j.media || {}).oped || null;
   const box = el("div", { class: "mvv" });
@@ -708,16 +747,17 @@ function renderMV() {
   if (!kind) return;
   const pv = j.previews || {};
   const mv = (pv.designs || {})[kind] || {};
-  $("#mv-title").textContent = kind === "montage" ? "混剪设计" : "AMV 设计（静态 MV）";
-  $("#mv-sub").textContent = kind === "montage" ? "图片或视频片段按节拍剪辑，叠加可视化特效；选一个风格作起点，或在右侧告诉 Agent 想要的效果"
-    : "Agent 根据歌曲主题设计画面；可选预设作起点，或在右侧告诉 Agent 想要的意象";
+  $("#mv-title").textContent = kind === "montage" ? "混剪设计" : "可视化设计";
+  $("#mv-sub").textContent = kind === "montage" ? "素材（图包 / 游戏动画片段）按节拍剪辑，可在上方开关乐曲可视化；选一个风格作起点，或在右侧告诉 Agent 想要的效果"
+    : "封面 / MV 图 + 频谱风格的乐曲可视化；也可点「混剪」改用素材剪辑，或在右侧告诉 Agent 想要的意象";
   const labels = ["前奏", "主歌", "副歌高潮"];
   const box = $("#mv-stills"); box.innerHTML = "";
   if (mv.need_assets) box.append(el("div", { class: "muted" }, "素材池还是空的：在下方上传图包，或选择让 Agent 上网搜集图片。"));
   else if (!mv.stills) box.append(el("div", { class: "muted" }, kind === "montage" ? "正在准备混剪画面…" : "Agent 正在设计 MV 画面…"));
   (mv.stills || []).forEach((src, k) => box.append(el("figure", {}, el("img", { src: fileUrl(src) }),
     el("figcaption", {}, `${labels[k] || ""} · ${fmtT((mv.times || [])[k], false)}`))));
-  const cat = (pv.mv_catalog || []).filter((p) => (p.kind || "mv") === kind);
+  // 混剪模式下把可视化预设也列出来：同一模式的两种起点（有素材 → 剪辑打底；没素材 → 封面打底）
+  const cat = (pv.mv_catalog || []).filter((p) => kind === "montage" || (p.kind || "mv") === kind);
   const pre = cat.find((p) => p.id === mv.preset);
   $("#mv-theme").textContent = mv.theme || mv.name || (pre ? "预设：" + pre.name : "");
   $("#mv-notes").textContent = mv.notes || "想换风格 / 配色 / 频谱样式，直接在右侧对话框告诉 Agent。";
@@ -968,7 +1008,7 @@ function renderExports() {
   const wantHires = outs.includes("hires"), wantOnOff = outs.includes("onoff"), wantAlpha = outs.includes("alpha");
   const bgt = bgKind(((j.options || {}).background || {}).type);
   const wantMV = outs.includes("mv") && (bgt === "mv" || bgt === "montage");
-  const extrasLabel = [wantAlpha ? "透明字幕" : "", wantOnOff ? "on/off vocal" : "", wantMV ? (bgt === "montage" ? "混剪" : "AMV") : "", wantHires ? "Hi-Res" : ""].filter(Boolean).join(" + ");
+  const extrasLabel = [wantAlpha ? "透明字幕" : "", wantOnOff ? "on/off vocal" : "", wantMV ? (bgt === "montage" ? "混剪" : "可视化") : "", wantHires ? "Hi-Res" : ""].filter(Boolean).join(" + ");
   for (const [k, label] of kinds) row.append(el("button", { class: "btn " + (k === "mp4" ? "primary" : "ghost"), disabled: running, onclick: () => {
     const ks = k === "mp4" ? ["sug", "yurika", "mp4"].concat(wantAlpha ? ["alpha"] : [], wantOnOff ? ["onoff"] : [], wantMV ? ["mv"] : [], wantHires ? ["hires"] : []) : [k];
     act("export", { kinds: ks, hires: wantHires ? hiresPayload() : undefined });

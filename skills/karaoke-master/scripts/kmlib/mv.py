@@ -2,7 +2,7 @@
 
 Two designs per job, chosen by the background type:
 
-* ``mv`` (AMV) — a themed scene the agent designs for the song: palette, a key
+* ``mv`` (可视化) — a themed scene the agent designs for the song: palette, a key
   visual (usually the cover art), motif layers and audio-reactive visualizers;
 * ``montage`` (图片混剪) — a beat-synced cut of an image pool (the user's image
   packs, images found online, scenes from the source video, or a mix) with
@@ -261,12 +261,12 @@ PRESETS: dict[str, dict] = {
     },
 }
 DEFAULT_PRESET = "spectrum_classic"
-KINDS = ("mv", "montage")  # AMV design / image montage
+KINDS = ("mv", "montage")  # visualisation design / montage design
 # bump when the montage planner's output changes for the same inputs (the design
 # signature below includes it so a stale rendered background is not reused)
 PLANNER_VERSION = 4
 DEFAULT_PRESETS = {"mv": DEFAULT_PRESET, "montage": "anime_montage"}
-KIND_LABEL = {"mv": "AMV", "montage": "混剪"}
+KIND_LABEL = {"mv": "可视化", "montage": "混剪"}
 
 
 def preset_kind(pid: str) -> str:
@@ -1907,7 +1907,7 @@ class MVRenderer:
 
 # --------------------------------------------------------------------- job glue
 def design_kind(st: dict) -> str:
-    """Which design the job's background uses: ``montage`` or ``mv`` (AMV)."""
+    """Which design the job's background uses: ``montage`` or ``mv`` (可视化)."""
     bg = ((st.get("options") or {}).get("background") or {}).get("type")
     return "montage" if bg == "montage" else "mv"
 
@@ -1918,7 +1918,31 @@ def spec_path(store: JobStore, kind: str = "mv") -> Path:
 
 def load_spec(store: JobStore, kind: str = "mv") -> dict:
     spec = read_json(spec_path(store, kind))
-    return spec or preset_spec(DEFAULT_PRESETS[kind])
+    spec = spec or preset_spec(DEFAULT_PRESETS[kind])
+    return apply_visualize(store.load(), spec)
+
+
+# Music-reactive overlay layers: the 乐曲可视化 drawn on top of the montage / cover.
+VISUALIZE_LAYERS = ("spectrum", "waveform", "pulse")
+
+
+def apply_visualize(st: dict, spec: dict) -> dict:
+    """Honour ``options.background.visualize``: off drops the music-reactive layers.
+
+    The 混剪 mode is one background with an optional visualisation on top (the
+    montage is what the visualisation plays over). Turning it off must not touch
+    the stored design, so the filter happens here, at load time — and because the
+    design signature is computed from the filtered spec, the cache follows.
+    """
+    v = ((st.get("options") or {}).get("background") or {}).get("visualize")
+    if v is None or bool(v):
+        return spec
+    kept = [l for l in spec.get("layers") or [] if l.get("type") not in VISUALIZE_LAYERS]
+    if not kept or len(kept) == len(spec.get("layers") or []):
+        return spec                       # nothing to drop / would leave nothing to show
+    out = dict(spec)
+    out["layers"] = kept
+    return out
 
 
 def save_spec(store: JobStore, spec: dict, kind: str | None = None) -> str:
@@ -2011,6 +2035,82 @@ def make_renderer(store: JobStore, st: dict, spec: dict, w: int, h: int, feat: d
 def job_features(store: JobStore, st: dict) -> dict:
     audio = store.abs(st["media"]["audio"])
     return features(audio, cache=store.path("render", "mv_features.npz"))
+
+
+# ------------------------------------------------------------ visualiser overlay
+# ``options.background.visualize``: the 乐曲可视化 as an overlay on a background that is
+# NOT a design (视频 / OPED / 图片). It renders alone on black and is composited onto the
+# background with a screen blend (black adds nothing), so a single overlay serves any
+# treatment (直接叠加 / 背景变淡 / 模糊) the background pass decides on.
+VISUAL_OVERLAY = {
+    "name": "乐曲可视化", "desc": "叠加在背景画面上的频谱可视化（贴着画面底边的条带）",
+    "palette": "auto",
+    "layers": [
+        {"type": "spectrum", "style": "horizon", "y": 0.975, "x0": 0.02, "x1": 0.98, "height": 0.095,
+         "colors": ["$1", "$0", "$2"], "alpha": 0.85, "bands": 84},
+    ],
+}
+
+
+def overlay_spec() -> dict:
+    spec = copy.deepcopy(VISUAL_OVERLAY)
+    spec["preset"] = "visual_overlay"
+    return spec
+
+
+def render_overlay(store: JobStore, st: dict, out: Path) -> Path:
+    """Render the visualiser alone on black (screen-blend material for a background pass)."""
+    import hashlib
+
+    from .render import qt_app
+
+    qt_app()
+    from PyQt6.QtGui import QImage
+
+    spec = overlay_spec()
+    w, h = _output_wh(st)
+    fps = _output_fps(st, spec)
+    feats = store.path("render", "mv_features.npz")     # the audio drives the whole overlay
+    try:
+        fstamp = f"{feats.stat().st_mtime_ns}:{feats.stat().st_size}"
+    except OSError:
+        fstamp = "0"
+    sig = hashlib.sha1(json.dumps({"spec": spec, "w": w, "h": h, "fps": fps, "feat": fstamp},
+                                  sort_keys=True, ensure_ascii=False).encode()).hexdigest()[:16]
+    meta = out.with_suffix(out.suffix + ".sig")
+    if out.is_file() and meta.is_file():
+        try:
+            if meta.read_text(encoding="utf-8").strip() == sig:
+                return out
+        except OSError:
+            pass
+    feat = job_features(store, st)
+    r = make_renderer(store, st, spec, w, h, feat, publish=False, fps=fps)
+    total = int(r.duration * fps)
+    out.parent.mkdir(parents=True, exist_ok=True)
+    cmd = [ffmpeg_exe(), "-y", "-v", "error", "-f", "rawvideo", "-pix_fmt", "bgr0", "-s", f"{w}x{h}",
+           "-r", str(fps), "-i", "-", "-an", "-c:v", "libx264", "-preset", "veryfast", "-crf", "16",
+           "-pix_fmt", "yuv420p", "-movflags", "+faststart", str(out)]
+    proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stderr=subprocess.PIPE, **hidden_subprocess_kwargs())
+    img = QImage(w, h, QImage.Format.Format_RGB32)
+    try:
+        for k in range(total):
+            img.fill(0)
+            r.frame(img, k / fps)
+            ptr = img.constBits()
+            ptr.setsize(img.sizeInBytes())
+            proc.stdin.write(bytes(ptr))
+        proc.stdin.close()
+        err = proc.stderr.read().decode("utf-8", "replace")
+        if proc.wait() != 0:
+            raise RuntimeError("可视化叠加层编码失败：" + err[-400:])
+    except Exception:
+        proc.kill()
+        raise
+    finally:
+        r.close()
+    meta.write_text(sig, encoding="utf-8")
+    return out
 
 
 def _pool_empty(store: JobStore) -> bool:

@@ -2135,7 +2135,10 @@ def cmd_ui_action(args) -> int:
             from . import mv
 
             spec = mv.preset_spec(payload["preset"])
-            dk = mv.save_spec(store, spec)
+            # Save into the job's current design kind: 混剪 is one mode whose presets
+            # may or may not carry a montage layer, and it must stay a single spec.
+            cur = mv.design_kind(store.load())
+            dk = mv.save_spec(store, spec, cur)
             store.log(f"{mv.KIND_LABEL[dk]}设计：用户选择预设「{spec['name']}」")
             mv.render_stills(store, kind=dk, spec=spec)
         elif kind == "mv_stills":

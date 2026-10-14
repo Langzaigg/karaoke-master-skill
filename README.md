@@ -11,9 +11,9 @@
 ![Platform](https://img.shields.io/badge/Windows-主要验证平台-0078D6)
 ![Agent Skill](https://img.shields.io/badge/Agent-Skill-ff5fa2)
 
-<img src="images/hero.jpg" width="100%" alt="四种背景模式的成品画面：原视频、网络 MV、AMV 频谱、图片混剪">
+<img src="images/hero.jpg" width="100%" alt="三种背景模式的成品画面：视频、素材混剪、OPED 拼接">
 
-<sub>样例成品画面（左起：原视频 / 网络下载的 MV / AMV 频谱 / 图片混剪），文档截图中的歌词均已模糊处理。</sub>
+<sub>样例成品画面（背景模式示意），文档截图中的歌词均已模糊处理。</sub>
 
 </div>
 
@@ -23,9 +23,9 @@
 
 | 你给 Agent 的 | 它交还给你的 |
 |---|---|
-| 歌名 / 音频文件 / 视频（MV、MAD、切片） | 逐字走字的卡拉OK MP4（30 / 60 fps，1080p 起，按歌割り给每位歌手上色） |
+| 歌名 / 音频文件 / 视频（MV、MAD、切片） | 逐字走字的卡拉OK MP4（24 / 25 / 30 / 50 / 60 / 120 fps，或跟随素材帧率，1080p 起，按歌割り给每位歌手上色） |
 | 可选：无损原唱 FLAC（Hi-Res 音源） | **on vocal** 与 **off vocal**（伴奏）两个版本，伴奏由人声分离自动生成 |
-| 可选：你自己的图包 | Hi-Res 混流 MKV（FLAC 32bit 无损原唱 / 伴奏轨） |
+| 可选：你自己的图包 / 素材库 | Hi-Res 混流 MKV（FLAC 32bit 无损原唱 / 伴奏轨） |
 | 一句话的修改意见 | `.sug` 打轴工程、`.yurika` 字幕工程，可在 Lin-K Lyrics 桌面版里继续精修 |
 | | 透明字幕层 MOV（ProRes 4444，叠加到 PR / AE / 达芬奇） |
 | | 投屏延迟补偿：导出时画面比声音提前（默认 +200 ms，可调） |
@@ -35,23 +35,29 @@
 
 ## 背景模式
 
+三种模式覆盖所有背景需求——**视频**（画面直接播放）、**混剪**（素材按节拍自动剪辑）、
+**OPED 拼接**（长镜头分段拼接）；另有「仅 KTV 字幕」作导出小工具。
+
 <table>
 <tr>
 <td width="25%"><img src="images/mode_video.jpg" alt="视频模式"></td>
-<td width="25%"><img src="images/mode_mvvideo.jpg" alt="网络 MV 模式"></td>
-<td width="25%"><img src="images/mode_amv.jpg" alt="AMV 频谱模式"></td>
-<td width="25%"><img src="images/mode_montage.jpg" alt="图片混剪模式"></td>
+<td width="25%"><img src="images/mode_mvvideo.jpg" alt="网络 MV"></td>
+<td width="25%"><img src="images/mode_montage.jpg" alt="素材混剪"></td>
+<td width="25%"><img src="images/mode_amv.jpg" alt="混剪 + 乐曲可视化"></td>
 </tr>
 <tr>
-<td><b>视频</b><br>直接用素材视频作背景。</td>
-<td><b>网络 MV</b><br>从 YouTube / B 站找来这首歌的 MV 或动画 OP·ED，按波形对齐到你的音频，只取画面。</td>
-<td><b>AMV（频谱可视化）</b><br>只有音频时，Agent 按歌曲主题设计画面：配色、意象、封面、频谱与光效，随音乐律动。</td>
-<td><b>图片混剪</b><br>官方宣传图 / 你的图包，按节拍在小节强拍上切换；默认交叉淡化 + 缓慢推拉。</td>
+<td><b>视频</b><br>素材视频直接作背景。</td>
+<td><b>视频 · 网络 MV</b><br>从 YouTube / B 站找来 MV 或动画 OP·ED，按波形对齐到你的音频，只取画面。</td>
+<td><b>混剪</b><br>图片与视频片段按节拍自动剪辑；同一作品的多首歌共享素材库且镜头互不重复。</td>
+<td><b>混剪 + 乐曲可视化</b><br>频谱 / 波形随音乐律动，叠加在剪辑画面上。</td>
 </tr>
 </table>
 
-- **视频片段混剪（游戏 / 动画素材卡点剪辑）**：Agent 在 YouTube / B 站找游戏的预告、实况与结局录像，按字节范围只下载需要的分段，
-  扫描切镜后按音乐节拍硬切卡点；同一游戏的多首歌共享素材库且镜头互不重复。
+- **乐曲可视化是一个独立开关**，三种模式都能开：混剪里它是设计的一层；视频 / OPED 上由背景预处理
+  叠加上去（渲染一次、按歌曲缓存）。叠加方式默认**按素材质量自动选择**——素材清晰直接叠加、
+  一般则背景变淡、偏糊则模糊毛玻璃；也可以手动指定。
+- **OPED 拼接**：几个长源（OP/ED、官方 PV、游戏实况的长段落）各自对齐到歌曲时间轴后拼接，
+  段间交叉淡化、空隙冻结前一帧 —— 适合「整段不剪碎」的宣传片式画面，或单支 MV 不够长时。
 - **仅 KTV 字幕**：纯色底（黑底 / 绿幕）+ 透明字幕层 MOV，叠加到你自己剪的视频里。
 - **低清素材 AI 增强（可选）**：`mv-clips --enhance` 用 RIFE 补帧 ×2 + Real-ESRGAN 超分 ×2 处理 720p / 24fps 以下的素材（如 VR 单眼录像），
   串行执行、可断点续跑，只增强剪辑计划实际用到的源。
@@ -67,7 +73,7 @@
 - 歌曲信息由 Agent 联网补全，歌词优先采用 UtaTen（带振假名），网易云 / QQ / 酷狗 / LRCLIB 的同步歌词作时间参考；
 - 语音识别 + 参考时间轴推断视频里实际唱了哪些句子（MAD 剪掉的段落、括号里的和声会被标出）；
 - 字幕模板、特效、多人合唱配色全部由**真实渲染引擎**在你的素材上出图；
-- 背景、帧率（30 / 60）、导出内容、Hi-Res 无损音源都在这里确定。
+- 背景（视频 / 混剪 / OPED + 乐曲可视化开关）、帧率（24–120，或跟随素材）、导出内容、Hi-Res 无损音源都在这里确定。
 
 ### ② 自动打轴
 
@@ -89,11 +95,11 @@
 
 <table>
 <tr>
-<td width="50%"><img src="images/amv_design.jpg" alt="AMV 设计卡片"></td>
+<td width="50%"><img src="images/amv_design.jpg" alt="混剪 / 可视化设计卡片"></td>
 <td width="50%"><img src="images/montage_plan.jpg" alt="混剪素材与节拍剪辑计划"></td>
 </tr>
 <tr>
-<td>AMV 设计：前奏 / 主歌 / 副歌三张关键帧 + 预设画廊，配色与意象可直接让 Agent 改。</td>
+<td>混剪 / 可视化设计：前奏 / 主歌 / 副歌三张关键帧 + 预设画廊，配色与意象可直接让 Agent 改。</td>
 <td>图片混剪：节拍剪辑胶片条、素材池（图包 / 网络 / 视频来源标记），悬停即可移除不想要的图。</td>
 </tr>
 </table>
@@ -107,8 +113,9 @@
 git clone https://github.com/Langzaigg/karaoke-master-skill.git
 ```
 
-1. **让 Agent 发现技能**：把 `skills/karaoke-master` 链接或复制到 Agent 的技能目录，例如 Claude Code 的
-   `~/.claude/skills/karaoke-master`（Windows 可用 `mklink /J`），或在项目里放到 `.claude/skills/`。
+1. **让 Agent 发现技能**：把 `skills/karaoke-master` 链接或复制到你的 Agent 的技能目录（Claude Code 是
+   `~/.claude/skills/karaoke-master`，Windows 可用 `mklink /J`；其它 Agent 用各自的目录，或在项目里放一份），
+   并让它读到 `SKILL.md`。
 2. **准备 FFmpeg**：`ffmpeg` / `ffprobe` 需在 PATH 中（或设置 `KM_FFMPEG_DIR`）。
 3. **第一次使用时**，Agent 会自己运行安装向导（也可以手动）：
 
@@ -127,7 +134,7 @@ git clone https://github.com/Langzaigg/karaoke-master-skill.git
 
 > 用 karaoke-master 把 `D:\ktv\ALIVE ～祈りの唄～［ MAD ］マクロス Δ.mp4` 做成卡拉OK，原唱无损在 `D:\ktv\ワルキューレ - ALIVE～祈りの唄～.flac`，成品放到 `D:\ktv\output`。
 
-> 只有这首歌的 FLAC，帮我做一个星空主题的频谱 MV 版卡拉OK，30 fps。
+> 只有这首歌的 FLAC，帮我做一个星空主题的频谱可视化卡拉OK，24 fps。
 
 > 用这个游戏（ALTDEUS）的实况和预告素材，给它的六首歌都做卡点混剪版卡拉OK。
 

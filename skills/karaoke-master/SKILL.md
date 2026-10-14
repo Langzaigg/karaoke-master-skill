@@ -8,11 +8,13 @@ description: >-
   ② auto-time the lyrics (vocal separation + ASR + forced alignment) with live progress;
   ③ review in the browser, apply natural-language tweaks, export .sug / .yurika / LRC / MP4,
   on vocal + off vocal versions, a transparent subtitle MOV and optional Hi-Res (lossless FLAC)
-  MKVs, at 24 / 30 / 60 fps (or the source video's own rate). Backgrounds: the source video, the song's MV downloaded from YouTube /
-  Bilibili and aligned to the user's audio, an AMV designed for the song (themed scene
-  + audio visualizers), a beat-synced montage of images (found online, the user's image packs, or
-  both) or of video clips cut from a game's / anime's footage on YouTube (trailers, gameplay
-  recordings — 游戏素材卡点混剪), or subtitles only. Japanese and English songs (word-level
+  MKVs, at 24 / 25 / 30 / 50 / 60 / 120 fps — or the source video's own rate). Backgrounds come in three modes:
+  **视频** (a video plays as-is — the source video, or the song's MV / an OP·ED downloaded from
+  YouTube / Bilibili and aligned to the user's audio), **混剪** (a beat-synced montage of images
+  and / or video clips found online, uploaded by the user, or cut from a game's / anime's own
+  footage, with an optional music visualisation drawn over it), and **OPED 拼接** (long takes —
+  OP/ED sources, official PVs, gameplay chunks — aligned onto the song and stitched). Subtitles
+  only, for laying over the user's own edit, is a small extra. Japanese and English songs (word-level
   NetEase / Kugou lyrics are used for English timing). Use whenever the user wants 卡拉OK字幕、
   打轴、歌词时间轴、走字视频、伴奏版 / off vocal、歌曲 MV / AMV、游戏 / 动画素材混剪卡点的 KTV,
   karaoke subtitles, or to turn a
@@ -134,7 +136,7 @@ KM stop <job>             # at the very end: closes this project's page server
   has ended). The user can also click "完成并关闭" in the page: the server stops and `wait`
   returns a `page_closed` action — wrap up (final `say` is no longer visible; answer in the chat)
   and don't restart the page unless the user asks.
-- Same song, another version (e.g. an AMV and a montage from the same FLAC):
+- Same song, another version (e.g. a visualisation version and a montage version from the same FLAC):
   `KM new <same source file> --like <project>` copies song info, lyrics, analysis and timing into a
   new project — go straight to the background design and export.
 - A title-only project has no media: ask the user for an audio/video file (or a URL they
@@ -226,29 +228,36 @@ Run these in this order; start the slow one first.
    chorus need no colour of their own; ask before showing more than ~4 colours. Backing lines that
    overlap the lead (e.g. "(ha～)") or whose position the source does not give stay excluded —
    mention them. Before timing, whole lines can be pre-assigned with `KM lines <job> --singer 1-4=<id>`.
-6. **Background and output format** (page card "输出设置"; you set defaults, the user changes them):
-   - **视频** — the source video (default for video jobs).
-   - **MV 视频**（audio projects）— the song's MV downloaded from YouTube / Bilibili with Lin-K
-     Lyrics' video downloader, or a local video; only its picture is used, aligned to the song (see
-     "MV from the web" below). Typical for "I have the lossless song, use the official MV / anime OP·ED".
-   - **OPED 拼接** — several OP/ED videos of the song (short ver / opening size / long ver …), each
-     waveform-aligned onto the song's timeline and stitched in add order (first added wins on
-     overlaps), neighbouring parts cross-fade, and stretches no source covers are filled with the
-     previous part's last frame (black at the very start). Typical for "动画 OP 的 short ver 开头 +
-     long ver / 另一份 OP 补剩余" (see "OP/ED 拼接背景" below).
-   - **AMV** — a themed scene you design for the song (default for audio-only jobs), see
-     "AMV design" below.
-   - **混剪** — a beat-synced montage of images (found online, the user's image packs, or both;
-     see "Image montage") and / or of **video clips** cut from a game's / anime's own footage —
-     trailers, PVs, gameplay recordings found on YouTube / Bilibili or local videos (see
-     "Video-clip montage"). Typical for "用这个游戏的实况 / PV 卡点剪辑做背景".
+6. **Background and output format** (page card "输出设置"; you set defaults, the user changes them).
+   Three modes cover everything; everything else is an export detail:
+   - **视频** — a video plays as-is: the material's own video (default for video jobs), or a chosen
+     video file — the song's MV downloaded from YouTube / Bilibili with Lin-K Lyrics' video
+     downloader, or a local video, aligned to the song (see "MV from the web" below). Typical for
+     "use the official MV / anime OP·ED as the background".
+   - **混剪** — an auto beat-synced montage from images and / or video clips (found online, the
+     user's packs, or both — see "Image montage" / "Video-clip montage"), with the 乐曲可视化 as an
+     optional layer over it (see below): the cut footage is what the visualisation plays against,
+     and turning it off leaves the footage plain. Presets without a montage layer (the cover-based
+     spectrum looks) are the montage-less variant of the same mode, so a job without footage still
+     has something to show. Typical for "game footage cut to the beat", "pictures plus a spectrum".
+   - **OPED 拼接** — several long sources (OP/ED videos, official PVs, gameplay takes) each aligned
+     onto the song's timeline and stitched in add order; neighbouring parts cross-fade and
+     uncovered gaps freeze on the previous part's last frame (see "OP/ED 拼接背景" below).
+     Typical for "long takes, no chopping" — or when a single MV is not enough.
    - **仅 KTV 字幕** — subtitles only on a plain colour (`{"type": "subs", "color": "#000000"}`;
      green `#00B140` for keying); pair it with export kind `alpha` = a transparent ProRes 4444 MOV
-     to lay over the user's own footage in an editor.
-   - Frame rate **24 / 30 / 60 fps** (`options.fps`), or `"source"` to follow the material's own frame rate; resolution, export kinds.
+     to lay over the user's own footage in an editor. A utility, not one of the three modes.
+   - **乐曲可视化 is one switch across all three modes** (`options.background.visualize`): on a
+     design (混剪) it is part of the design's own layers; on 视频 / OPED / 图片 it is composited on
+     as **one extra layer** by the background pass (rendered once on black, screen-blended, cached
+     per song) — the same toggle either way. There the treatment follows the material's own
+     quality — `options.background.visualize_mode`: `auto` (default: resolution / frame rate decide)
+     · `overlay` 直接叠加 · `dim` 背景变淡 · `blur` 模糊毛玻璃 — so a soft 720p source gets blurred
+     under the visualiser instead of fighting it.
+   - Frame rate **24 / 25 / 30 / 50 / 60 / 120 fps** (`options.fps`), or `"source"` to follow the material's own frame rate; resolution, export kinds.
    Set it with `KM style <job> @patch.json` → `{"background": {...}}` (validates a video path and
-   prepares AMV / montage stills) or let the user click in the page (`set_background` action).
-7. **Previews:** AMV / montage jobs first make the design (below) so previews have a background.
+   prepares the design stills) or let the user click in the page (`set_background` action).
+7. **Previews:** a job whose background is a design makes that design first (below) so previews have a background.
    Then `KM previews <job>` (~10–30 s): template, effect (8-frame sprites) and per-singer cards
    rendered by the real subtitle engine on the user's own media with the song's first lines.
 8. Post a summary with `KM say` (song identified, lyric source, N lines located / excluded and
@@ -262,7 +271,7 @@ Run these in this order; start the slow one first.
 | `confirm_stage1` | user confirmed (server already wrote it into job.json) | go to stage 2 |
 | `use_lyrics` `{candidate}` | switch lyric source | `lyrics-use`, `match --apply`, `previews`, `say` |
 | `custom_lyrics` `{path}` | user pasted lyrics (supports `漢字(かんじ)`, `{漢字|かな}`, `[歌手]`) | `lyrics-use <job> <path>`, `match --apply`, `previews`, `say` |
-| `set_background` `{background}` | user picked a background (already applied; default stills rendered) | AMV not designed for this song yet → design it; 图片混剪 → ask where the images should come from unless `montage_source` is set; `previews`, `say` |
+| `set_background` `{background}` | user picked a background (already applied; default stills rendered) | design not made for this song yet → make it; 图片混剪 → ask where the images should come from unless `montage_source` is set; `previews`, `say` |
 | `montage_source` `{source: web\|user\|mixed}` | where montage images come from (saved in `options.montage_source`) | `web` / `mixed`: search and import images (the choice is the user's go-ahead to download; still say which sites); `user`: wait for the pack, say how many images the plan wants |
 | `mv_assets_import` `{paths}` | the user uploaded an image pack (already imported, stills re-rendered) | check `mv-assets --plan`; say how many were used; top up with web images if `mixed` and short |
 | `mv_video_use` / `mv_video_local` `{url}` / `{path}` | the user picked an MV in the page (already downloaded, aligned, previews refreshed) | read `media.mv_video.notes` (`KM status --full`); a bad alignment → suggest another candidate; `say` |
@@ -323,10 +332,13 @@ tail beyond the song may need a separate cut, and footage the long ver lacks can
 another video (user-supplied or a second OP/ED) added later to fill the gaps. Low-confidence
 alignments and uncovered intervals are printed by `--list` and stored in `media.oped.notes`.
 
-### AMV design (static MV for a song without a video)
+### 混剪 / 可视化设计 (montage design for a song without footage)
 
-The AMV design is the background when `background.type` is `mv`; it is also exported alone as
-`<name> (MV).mp4` (export kind `mv`). **Design it for this song** — don't just take the first preset:
+The design is the background when `background.type` is `montage`; it is also exported alone as
+`<name> (混剪).mp4` (export kind `mv`). It has two ends of the same mode: footage cut to the beat
+(a `montage` layer plus optional visualisation layers), or — for a job with no footage — a
+cover / still driven scene with the same visualisers. **Design it for this song** — don't just take
+the first preset:
 
 1. Read the song: lyrics themes, tie-in work, cover art,
    tempo / mood from `analyze`. Pick imagery, palette and motion that fit (e.g. 祈り / 星空 →
@@ -334,8 +346,10 @@ The AMV design is the background when `background.type` is `mv`; it is also expo
 2. `KM mv <job> --list-presets --kind mv`, start from the closest one (`KM mv <job> --preset <id>`),
    then write your own spec `KM mv <job> --spec @spec.json`: `theme` (short Chinese title of the
    idea), `notes` (Chinese, why these visuals), `palette` (`"auto"` = from the cover, or 5
-   colours), `layers` (catalog + rules in [references/recipes.md](references/recipes.md#mv-design)).
+   colours), `layers` (catalog + rules in [references/recipes.md](references/recipes.md#混剪--可视化-design)).
    Keep the lower third calm (karaoke lines live there): dark ground / `lyrics_band`.
+   `options.background.visualize: false` removes the music-reactive layers (频谱 / 波形 / 律动) at
+   render time without touching the saved spec — the page's 混剪 card exposes it as a toggle.
 3. `--spec`/`--preset` render 3 stills (intro / verse / loudest chorus) into the page's design
    card; `KM mv <job> --gallery` renders one chorus still per preset for comparison. Iterate on the
    user's feedback (`prompt` actions). View the stills yourself before presenting them.
@@ -345,9 +359,9 @@ The AMV design is the background when `background.type` is `mv`; it is also expo
 
 ### Image montage (图片混剪)
 
-`background.type` = `montage`; its design is separate from the AMV (`KM mv <job> --kind montage`
+`background.type` = `montage`; its design is separate from the visualisation design (`KM mv <job> --kind montage`
 …; presets `anime_montage` 标准混剪 / `montage_cinematic` 电影感 / `montage_beat` 高燃踩点 — the
-montage layer at the bottom, visualizer effects on top; adapt them to the song like an AMV).
+montage layer at the bottom, visualizer effects on top; adapt them to the song).
 Exported alone as `<name> (混剪).mp4`.
 
 - **Where images come from** (`options.montage_source`, the page asks the user): `web` — you
@@ -473,8 +487,9 @@ is busy enough) and adapt it to the song.
    game footage) and repoints the pool at the enhanced copies. `--only-used` limits it to the
    sources the current plan actually uses (the cheap default), `--no-sr` / `--no-rife` skip one
    stage, `--ids` names clips explicitly. It runs strictly serially and resumes across runs.
-   Cost on an Arc A770M: RIFE ≈ 11 fps of 720² frames, Real-ESRGAN ≈ 4 fps — a few minutes per
-   source with `--only-used`, hours for whole longplays (don't). First run needs the tools under
+   Cost is dominated by the GPU: on a mid-range discrete GPU RIFE runs ≈ 10–15 fps of 720²
+   frames and Real-ESRGAN ≈ 4 fps — a few minutes per source with `--only-used`, hours for whole
+   longplays (don't). First run needs the tools under
    `<home>/tools/`; the command prints the download links when they are missing.
 
 ## Stage 2 — automatic timing
@@ -549,7 +564,7 @@ You run the wait loop and handle `prompt`s:
   starts, pauses and held notes, moves no checkpoint more than `max_ms` (80). Every manual change
   on the page can be undone (「↶ 撤销」 / ui-action `undo`, last 30 changes).
 - Look: `KM style <job> @patch.json` with `template`, `effect`, `overrides` (Style fields),
-  `singer_styles {id: {color}}`, `ruby`, `title`, `background`, `resolution`, `fps` (24 / 30 / 60, or `"source"` = the material's own rate).
+  `singer_styles {id: {color}}`, `ruby`, `title`, `background`, `resolution`, `fps` (24 / 25 / 30 / 50 / 60 / 120, or `"source"` = the material's own rate).
   English lyrics: `"ruby": false` and a Latin font in `overrides` — `font_family_latin`
   (`Segoe UI`, `Georgia` …; the templates' Japanese fonts are wide for Latin), `space_width_percent`
   ≈ 28, `font_size_px` 86–88 so a 34-letter line fits; check the longest line with `KM frame`.
@@ -618,7 +633,7 @@ with the skill venv and loads the exported project.
 | `lines JOB [--list] [--split N:pos] [--merge N] [--dup N] [--delete N] [--include R] [--exclude R] [--singer R=id] [--ruby N:a-b=かな] [--reannotate] [--fix-char N:pos=X] [--split-long N]` | stage-1 line ops |
 | `match JOB [--apply] [--ref ID]` | locate lines via ASR + synced reference |
 | `hires-source JOB [--on F] [--off F …] [--no-align] [--clear]` | stage-1 lossless source → timing audio |
-| `mv JOB [--kind mv\|montage] [--list-presets] [--preset ID] [--spec @f] [--show] [--stills] [--gallery] [--video] [--seconds N]` | AMV / montage designer (alias `spectrum`) |
+| `mv JOB [--kind mv\|montage] [--list-presets] [--preset ID] [--spec @f] [--show] [--stills] [--gallery] [--video] [--seconds N]` | 混剪 / 可视化 designer (alias `spectrum`) |
 | `mv-video JOB [--search Q] [--n N] [--info URL\|#k] [--use URL\|#k] [--local PATH] [--max-height H]` | MV background from YouTube / Bilibili or a local video, aligned to the song |
 | `oped JOB [--add PATH\|URL [--label L] [--credit C] [--section A-B] [--speed X]] … [--shift sN=SEC] [--remove sN] [--clear] [--list] [--render [--fade S] [--force]]` | OP/ED 拼接背景: each source waveform-aligned, stitched in add order with cross-fades, gaps freeze-filled; `--section` uses only part of a source, `--speed` slow-stretches it |
 | `mv-clips JOB [--search Q] [--info URL] [--add URL\|PATH … [--sections a-b,…] [--credit C] [--crop x,y,w,h] [--max-height H]] [--library L] [--from-library] [--min-score S] [--max-clips N] [--sheet] [--sheet-used] [--mark-checked] [--exclude IDS\|#N\|UN] [--tag ID=t] [--avoid-from PROJECT] [--enhance [--only-used] [--ids IDS] [--no-sr] [--no-rife] [--sr-scale N] [--rife-multi N]] [--list] [--credits]` | video-clip montage: footage library → shots in the montage pool; review sheets; AI enhance (RIFE + Real-ESRGAN) for low-quality sources |

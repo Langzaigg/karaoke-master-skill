@@ -38,6 +38,9 @@ sung at the playhead) — use them for "这句 / 这里 / 刚才那句".
 | 素材分辨率 / 帧率低（720×720@24 的 VR 单眼录像等） | `mv-clips JOB --enhance --only-used`（RIFE 补帧 ×2 + Real-ESRGAN 超分 ×2，串行、可续跑；全程长录像别跑，太贵） |
 | 英文行太长 | before timing: `lines --split-long 17` (Latin letters count half; splits at a comma near the middle) + Latin font override; after timing: `edit` `split_line` at the comma |
 | 用游戏实况 / PV 卡点剪辑做背景 | `mv-clips --search` → `--add URL --sections a-b,…` → `--sheet` (look) → `--exclude` → `mv --kind montage --preset game_montage` |
+| 长镜头 / 官方 PV 整段拼成背景（不剪碎） | `oped <job> --add URL\|路径 [--section A-B] [--speed X]` → `--list`（看对齐与空隙）→ `--render`，再 `{"background":{"type":"oped"}}` |
+| 背景上要有频谱可视化 | `{"background":{"visualize":true}}` —— 三种模式通用；叠加方式 `visualize_mode`: `auto` / `overlay` / `dim` / `blur`（视频 / OPED 背景），混剪 / 可视化设计则用 `visualize:false` 去掉设计里的频谱层 |
+| 素材画质不够，直接叠频谱看不清 | `visualize_mode`: `dim`（背景变淡）或 `blur`（毛玻璃）——`auto` 会按素材分辨率 / 帧率自己判 |
 | 两首歌别用同样的镜头 | `mv-clips <job2> --avoid-from <job1>` |
 | 走字不够平滑 / 忽快忽慢 | `edit` `[{"op":"smooth"}]` (strength 0.5, ≤ 80 ms per checkpoint; again for more) |
 | 第 3、5、8 行是合唱 | page: select the line numbers, click both singers, 「设为」; chat: `KM singers`/`set_singer` with a 「A＆B」 singer |
@@ -86,10 +89,25 @@ English lyrics: `{"ruby": false, "overrides": {"font_family_latin": "Segoe UI", 
 template font keeps any kana / kanji.
 
 Colours per state live in the template; for a one-off colour change prefer switching template or
-`singer_styles`. `cast_delay_ms` (投屏延迟, default 200) is an export option. Background types: `source` (the job's video), `video` (`path`: another local
-video, picture only), `mv` (the AMV design; audio-only default — `spectrum` is an old alias),
-`montage` (the montage design: images and / or video clips), `subs` (subtitles only, `color`), plus `color` and `image`
-(`path` relative to the job, e.g. an upload). `fps`: 24 / 30 / 60, or `"source"` to follow the material's own frame rate.
+`singer_styles`. `cast_delay_ms` (投屏延迟, default 200) is an export option; `fps` is 24 / 25 / 30 /
+50 / 60 / 120, or `"source"` to follow the material's own frame rate.
+
+`background` is a type plus a few options. Three modes cover everything:
+
+| `type` | fields | for |
+|---|---|---|
+| `video` | `path` (absolute or job-relative; the job's own video is `source`), `offset` (start N s in) | the material's video, a web MV, any local video |
+| `montage` | the 混剪 design (below); `mv` / `spectrum` are older names of the same design | images / video clips cut to the beat |
+| `oped` | `segments` (see SKILL.md "OP/ED 拼接背景") | long takes / official PVs stitched |
+
+`subs` (`color`) is the subtitles-on-a-plain-colour utility (green `#00B140` for keying), not one of
+the modes; `color` and `image` (`path` relative to the job, e.g. an upload) are plain fills.
+
+**乐曲可视化 is one switch on top of any of them** (`visualize`): on a design it keeps the design's
+own visualiser layers — `false` drops them at load time without touching the saved spec; on a video /
+OPED / image background it is composited on as one extra layer (rendered once on black,
+screen-blended, cached per song). `visualize_mode` picks the treatment: `auto` (default — the
+material's resolution / frame rate decide) · `overlay` 直接叠加 · `dim` 背景变淡 · `blur` 模糊毛玻璃.
 
 ## QA flags (`KM qa`)
 
@@ -104,13 +122,16 @@ video, picture only), `mv` (the AMV design; audio-only default — `spectrum` is
 | 与下一行重叠 | end overlaps next start | `set_line_end` or realign both |
 | N 个字时长不足 45ms | squeezed syllables | realign |
 
-## MV design
+## 混剪 / 可视化 design
 
-Two designs per job: the AMV (`render/mv_spec.json`) and the image montage
-(`render/montage_spec.json`); a spec with a `montage` layer is saved as the montage design. Write
-one with `KM mv <job> --spec @spec.json` (`--kind` to force), print it with `KM mv <job> --show
-[--kind montage]`. A spec with only `"preset"` (+ `theme`/`notes`/`palette`) is completed from that
-preset. Without `fps` the background renders at the output frame rate (24 / 30 / 60 / source).
+Two designs per job — the visualisation design (`render/mv_spec.json`: cover / MV art plus the
+spectrum-style visualisers, for a song without footage) and the montage design
+(`render/montage_spec.json`: images and / or video clips cut to the beat). A spec with a `montage`
+layer is saved as the montage design; saving a design (also `mv_preset`) updates the one the job
+currently uses. Write one with `KM mv <job> --spec @spec.json` (`--kind` to force), print it with
+`KM mv <job> --show [--kind montage]`. A spec with only `"preset"` (+ `theme`/`notes`/`palette`) is
+completed from that preset. Without `fps` the background renders at the output frame rate; the
+乐曲可视化 switch over the design is described above.
 
 ```json
 {"preset": "starry_prayer", "theme": "祈愿 · 星空 · 生命", "notes": "歌词围绕祈祷与生命……",
