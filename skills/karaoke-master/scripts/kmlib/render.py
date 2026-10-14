@@ -198,7 +198,7 @@ def _base_background(store: JobStore, st: dict) -> dict:
 # ``options.background.visualize``: the 乐曲可视化 is an independent layer over whatever
 # background plays. How the background is prepared under it follows the material's own
 # quality (``options.background.visualize_mode``: auto / overlay / dim / blur).
-VISUALIZE_MODES = {"overlay": "直接叠加", "dim": "背景变淡", "blur": "模糊毛玻璃"}
+VISUALIZE_MODES = {"overlay": "直接叠加", "dim": "背景变淡", "blur": "毛玻璃（仅图案覆盖处）"}
 
 
 def resolve_visualize_mode(bg: dict, h: int, fps: int) -> str:
@@ -239,6 +239,8 @@ def _visualize_background(store: JobStore, st: dict, bg: dict, want_mode: str | 
     One ffmpeg pass per song: prepare the background per the treatment, then screen-blend
     the overlay (rendered once on black — black contributes nothing). The result is a
     plain background file, so nothing downstream needs to know about the visualiser.
+    ``blur`` frosts only the area the visualiser covers (the overlay doubles as the
+    mask), so whatever shape the agent designed is the shape that gets the glass.
     """
     import hashlib
 
@@ -274,18 +276,28 @@ def _visualize_background(store: JobStore, st: dict, bg: dict, want_mode: str | 
         except OSError:
             pass
 
-    treat = {"overlay": "null", "dim": "eq=brightness=-0.10:saturation=0.90",
-             "blur": "boxblur=18:2,eq=brightness=-0.06:saturation=0.95"}[mode]
-    if bg["kind"] == "image":
-        base = (f"[0:v]scale={w}:{h}:force_original_aspect_ratio=increase,crop={w}:{h},{treat},format=gbrp[t]")
-        inputs = ["-loop", "1", "-framerate", str(fps), "-i", str(src)]
+    pix = [f"scale={w}:{h}:force_original_aspect_ratio=increase,crop={w}:{h}"] if bg["kind"] == "image" else []
+    if mode == "blur":
+        # 毛玻璃只落在可视化图案覆盖到的地方：拿叠加层自身当遮罩（转灰度 + 提对比 + 羽化），
+        # 图案底下模糊、其余画面保持清晰。图案是什么形状，模糊区就是什么形状。
+        base = ";".join([
+            "[0:v]" + ",".join(pix + ["format=gbrp", "split=2[b0][b1]"]),
+            "[b1]boxblur=18:2,eq=brightness=-0.06:saturation=0.95[bb]",
+            "[1:v]format=gbrp,split=2[o][m0]",
+            "[m0]format=gray,boxblur=16:2,eq=gamma=2.0,boxblur=4:1[mk]",
+            "[b0][bb][mk]maskedmerge,format=gbrp[t]",
+        ])
+        ovl = "[t][o]blend=all_mode=screen:shortest=1,format=yuv420p[out]"
     else:
-        base = f"[0:v]{treat},format=gbrp[t]"
-        inputs = (["-ss", f"{off:.3f}"] if off else []) + ["-i", str(src)]
-    # Screen-blend in RGB: in YUV the chroma planes would be screened too and a black
-    # overlay would tint the whole frame instead of adding nothing.
+        treat = "null" if mode == "overlay" else "eq=brightness=-0.10:saturation=0.90"
+        base = "[0:v]" + ",".join(pix + [treat, "format=gbrp[t]"])
+        # Screen-blend in RGB: in YUV the chroma planes would be screened too and a black
+        # overlay would tint the whole frame instead of adding nothing.
+        ovl = "[1:v]format=gbrp[o];[t][o]blend=all_mode=screen:shortest=1,format=yuv420p[out]"
+    inputs = (["-loop", "1", "-framerate", str(fps)] if bg["kind"] == "image"
+              else (["-ss", f"{off:.3f}"] if off else [])) + ["-i", str(src)]
     cmd = [ffmpeg_exe(), "-v", "error", "-y", *inputs, "-i", str(overlay), "-filter_complex",
-           f"{base};[1:v]format=gbrp[o];[t][o]blend=all_mode=screen:shortest=1,format=yuv420p[out]",
+           f"{base};{ovl}",
            "-map", "[out]", "-map", "0:a?", "-c:a", "copy", "-c:v", "libx264", "-preset", "veryfast",
            "-crf", "18", "-movflags", "+faststart", str(dst)]
     r = subprocess.run(cmd, capture_output=True)

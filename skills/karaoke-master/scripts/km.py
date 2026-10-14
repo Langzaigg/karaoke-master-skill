@@ -175,6 +175,8 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--preset", help="以主题预设为起点（会覆盖当前设计）")
     p.add_argument("--spec", help="写入自定义场景 JSON（@文件）；只给 preset 字段时以该预设补全")
     p.add_argument("--show", action="store_true", help="打印当前设计")
+    p.add_argument("--overlay", nargs="?", const="", default=None,
+                   help="乐曲可视化叠加层：@文件 = 写入自定义图层（频谱的位置/大小/形状自定）；不带值 = 打印当前叠加层")
     p.add_argument("--stills", "--still", action="store_true", help="渲染 3 张关键时刻静帧（前奏 / 主歌 / 副歌）")
     p.add_argument("--gallery", action="store_true", help="为每个预设渲染一张副歌静帧（阶段一画廊）")
     p.add_argument("--video", action="store_true", help="渲染完整 MV 背景视频（含原唱音轨）")

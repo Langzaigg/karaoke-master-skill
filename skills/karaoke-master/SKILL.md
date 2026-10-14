@@ -252,8 +252,11 @@ Run these in this order; start the slow one first.
      as **one extra layer** by the background pass (rendered once on black, screen-blended, cached
      per song) — the same toggle either way. There the treatment follows the material's own
      quality — `options.background.visualize_mode`: `auto` (default: resolution / frame rate decide)
-     · `overlay` 直接叠加 · `dim` 背景变淡 · `blur` 模糊毛玻璃 — so a soft 720p source gets blurred
-     under the visualiser instead of fighting it.
+     · `overlay` 直接叠加 · `dim` 背景变淡 · `blur` 毛玻璃（只模糊可视化图案覆盖到的区域，其余画面保持
+     清晰；图案是环形就是环形毛玻璃）. The overlay itself is a plain layer set — design it for the song
+     like any scene (any visualiser, any position / size / shape: a bottom band, a ring around a
+     face, scattered patches); `KM mv <job> --overlay @spec.json` writes `render/overlay_spec.json`,
+     `--overlay` alone prints the current one, and the default is just a bottom band to start from.
    - Frame rate **24 / 25 / 30 / 50 / 60 / 120 fps** (`options.fps`), or `"source"` to follow the material's own frame rate; resolution, export kinds.
    Set it with `KM style <job> @patch.json` → `{"background": {...}}` (validates a video path and
    prepares the design stills) or let the user click in the page (`set_background` action).
@@ -633,7 +636,7 @@ with the skill venv and loads the exported project.
 | `lines JOB [--list] [--split N:pos] [--merge N] [--dup N] [--delete N] [--include R] [--exclude R] [--singer R=id] [--ruby N:a-b=かな] [--reannotate] [--fix-char N:pos=X] [--split-long N]` | stage-1 line ops |
 | `match JOB [--apply] [--ref ID]` | locate lines via ASR + synced reference |
 | `hires-source JOB [--on F] [--off F …] [--no-align] [--clear]` | stage-1 lossless source → timing audio |
-| `mv JOB [--kind mv\|montage] [--list-presets] [--preset ID] [--spec @f] [--show] [--stills] [--gallery] [--video] [--seconds N]` | 混剪 / 可视化 designer (alias `spectrum`) |
+| `mv JOB [--kind mv\|montage] [--list-presets] [--preset ID] [--spec @f] [--show] [--stills] [--gallery] [--video] [--seconds N] [--overlay [@f]]` | 混剪 / 可视化 designer (alias `spectrum`)；`--overlay` 单独用 = 打印乐曲可视化叠加层，带 `@f` = 写入自定义图层 |
 | `mv-video JOB [--search Q] [--n N] [--info URL\|#k] [--use URL\|#k] [--local PATH] [--max-height H]` | MV background from YouTube / Bilibili or a local video, aligned to the song |
 | `oped JOB [--add PATH\|URL [--label L] [--credit C] [--section A-B] [--speed X]] … [--shift sN=SEC] [--remove sN] [--clear] [--list] [--render [--fade S] [--force]]` | OP/ED 拼接背景: each source waveform-aligned, stitched in add order with cross-fades, gaps freeze-filled; `--section` uses only part of a source, `--speed` slow-stretches it |
 | `mv-clips JOB [--search Q] [--info URL] [--add URL\|PATH … [--sections a-b,…] [--credit C] [--crop x,y,w,h] [--max-height H]] [--library L] [--from-library] [--min-score S] [--max-clips N] [--sheet] [--sheet-used] [--mark-checked] [--exclude IDS\|#N\|UN] [--tag ID=t] [--avoid-from PROJECT] [--enhance [--only-used] [--ids IDS] [--no-sr] [--no-rife] [--sr-scale N] [--rife-multi N]] [--list] [--credits]` | video-clip montage: footage library → shots in the montage pool; review sheets; AI enhance (RIFE + Real-ESRGAN) for low-quality sources |

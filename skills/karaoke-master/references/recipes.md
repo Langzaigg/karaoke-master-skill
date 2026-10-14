@@ -40,7 +40,8 @@ sung at the playhead) — use them for "这句 / 这里 / 刚才那句".
 | 用游戏实况 / PV 卡点剪辑做背景 | `mv-clips --search` → `--add URL --sections a-b,…` → `--sheet` (look) → `--exclude` → `mv --kind montage --preset game_montage` |
 | 长镜头 / 官方 PV 整段拼成背景（不剪碎） | `oped <job> --add URL\|路径 [--section A-B] [--speed X]` → `--list`（看对齐与空隙）→ `--render`，再 `{"background":{"type":"oped"}}` |
 | 背景上要有频谱可视化 | `{"background":{"visualize":true}}` —— 三种模式通用；叠加方式 `visualize_mode`: `auto` / `overlay` / `dim` / `blur`（视频 / OPED 背景），混剪 / 可视化设计则用 `visualize:false` 去掉设计里的频谱层 |
-| 素材画质不够，直接叠频谱看不清 | `visualize_mode`: `dim`（背景变淡）或 `blur`（毛玻璃）——`auto` 会按素材分辨率 / 帧率自己判 |
+| 素材画质不够，直接叠频谱看不清 | `visualize_mode`: `dim`（背景变淡）或 `blur`（毛玻璃，只糊图案覆盖到的区域）——`auto` 会按素材分辨率 / 帧率自己判 |
+| 频谱要和画面配（位置 / 大小 / 形状） | `mv <job> --overlay @spec.json` 写 `render/overlay_spec.json`（普通图层集：环形、贴底条带、几处分散的小块都行），`--overlay` 单独用看当前那份 |
 | 两首歌别用同样的镜头 | `mv-clips <job2> --avoid-from <job1>` |
 | 走字不够平滑 / 忽快忽慢 | `edit` `[{"op":"smooth"}]` (strength 0.5, ≤ 80 ms per checkpoint; again for more) |
 | 第 3、5、8 行是合唱 | page: select the line numbers, click both singers, 「设为」; chat: `KM singers`/`set_singer` with a 「A＆B」 singer |
@@ -107,7 +108,15 @@ the modes; `color` and `image` (`path` relative to the job, e.g. an upload) are 
 own visualiser layers — `false` drops them at load time without touching the saved spec; on a video /
 OPED / image background it is composited on as one extra layer (rendered once on black,
 screen-blended, cached per song). `visualize_mode` picks the treatment: `auto` (default — the
-material's resolution / frame rate decide) · `overlay` 直接叠加 · `dim` 背景变淡 · `blur` 模糊毛玻璃.
+material's resolution / frame rate decide) · `overlay` 直接叠加 · `dim` 背景变淡 · `blur` 毛玻璃
+(only the area the visualiser covers is frosted — the overlay doubles as the mask, so a ring-shaped
+patch gets a ring-shaped glass).
+
+That overlay is an ordinary spec, not a fixed band — design it per song: any of the layer types
+below (`spectrum` / `waveform` / `pulse` / `particles` …), any position, size and shape (bottom band,
+ring around a face, scattered patches). `KM mv <job> --overlay @spec.json` writes
+`render/overlay_spec.json`, `KM mv <job> --overlay` prints it, and the same `palette` / `$0..$4` /
+`react` rules as a design apply; without the file a default bottom band is used.
 
 ## QA flags (`KM qa`)
 

@@ -1575,6 +1575,15 @@ def cmd_mv(args) -> int:
     if args.list_presets:
         _p(mv.catalog(args.kind))
         return 0
+    if getattr(args, "overlay", None) is not None:
+        # 视频 / OPED / 图片背景上的「乐曲可视化」叠加层：普通图层集，位置 / 大小 / 形状随歌自定
+        if args.overlay:
+            spec = _json_arg(args.overlay)
+            write_json(mv.overlay_path(store), spec)
+            store.log(f"乐曲可视化叠加层：已写入自定义图层（{len(spec.get('layers') or [])} 层）")
+        else:
+            _p({"file": str(mv.overlay_path(store)), **mv.load_overlay(store)})
+        return 0
     kind = args.kind
     if args.preset:
         spec = mv.preset_spec(args.preset)

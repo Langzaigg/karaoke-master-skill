@@ -2041,9 +2041,15 @@ def job_features(store: JobStore, st: dict) -> dict:
 # ``options.background.visualize``: the 乐曲可视化 as an overlay on a background that is
 # NOT a design (视频 / OPED / 图片). It renders alone on black and is composited onto the
 # background with a screen blend (black adds nothing), so a single overlay serves any
-# treatment (直接叠加 / 背景变淡 / 模糊) the background pass decides on.
+# treatment (直接叠加 / 背景变淡 / 毛玻璃) the background pass decides on.
+#
+# The spec below is only the starting point. The overlay is an ordinary layer set —
+# the agent designs it for the song the same way it designs a scene: any visualiser
+# (spectrum / waveform / pulse / particles …), any position, size, shape (a bottom
+# band, a ring around a face, several scattered patches). Write the job's own with
+# ``KM mv <job> --overlay @spec.json`` → ``render/overlay_spec.json``.
 VISUAL_OVERLAY = {
-    "name": "乐曲可视化", "desc": "叠加在背景画面上的频谱可视化（贴着画面底边的条带）",
+    "name": "乐曲可视化", "desc": "叠加在背景画面上的频谱可视化",
     "palette": "auto",
     "layers": [
         {"type": "spectrum", "style": "horizon", "y": 0.975, "x0": 0.02, "x1": 0.98, "height": 0.095,
@@ -2058,6 +2064,18 @@ def overlay_spec() -> dict:
     return spec
 
 
+def overlay_path(store: JobStore) -> Path:
+    return store.path("render", "overlay_spec.json")
+
+
+def load_overlay(store: JobStore) -> dict:
+    """This job's 乐曲可视化 overlay: ``render/overlay_spec.json`` if written, else the default."""
+    spec = read_json(overlay_path(store)) or {}
+    if not spec.get("layers"):
+        return overlay_spec()
+    return {**overlay_spec(), **spec}
+
+
 def render_overlay(store: JobStore, st: dict, out: Path) -> Path:
     """Render the visualiser alone on black (screen-blend material for a background pass)."""
     import hashlib
@@ -2067,7 +2085,7 @@ def render_overlay(store: JobStore, st: dict, out: Path) -> Path:
     qt_app()
     from PyQt6.QtGui import QImage
 
-    spec = overlay_spec()
+    spec = load_overlay(store)
     w, h = _output_wh(st)
     fps = _output_fps(st, spec)
     feats = store.path("render", "mv_features.npz")     # the audio drives the whole overlay

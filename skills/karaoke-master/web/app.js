@@ -704,8 +704,11 @@ function renderVisualizeToggle() {
   if (bg.visualize === true && !design) {
     const cur = bg.visualize_mode || "auto";
     const c2 = el("div", { class: "seg-ctl" });
-    for (const [v, label] of [["auto", "按素材质量自动"], ["overlay", "直接叠加"], ["dim", "背景变淡"], ["blur", "模糊毛玻璃"]]) {
-      c2.append(el("button", { class: cur === v ? "on" : "", onclick: () => {
+    for (const [v, label, tip] of [["auto", "按素材质量自动", "按背景素材的分辨率 / 帧率自动决定"],
+                                   ["overlay", "直接叠加", "可视化图案直接叠在画面上"],
+                                   ["dim", "背景变淡", "整幅背景压暗一点，凸显可视化"],
+                                   ["blur", "毛玻璃", "只模糊可视化图案覆盖到的区域，其余画面保持清晰"]]) {
+      c2.append(el("button", { class: cur === v ? "on" : "", title: tip, onclick: () => {
         setBackground(Object.assign({}, bg, { visualize_mode: v }));
         if (v !== "auto") toast("叠加方式：" + label);
       } }, label));
