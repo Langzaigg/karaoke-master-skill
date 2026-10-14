@@ -1233,13 +1233,20 @@ def _english_timing(store: JobStore, st: dict, project, idx: list[int], args) ->
             clamped += 1
     for li, (words, times) in planned.items():
         chars_all = lines[li]["chars"]
-        for ci, ch in enumerate(project.sentences[li].characters[:-1]):  # drop the old timing's pauses
+        sent_chars = project.sentences[li].characters
+        for ci, ch in enumerate(sent_chars[:-1]):  # drop the old timing's pauses
             if ch.is_sentence_end:
                 ops.append({"op": "set_pause", "line": li, "char": ci, "t": None})
         for j, ((chars, _w), (s0, e0)) in enumerate(zip(words, times)):
-            sent_chars = project.sentences[li].characters  # check_count: also right before the first timing
-            cps = [(ci, c) for ci in chars for c in range(max(sent_chars[ci].check_count,
-                                                                 len(chars_all[ci].get("cp") or [])))]
+            # A character holds exactly `check_count` checkpoints (1 by default), so a
+            # multi-glyph word can only light one glyph per word: the wipe jumps from
+            # word to word. Give the first glyph of a multi-glyph word the whole span,
+            # split evenly over its glyphs, so the wipe sweeps through the word.
+            head = sent_chars[chars[0]]
+            need = len(chars) if len(chars) > 1 else 1
+            if head.check_count < need:
+                ops.append({"op": "set_check_count", "line": li, "char": chars[0], "count": need})
+            cps = [(chars[0], c) for c in range(need)]
             for k, (ci, c) in enumerate(cps):
                 ops.append({"op": "set_char", "line": li, "char": ci, "cp": c,
                             "t": round(s0 + (e0 - s0) * k / max(1, len(cps)), 3)})

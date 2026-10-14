@@ -698,6 +698,8 @@ def apply_edits(project, edits: list[dict]) -> list[str]:
     the new line; timing kept) · smooth {lines?, strength?=0.5, max_ms?=80}
     (even wipe speed inside phrases) · set_line_span {line, start, end}
     (seconds; rescales the line linearly) · set_char {line, char, cp?, t} ·
+    set_check_count {line, char, count} (grow a character's checkpoint capacity; needed before
+    writing several checkpoints into one character, e.g. sweeping a multi-glyph Latin word) ·
     set_line_end {line, t} · set_pause {line, char, t|None} ·
     set_singer {lines, singer (id or name), chars?: [first, last]} (chars = 0-based, inclusive:
     only that part of the line, e.g. a trio entering mid-line) · add_singer {name, color} ·
@@ -746,6 +748,12 @@ def apply_edits(project, edits: list[dict]) -> list[str]:
                 if ch.sentence_end_ts is not None:
                     ch.sentence_end_ts = int(new_a + (ch.sentence_end_ts - old_a) * scale)
             log.append(f"第 {int(ed['line']) + 1} 行时间范围设为 {ed['start']}–{ed['end']} 秒")
+        elif op == "set_check_count":
+            ch = sentences[int(ed["line"])].characters[int(ed["char"])]
+            want = int(ed["count"])
+            if ch.check_count < want:
+                ch.set_check_count(want, force=True, ruby_split_mode="direct")
+                log.append(f"第 {int(ed['line']) + 1} 行第 {int(ed['char']) + 1} 字节奏点扩为 {want}")
         elif op == "set_char":
             ch = sentences[int(ed["line"])].characters[int(ed["char"])]
             cp = int(ed.get("cp", 0))
