@@ -142,12 +142,18 @@ def background_spec(store: JobStore, st: dict) -> dict:
     has_video = st["media"].get("source", {}).get("has_video")
     kind = bg.get("type") or ("source" if has_video else "mv")
     if kind == "source" and has_video:
-        return {"kind": "video", "path": st["media"]["source"]["path"]}
+        out = {"kind": "video", "path": st["media"]["source"]["path"]}
+        if bg.get("offset"):
+            out["offset"] = float(bg["offset"])  # 背景从素材的第 N 秒开始（掐掉片头）
+        return out
     if kind == "video" and bg.get("path"):
         p = Path(bg["path"])
         p = p if p.is_absolute() else store.abs(bg["path"])
         if p.is_file():
-            return {"kind": "video", "path": str(p), "external": True}
+            out = {"kind": "video", "path": str(p), "external": True}
+            if bg.get("offset"):
+                out["offset"] = float(bg["offset"])
+            return out
     if kind in ("mv", "spectrum", "montage") or (kind in ("source", "video") and not has_video):
         from . import mv
 
@@ -189,7 +195,7 @@ def paint_background(img, bg: dict, t: float, cache_dir: Path | None = None):
     painter.fillRect(0, 0, w, h, QColor(bg.get("color") or "#000000"))
     src = None
     if bg["kind"] == "video":
-        src = video_frame(Path(bg["path"]), t, w, h, cache_dir)
+        src = video_frame(Path(bg["path"]), t + float(bg.get("offset") or 0.0), w, h, cache_dir)
     elif bg["kind"] == "image":
         src = QImage(bg["path"])
         if not src.isNull():
@@ -520,7 +526,8 @@ def _background_source(bg: dict):
     from krok_helper.subtitle_render.domain.background import BackgroundSource
 
     if bg["kind"] == "video":
-        return BackgroundSource(kind="video", path=Path(bg["path"]))
+        return BackgroundSource(kind="video", path=Path(bg["path"]),
+                                video_offset_ms=int(round(float(bg.get("offset") or 0.0) * 1000)))
     if bg["kind"] == "image":
         return BackgroundSource(kind="image", path=Path(bg["path"]), image_fit="cover")
     return BackgroundSource(kind="solid", color=bg.get("color") or "#000000")
