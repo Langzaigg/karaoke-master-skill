@@ -281,7 +281,19 @@ def apply_overrides(style, overrides: dict | None):
     if not overrides:
         return style
     valid = {k: v for k, v in overrides.items() if hasattr(style, k)}
-    return replace(style, **valid)
+    style = replace(style, **valid)
+    sung = overrides.get("sung_color")
+    # 唱过色（文字 + 辉光）：重建 karaoke_colors 的 after 态；模板的多歌手拼色仍优先生效
+    if sung and style.karaoke_colors is not None:
+        from krok_helper.subtitle_render.domain.paint import KaraokeColorState, KaraokeColors
+
+        kc = style.karaoke_colors
+        after = KaraokeColorState(
+            text=_fill([shade(sung, 0.12), shade(sung, -0.08, 1.1)]),
+            stroke=kc.after.stroke, stroke2=kc.after.stroke2, shadow=_fill(sung))
+        style = replace(style, karaoke_colors=KaraokeColors(before=kc.before, after=after),
+                        fill_color=sung)
+    return style
 
 
 def web_style(tpl: dict, eff: dict, singers: list[dict], overrides: dict | None, *, font: str) -> dict:

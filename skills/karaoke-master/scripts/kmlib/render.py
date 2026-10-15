@@ -435,7 +435,7 @@ def cmd_previews(store: JobStore, only: list[str] | None = None) -> int:
             variant = json.loads(json.dumps(st))
             variant.setdefault("options", {})["template"] = tpl["id"]
             variant["options"]["effect"] = "classic"
-            variant["options"].pop("overrides", None)
+            # overrides（字号 / 底部间距等）保留：模板预览要反映用户当前的字号与间距
             variant["song"]["singers"] = []
             img = frame_for(variant, l1s + (l1e - l1s) * 0.55, t_bg)
             path = store.path("previews", f"tpl_{tpl['id']}.jpg")

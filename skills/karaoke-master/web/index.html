@@ -142,6 +142,14 @@
               <select id="out-res"><option value="1920x1080">1920 × 1080</option><option value="1280x720">1280 × 720</option><option value="2560x1440">2560 × 1440</option><option value="3840x2160">3840 × 2160</option></select>
             </div>
             <div class="field">
+              <span>字幕字号</span>
+              <div class="cast-row"><input type="number" id="out-font-size" step="2" min="40" max="160" title="歌词主字号（px）。留空 = 模板默认；会影响超宽行检测，行太长时建议先调小字号再考虑拆行"><button class="btn ghost sm" id="out-font-default">默认</button></div>
+            </div>
+            <div class="field">
+              <span>底部间距</span>
+              <div class="cast-row"><input type="number" id="out-bottom-margin" step="5" min="0" max="400" title="歌词距画面底部的间距（px）。加大可给视频自带的字幕 / 水印留出位置"><button class="btn ghost sm" id="out-bottom-default">默认</button><button class="btn primary sm" id="out-style-apply" title="用渲染引擎按当前字号 / 底部间距重出模板与特效预览">应用到预览</button></div>
+            </div>
+            <div class="field">
               <span>投屏延迟</span>
               <div class="cast-row"><input type="number" id="out-cast" step="50" min="-2000" max="2000" title="画面比声音提前的毫秒数，补偿投屏 / 电视的画面延迟（默认 +200）"> <span class="muted small">毫秒</span></div>
             </div>

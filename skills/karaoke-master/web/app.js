@@ -254,6 +254,7 @@ function ensureDraft1() {
       outputs: opts.outputs || ["mp4", "sug", "yurika", "onoff"],
       ruby: opts.ruby !== false,
       title: opts.title !== false,
+      overrides: JSON.parse(JSON.stringify(opts.overrides || {})),
     },
     touched: {},
   };
@@ -624,6 +625,13 @@ function renderOutput() {
   $("#out-kind-mv").hidden = !(cur === "mv" || cur === "montage");
   $("#out-kind-mv-label").textContent = cur === "montage" ? "混剪（无字幕版）" : "可视化（无字幕版）";
   $("#out-res").value = o.resolution;
+  const tplSize = (((j.previews.catalog || {}).templates || []).find((t) => t.id === o.template) || {}).size || 96;
+  const fsInp = $("#out-font-size");
+  if (document.activeElement !== fsInp) fsInp.value = (o.overrides || {}).font_size_px === undefined ? "" : (o.overrides || {}).font_size_px;
+  fsInp.placeholder = `默认 ${tplSize}`;
+  const bmInp = $("#out-bottom-margin");
+  if (document.activeElement !== bmInp) bmInp.value = (o.overrides || {}).line_y_margin_px === undefined ? "" : (o.overrides || {}).line_y_margin_px;
+  bmInp.placeholder = "默认 60";
   if (document.activeElement !== $("#out-cast")) $("#out-cast").value = o.cast_delay_ms === undefined ? 200 : o.cast_delay_ms;
   if (o.fps === undefined || o.fps === null) o.fps = 60;
   o.fps = fpsChoice(o.fps);
@@ -888,6 +896,28 @@ function bindStage1() {
   });
   $("#singer-refresh").addEventListener("click", () => { act("preview_styles", { only: ["singers"], singers: S.d1.singers, options: { template: S.d1.options.template } }); toast("正在用渲染引擎刷新歌手样式预览"); });
   $("#out-res").addEventListener("change", (ev) => { S.d1.options.resolution = ev.target.value; touch("options"); });
+  $("#out-font-size").addEventListener("change", (ev) => {
+    const v = Math.round(+ev.target.value || 0);
+    const ov = { ...(S.d1.options.overrides || {}) };
+    if (v >= 40) ov.font_size_px = v; else delete ov.font_size_px;
+    if (Object.keys(ov).length) S.d1.options.overrides = ov; else delete S.d1.options.overrides;
+    touch("options"); renderOutput();
+  });
+  $("#out-font-default").addEventListener("click", () => { $("#out-font-size").value = ""; $("#out-font-size").dispatchEvent(new Event("change")); });
+  $("#out-bottom-margin").addEventListener("change", (ev) => {
+    const raw = ev.target.value.trim();
+    const v = Math.round(+raw || 0);
+    const ov = { ...(S.d1.options.overrides || {}) };
+    if (raw !== "" && v >= 0) ov.line_y_margin_px = v; else delete ov.line_y_margin_px;
+    if (Object.keys(ov).length) S.d1.options.overrides = ov; else delete S.d1.options.overrides;
+    touch("options"); renderOutput();
+  });
+  $("#out-bottom-default").addEventListener("click", () => { $("#out-bottom-margin").value = ""; $("#out-bottom-margin").dispatchEvent(new Event("change")); });
+  $("#out-style-apply").addEventListener("click", () => {
+    const options = Object.assign({}, S.d1.options, { overrides: S.d1.options.overrides || {} });
+    act("preview_styles", { only: ["templates", "effects"], options });
+    toast("正在按当前字号 / 底部间距重出模板与特效预览…");
+  });
   $("#out-cast").addEventListener("change", (ev) => {
     const v = Math.round(+ev.target.value || 0); S.d1.options.cast_delay_ms = v; touch("options");
     act("set_option", { cast_delay_ms: v });
