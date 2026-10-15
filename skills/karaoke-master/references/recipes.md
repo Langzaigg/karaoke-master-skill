@@ -42,6 +42,10 @@ sung at the playhead) — use them for "这句 / 这里 / 刚才那句".
 | 背景上要有频谱可视化 | `{"background":{"visualize":true}}` —— 三种模式通用；叠加方式 `visualize_mode`: `auto` / `overlay` / `dim` / `blur`（视频 / OPED 背景），混剪 / 可视化设计则用 `visualize:false` 去掉设计里的频谱层 |
 | 素材画质不够，直接叠频谱看不清 | `visualize_mode`: `dim`（背景变淡）或 `blur`（毛玻璃，只糊图案覆盖到的区域）——`auto` 会按素材分辨率 / 帧率自己判 |
 | 频谱要和画面配（位置 / 大小 / 形状） | `mv <job> --overlay @spec.json` 写 `render/overlay_spec.json`（普通图层集：环形、贴底条带、几处分散的小块都行），`--overlay` 单独用看当前那份 |
+| 一批图要按顺序、正好铺满歌曲某一段 | 手写卡点计划：小节网格吸附乐句边界、帧数精确填充，逐张渲染成段视频再 `KM oped` 拼接（见 segment-editing.md §1） |
+| 图片幻灯片配慢速推拉看着抽搐 / 抖动 | 别用 ffmpeg `zoompan`（采样窗整数像素台阶）；逐帧浮点渲染（PIL AFFINE + rawvideo 管道，segment-editing.md §2） |
+| 频谱只出现在某一段（其他段不要） | `kmlib.mv.render_overlay` 单独渲染黑底频谱，只对目标段 screen 混合（两侧 `format=gbrp`，RGB 下混合），段文件里补上歌曲音轨（segment-editing.md §3） |
+| 视频段 + 自制图片段拼成一个背景 | 各段写成视频文件，带歌曲音轨才能自动对齐（无音轨用 `--shift`）；`KM oped --add` 依次添加；段内容重做过就 `--render --force`（segment-editing.md §4） |
 | 两首歌别用同样的镜头 | `mv-clips <job2> --avoid-from <job1>` |
 | 走字不够平滑 / 忽快忽慢 | `edit` `[{"op":"smooth"}]` (strength 0.5, ≤ 80 ms per checkpoint; again for more) |
 | 第 3、5、8 行是合唱 | page: select the line numbers, click both singers, 「设为」; chat: `KM singers`/`set_singer` with a 「A＆B」 singer |

@@ -335,6 +335,15 @@ tail beyond the song may need a separate cut, and footage the long ver lacks can
 another video (user-supplied or a second OP/ED) added later to fill the gaps. Low-confidence
 alignments and uncovered intervals are printed by `--list` and stored in `media.oped.notes`.
 
+A segment can also be a **video you build yourself** — a stills slideshow (cuts on the lyric
+phrases, judder-free float-rendered slow moves, the visualiser composited into that segment only)
+or a prepared clip. Produce it as a normal video file under `media/`, give it the song's own
+audio so the next `--add` waveform-aligns it (a silent segment cannot — place it with
+`--shift sN=秒`), then stitch as above. Replacing a segment file's content needs
+`--render --force`（缓存只比较段配置，不看文件内容）. Full chain — cut planning, slow-move
+rendering, segment-scoped visualiser, stitching and verification:
+[references/segment-editing.md](references/segment-editing.md).
+
 ### 混剪 / 可视化设计 (montage design for a song without footage)
 
 The design is the background when `background.type` is `montage`; it is also exported alone as
@@ -401,6 +410,11 @@ Exported alone as `<name> (混剪).mp4`.
 - Keep montages **smooth** by default: crossfades and slow pans only (`transitions: "auto"`, no `punch`,
   no `flash` layer). Beat zooms / white flashes on still images look like twitching — use the `beat`
   transitions, `punch` or the `montage_beat` preset only when the user explicitly wants a 燃 / 踩点冲击 edit.
+- A **hand-picked slideshow that fills one passage exactly** (chosen images in a chosen order, one
+  duration per image, effects per segment) is not a montage-layer job: the planner paces the whole
+  song from a pool. Build it as a video segment and stitch it with `KM oped` — recipe (cut
+  planning, judder-free slow moves, segment-scoped visualiser, stitching):
+  [references/segment-editing.md](references/segment-editing.md).
 - The page shows the cut plan as a filmstrip plus the image pool (badges: 图包 / 网络 / 视频 / 片段); the
   user can remove images (re-plans and re-renders stills), upload more, or ask you for others.
 
