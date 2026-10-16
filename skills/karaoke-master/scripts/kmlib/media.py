@@ -171,12 +171,36 @@ def peaks(path: str | Path, per_second: int = 50) -> dict:
 
 
 def rms_envelope(path: str | Path, hop_s: float = 0.02) -> tuple[np.ndarray, float]:
+    """10ms/20ms 人声包络（带磁盘缓存：源文件没变就直接读 .rms.npz）。
+
+    每次时间微调质检都要它；392 秒的 wav 现算约 0.7 秒，缓存后降到毫秒级。
+    """
+    path = Path(path)
+    cache = path.with_name(path.name + f".rms{int(round(hop_s * 1000))}.npz")
+    key = None
+    try:
+        st = path.stat()
+        key = f"{st.st_mtime_ns}:{st.st_size}:{hop_s}"
+    except OSError:
+        pass
+    if key and cache.is_file():
+        try:
+            z = np.load(cache, allow_pickle=False)
+            if str(z["key"]) == key:
+                return z["rms"], float(z["hop"])
+        except Exception:
+            pass
     sr = 16000
     mono = load_mono(path, sr)
     hop = int(sr * hop_s)
     n = len(mono) // hop
     frames = mono[: n * hop].reshape(n, hop)
     rms = np.sqrt((frames.astype(np.float64) ** 2).mean(axis=1) + 1e-12)
+    if key:
+        try:
+            np.savez_compressed(cache, key=key, rms=rms, hop=hop_s)
+        except OSError:
+            pass
     return rms, hop_s
 
 

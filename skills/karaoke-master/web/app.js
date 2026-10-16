@@ -190,7 +190,9 @@ async function loadTimingView() {
     if (S.expects.size) {
       const now = Date.now();
       for (const [k, ex] of S.expects) {
-        if (now - ex.at > 20000) { S.expects.delete(k); continue; }
+        // 保护期内绝不接受缺自己编辑的快照；队列偶尔卡顿（合并批处理/长质检）时
+        // 放宽到 60 秒，宁可等也不能把旧状态倒灌回界面（那看起来就是「回档」）。
+        if (now - ex.at > 60000) { S.expects.delete(k); continue; }
         const bch = v.lines[ex.line] && v.lines[ex.line].chars[ex.char];
         if (!bch || bch.cp.length !== ex.cp.length || !!bch.se !== ex.se
             || ex.cp.some((t, i) => Math.abs(bch.cp[i] - t) > 0.03)) return;

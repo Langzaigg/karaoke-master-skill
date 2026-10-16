@@ -13,6 +13,7 @@ Stdlib only (``http.server``) so it starts instantly.  Responsibilities:
 
 from __future__ import annotations
 
+import itertools
 import json
 import mimetypes
 import os
@@ -201,9 +202,62 @@ _tools_lock = threading.Lock()
 # race (lost updates / scrambled snapshots). Run this group strictly one at a time.
 SERIAL_TOOLS = {"edit_timing", "undo", "redo", "singers"}
 _serial_lock = threading.Lock()
+_serial_seq = itertools.count(1)       # spawn order == POST order
+_waiting_serial: dict[str, dict] = {}  # id -> {"seq", "type", "file"}（正等着 _serial_lock 的操作）
+
+
+def _batch_edits(store: JobStore, aid: str, own_file: Path) -> bool:
+    """把已经排队在本操作后面的 edit_timing 合并成一次执行。
+
+    一次微调要好几秒（引擎布局重扫等），用户连续编辑时一个个跑会让队列越积越长
+    （最严重时页面看到的落后 ~2 分钟，刷新把旧状态倒灌回来）。同批按提交顺序重放。
+    返回 False = 本操作已被更早的批次吸收（本线程直接退出）。
+    """
+    mine = read_json(own_file) or {}
+    if mine.get("merged_into"):
+        return False
+    if mine.get("type") != "edit_timing":
+        return True
+    with _tools_lock:
+        items = sorted(_waiting_serial.items(), key=lambda kv: kv[1]["seq"])
+    ops = list((mine.get("payload") or {}).get("ops") or [])
+    merged: list[tuple[str, Path]] = []
+    started = False
+    for oid, info in items:
+        if oid == aid:
+            started = True
+            continue
+        if not started:
+            continue
+        if info["type"] != "edit_timing":
+            break  # 严格保持提交顺序：中间夹了撤销/换歌手就到此为止
+        other = read_json(info["file"]) or {}
+        if other.get("merged_into"):
+            continue
+        extra = list((other.get("payload") or {}).get("ops") or [])
+        if ops and extra and len(ops) + len(extra) > 400:
+            break  # 单批有上限，剩下的留给下一批
+        ops += extra
+        merged.append((oid, info["file"]))
+    if not merged:
+        return True
+    mine.setdefault("payload", {})["ops"] = ops
+    write_json(own_file, mine)
+    for oid, f in merged:
+        d = read_json(f) or {}
+        d["merged_into"] = aid
+        d["state"] = "merged"
+        write_json(f, d)
+        with _tools_lock:
+            _waiting_serial.pop(oid, None)
+    store.log(f"已合并 {len(merged)} 次排队中的编辑，一次处理（共 {len(ops)} 个操作）")
+    return True
 
 
 def _spawn_tool(store: JobStore, action: dict) -> None:
+    serial = action.get("type") in SERIAL_TOOLS
+    if serial:
+        action = {**action, "seq": next(_serial_seq)}
     action_file = store.path("logs", f"action_{action['id']}.json")
     write_json(action_file, action)
 
@@ -215,19 +269,35 @@ def _spawn_tool(store: JobStore, action: dict) -> None:
             return subprocess.Popen(cmd, stdout=log, stderr=subprocess.STDOUT, cwd=str(store.dir),
                                     **hidden_subprocess_kwargs())
 
-        if action.get("type") in SERIAL_TOOLS:
+        if serial:
+            with _tools_lock:
+                _waiting_serial[action["id"]] = {"seq": action["seq"], "type": action["type"], "file": action_file}
             with _serial_lock:
-                proc = launch()
-                with _tools_lock:
-                    _running_tools[action["id"]] = proc
-                proc.wait()
+                try:
+                    if not _batch_edits(store, action["id"], action_file):
+                        return
+                    proc = launch()
+                    with _tools_lock:
+                        _running_tools[action["id"]] = proc
+                    proc.wait()
+                finally:
+                    with _tools_lock:
+                        _waiting_serial.pop(action["id"], None)
+                        _running_tools.pop(action["id"], None)
+                    try:
+                        done = read_json(action_file) or {}
+                        if not done.get("merged_into"):
+                            done["state"] = "done"
+                            write_json(action_file, done)
+                    except OSError:
+                        pass
         else:
             proc = launch()
             with _tools_lock:
                 _running_tools[action["id"]] = proc
             proc.wait()
-        with _tools_lock:
-            _running_tools.pop(action["id"], None)
+            with _tools_lock:
+                _running_tools.pop(action["id"], None)
 
     threading.Thread(target=run, daemon=True).start()
 

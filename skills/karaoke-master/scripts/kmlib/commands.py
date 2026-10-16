@@ -651,7 +651,7 @@ def _save_view(store: JobStore, project, qa: dict | None = None) -> dict:
 OVERFLOW_NOTE = "超出画面宽度：用 edit split_line 拆成两行"
 
 
-def _run_qa(store: JobStore, project, line_scores: dict | None = None) -> dict:
+def _run_qa(store: JobStore, project, line_scores: dict | None = None, *, layout: bool = True) -> dict:
     from . import analysis, media, sugbridge
 
     st = store.load()
@@ -684,9 +684,10 @@ def _run_qa(store: JobStore, project, line_scores: dict | None = None) -> dict:
     store.update(lambda s: s["timing"].update(qa_summary=summary,
                                               line_scores={str(k): v for k, v in scores.items()},
                                               view="timing/timed.json", revision=int(time.time())))
-    from . import weblayout
+    if layout:
+        from . import weblayout
 
-    weblayout.refresh(store)  # engine-exact overlay for the review page
+        weblayout.refresh(store)  # engine-exact overlay for the review page
     wide = (read_json(store.path("render", "web_layout.json")) or {}).get("overflow") or []
     if wide:  # the engine layout says these lines are wider than the frame
         for i in wide:
@@ -2169,6 +2170,32 @@ def _ui_singers(store: JobStore, payload: dict) -> list[str]:
     return log
 
 
+def _newer_edit_waiting(store: JobStore, action: dict) -> bool:
+    """还有比本操作更晚排队、尚未执行的 edit_timing 吗？
+
+    有的话这一批不必重扫引擎布局（最贵的 3 秒）：等队列排空的那一批再统一刷新，
+    避免用户连续编辑时把队列拖长（见 server._batch_edits）。
+    """
+    seq = action.get("seq")
+    if not isinstance(seq, int):
+        return False
+    try:
+        files = list(store.path("logs").glob("action_*.json"))
+    except OSError:
+        return False
+    for p in files:
+        try:
+            d = read_json(p) or {}
+        except OSError:
+            continue
+        if d.get("type") != "edit_timing" or d.get("merged_into") or d.get("state") == "done":
+            continue
+        oseq = d.get("seq")
+        if isinstance(oseq, int) and oseq > seq:
+            return True
+    return False
+
+
 def cmd_ui_action(args) -> int:
     store = JobStore(args.job)
     action = read_json(Path(args.action_file))
@@ -2179,6 +2206,7 @@ def cmd_ui_action(args) -> int:
             from . import sugbridge
 
             ops = payload.get("ops", [])
+            defer_layout = _newer_edit_waiting(store, action)
             _snapshot(store, "歌词 / 注音修改" if any(o.get("op") in ("set_text", "set_ruby", "set_word_ruby", "set_word_links") for o in ops)
                       else "平滑走字" if any(o.get("op") == "smooth" for o in ops) else "时间微调")
             project = sugbridge.load_project(store.dir / "timing" / "project.sug")
@@ -2186,9 +2214,11 @@ def cmd_ui_action(args) -> int:
             sugbridge.save_project(project, store.dir / "timing" / "project.sug")
             _sync_split_stage1(store, ops)
             _sync_text_stage1(store, project, ops)
-            _run_qa(store, project)
+            _run_qa(store, project, layout=not defer_layout)
             for line in log:
                 store.log("手动微调：" + line)
+            if defer_layout:
+                store.log("布局预览稍后统一重扫（队列里还有更新的编辑）")
         elif kind == "singers":
             _ui_singers(store, payload)
         elif kind == "undo":

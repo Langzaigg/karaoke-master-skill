@@ -341,6 +341,16 @@ tail beyond the song may need a separate cut, and footage the long ver lacks can
 another video (user-supplied or a second OP/ED) added later to fill the gaps. Low-confidence
 alignments and uncovered intervals are printed by `--list` and stored in `media.oped.notes`.
 
+**Place the footage by strength, not by order.** Long sources are uneven: a take can open with
+dialogue, cut to a menu, then have its one spectacular moment. Rate the candidate ranges first
+(a few seconds per thumbnail — wide sampling hides dialogue scenes, menus and hands in frame),
+find each song's **climax windows** (the `energy` curve of the job's own features: the P80 blocks
+and the loudest ~20 s), and make sure the strongest footage lands there; fill verses with the
+calmer material and keep the ending low-key. Keep a rating per range (a ★1–★5 scale works) so the
+same inventory can be reused across songs — and check a take's real content before trusting its
+title or a thumbnail grid: the same trailer is often uploaded under several ids, and 720² VR
+single-eye captures or tightly cropped gameplay look soft on a 1080p timeline.
+
 A segment can also be a **video you build yourself** — a stills slideshow (cuts on the lyric
 phrases, judder-free float-rendered slow moves, the visualiser composited into that segment only)
 or a prepared clip. Produce it as a normal video file under `media/`, give it the song's own
