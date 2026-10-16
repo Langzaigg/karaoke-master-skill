@@ -324,31 +324,29 @@
               <header id="export-head"><h2 title="点击展开 / 收起"><span class="caret">▸</span>导出</h2><button class="btn ghost sm" id="open-app" title="用 Lin-K Lyrics 打开导出的 .yurika / .sug，继续手工精修">在 Lin-K Lyrics 中打开</button><button class="btn ghost sm" id="open-export">打开导出文件夹</button></header>
               <div class="collapse-body">
                 <div class="exp-pick">
-                  <div class="muted small">勾选要导出的内容，点「一键导出」</div>
-                  <div class="checks exp-checks" id="s3-out-kinds">
-                    <label><input type="checkbox" value="mp4"> 成品 MP4（KTV 字幕视频）</label>
-                    <label><input type="checkbox" value="sug"> SUG 打轴工程 (.sug)</label>
-                    <label><input type="checkbox" value="yurika"> 字幕工程 (.yurika)</label>
-                    <label><input type="checkbox" value="lrc"> 逐字 LRC</label>
-                    <label><input type="checkbox" value="alpha"> 透明字幕层 MOV（ProRes 4444，叠加到剪辑软件）</label>
-                    <label><input type="checkbox" value="onoff"> on vocal / off vocal 双版本</label>
-                    <label id="s3-kind-mv"><input type="checkbox" value="mv"> <span id="s3-kind-mv-label">可视化（无字幕版）</span></label>
-                    <label><input type="checkbox" value="hires"> Hi-Res 混流（原唱 / 伴奏 MKV）</label>
+                  <div class="checks exp-checks" id="s3-out-kinds" title="勾选要导出的内容，点「一键导出」">
+                    <label title="带 KTV 字幕的成片（默认 1080p，投屏延迟已生效）"><input type="checkbox" value="mp4"> 成品 MP4</label>
+                    <label title="Lin-K Lyrics / SUG 的打轴工程，可用它继续手工精修时间轴"><input type="checkbox" value="sug"> SUG 工程</label>
+                    <label title="Lin-K Lyrics 步骤 5 的字幕渲染工程"><input type="checkbox" value="yurika"> 字幕工程</label>
+                    <label title="逐字时间的 LRC 歌词"><input type="checkbox" value="lrc"> 逐字 LRC</label>
+                    <label title="只有字幕、带透明通道的 ProRes 4444 MOV，导入剪辑软件叠加使用"><input type="checkbox" value="alpha"> 透明字幕层</label>
+                    <label title="同一画面分别配原唱 / 伴奏两条音轨"><input type="checkbox" value="onoff"> on/off vocal</label>
+                    <label id="s3-kind-mv" title="只含背景，没有 KTV 字幕"><input type="checkbox" value="mv"> <span id="s3-kind-mv-label">无字幕版</span></label>
+                    <label title="视频流复制，音轨统一转 FLAC 32bit / ≥48kHz，输出原唱 / 伴奏 MKV"><input type="checkbox" value="hires"> Hi-Res 混流</label>
                   </div>
                 </div>
                 <div class="export-actions">
-                  <button class="btn primary lg" id="s3-export">⬇ 一键导出</button>
+                  <button class="btn primary" id="s3-export">⬇ 一键导出</button>
                   <button class="btn ghost" id="s3-preview25" title="只渲染开头 25 秒，快速确认最终画面">试看 25 秒</button>
                   <span class="muted small" id="s3-exp-state"></span>
-                  <span class="grow"></span>
-                  <label class="cast-label muted small" title="投屏延迟：画面比声音提前的毫秒数，导出时生效">投屏延迟
-                    <input type="number" id="s3-cast" class="cast-in" step="50"> ms</label>
                 </div>
                 <div class="outdir-row">
                   <span class="muted small">导出到</span>
                   <input type="text" id="s3-out-dir" class="grow mono" placeholder="（默认）工程内的 export 文件夹">
                   <button class="btn ghost sm" id="s3-out-dir-pick" title="在页面里逐层挑文件夹">浏览…</button>
                   <button class="btn ghost sm" id="s3-out-dir-default" title="改回工程内的 export 文件夹">默认</button>
+                  <label class="cast-label muted small" title="投屏延迟：画面比声音提前的毫秒数，导出时生效">投屏延迟
+                    <input type="number" id="s3-cast" class="cast-in" step="50"> ms</label>
                 </div>
                 <div class="dirpick" id="s3-dirpick" hidden>
                   <div class="dp-head">
@@ -360,12 +358,11 @@
                   <div class="dp-drives" id="dp-drives"></div>
                   <div class="dp-list" id="dp-list"></div>
                 </div>
-                <div class="hires-box">
+                <div class="hires-box" id="s3-hires-box" hidden>
                   <div class="row gap">
                     <input type="text" id="s3-hires-on" class="grow" placeholder="Hi-Res 原唱无损音频路径（留空 = 素材原音频）">
                     <input type="text" id="s3-hires-off" class="grow" placeholder="伴奏无损音频路径，多条用 ; 分隔（留空 = 自动分离）">
                   </div>
-                  <div class="muted small">勾选 Hi-Res 混流时用这两条音源；留空 = 素材原音 / 自动分离</div>
                 </div>
                 <div class="export-list" id="export-list"></div>
               </div>

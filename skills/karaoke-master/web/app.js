@@ -1774,9 +1774,10 @@ function renderExports() {
   const bgt = bgKind((opts.background || {}).type);
   const mvOK = bgt === "mv" || bgt === "montage";
   $("#s3-kind-mv").hidden = !mvOK;
-  $("#s3-kind-mv-label").textContent = bgt === "montage" ? "混剪（无字幕版）" : "可视化（无字幕版）";
+  $("#s3-kind-mv-label").textContent = bgt === "montage" ? "混剪版" : "可视化版";
   if (!mvOK) S.expKinds.delete("mv");   // 背景不是生成的设计时没有无字幕版可导
   s3KindBoxes().forEach((c) => (c.checked = S.expKinds.has(c.value)));
+  $("#s3-hires-box").hidden = !S.expKinds.has("hires");   // 音源输入只在勾了 Hi-Res 时才占位置
   const kinds = s3Kinds();
   const deps = kinds.includes("onoff") || kinds.includes("hires");   // 只复制成品视频流 + 换音轨
   const hasMaster = (j.exports || []).some((e) => e.kind === "mp4" && e.state === "done");
@@ -1799,11 +1800,13 @@ function renderExports() {
     const right = e.state === "running" ? el("span", { class: "mono small" }, `${Math.round((e.progress || 0) * 100)}%${e.eta ? " · 剩余约 " + Math.ceil(e.eta) + " 秒" : ""}`)
       : e.state === "error" ? el("span", { class: "chip bad", title: e.error }, "失败")
       : el("button", { class: "btn ghost sm", onclick: () => act("open_folder", { path: e.path }) }, "定位");
-    const paths = e.files && e.files.length ? e.files : [e.path];
+    const paths = (e.files && e.files.length ? e.files : [e.path]).filter(Boolean);   // 一行一条记录：文件名 + 悬停看完整路径
+    const files = paths.map((p) => String(p).split(/[\\/]/).pop()).join(" · ");
     const item = el("div", { class: "export-item" }, el("span", { class: "k" }, ({ hires: "hi-res", onoff: "on/off", alpha: "alpha", mv: "bg" })[e.kind] || e.kind),
-      el("div", {}, el("div", {}, e.label || e.kind), ...paths.map((p) => el("div", { class: "p" }, p)),
-        e.notes && e.notes.length ? el("div", { class: "notes" }, e.notes.join("\n")) : null,
-        e.state === "running" ? el("div", { class: "pbar" }, el("i", { style: { width: Math.round((e.progress || 0) * 100) + "%" } })) : null), right);
+      el("span", { class: "lbl", title: e.label || e.kind }, e.label || e.kind),
+      el("span", { class: "p", title: paths.join("\n") }, files), right,
+      e.notes && e.notes.length ? el("div", { class: "notes" }, e.notes.join("\n")) : null,
+      e.state === "running" ? el("div", { class: "pbar" }, el("i", { style: { width: Math.round((e.progress || 0) * 100) + "%" } })) : null);
     list.append(item);
     if (e.state === "running" && e.preview) list.append(el("img", { src: fileUrl(e.preview) + "?r=" + (e.frames || e.progress), style: { width: "100%", borderRadius: "10px", border: "1px solid var(--line)" } }));
   }
