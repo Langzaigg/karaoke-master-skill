@@ -199,6 +199,12 @@ Run these in this order; start the slow one first.
      the review page's layout): `edit` `[{"op":"split_line","line":i,"char":k}]` splits the timed
      line at character `k` (0-based, e.g. the space after a comma) keeping every timestamp, and
      splits the stage-1 line the same way.
+   - **读音校对（在 `match` / `timing` 之前完成）**：`KM lines <job> --list` 每行以内联形式显示
+     注音（`{漢字||かんじ}`，与导入语法一致）。逐行核对读音本身与**注音和词的对位**（哪个词带
+     哪段读音；对位错了打轴后走字会与演唱脱节）。参考来源：UtaTen / 用户歌词文件 / 原视频字幕。
+     改动用 `lines <job> --ruby N:a-b=かな`（改单行一段；读音留空 = 删除该段）或 `--reannotate`
+     （重补缺失注音）。**打轴之后再改读音要 `edit` `set_ruby` 加 `realign` 返工**，所以先把读音
+     定稿再打轴。
 4. **Locate the sung lines** (after `analyze` finished): `KM match <job> --apply`. Output per line:
    `✓/·  score  est-time  source(asr|lrc)  ref=reference line  note`. ASR anchors + the synced
    reference give a piecewise offset (handles MAD cuts); lines predicted outside vocal activity are
@@ -541,7 +547,8 @@ is busy enough) and adapt it to the song.
    - "读音待确认"（读音 QA：注音与 ASR 在该词时间窗实际听到的发音不一致）→ 逐条核对，**以音源
      实际演唱为准**——当て字 / 原唱与翻唱读法不同很常见（实例：違う→たがう、瞬間（とき）、
      理由（わけ）；UtaTen 的注音可能来自翻唱版）。确认错了用 `edit` `set_ruby` 改后
-     `realign --lines N`；确认无误（ASR 听错）就直接放过，不用改。
+     `realign --lines N`；确认无误（ASR 听错）就直接放过，不用改。（读音校对本应在打轴前完成、
+     见 3——这里是兜底，出现的条目按此处理。）
    - **English lines in a Japanese song** (refrains, English verses): the aligner is built for
      Japanese and QA flags miss its mistakes — a word stretched over an interlude, the next words
      squeezed into a few frames, neighbours shifted. Compare every English line and its neighbours
@@ -647,7 +654,7 @@ with the skill venv and loads the exported project.
 | `set JOB [--song @f] [--segment a,b] [--options @f] [--stage N] [--status T] [--await-user]` | write state |
 | `analyze JOB [--skip-asr] [--asr-model M]` | separation + ASR |
 | `lyrics-search JOB --query Q [--utaten-query Q]` · `lyrics-use JOB ID\|file [--ruby-from ID] [--split-long N]` | lyrics (a `.lrc` file → candidate `user-lrc`; `has_verbatim` = word-level) |
-| `lines JOB [--list] [--split N:pos] [--merge N] [--dup N] [--delete N] [--include R] [--exclude R] [--singer R=id] [--ruby N:a-b=かな] [--reannotate] [--fix-char N:pos=X] [--split-long N]` | stage-1 line ops |
+| `lines JOB [--list] [--split N:pos] [--merge N] [--dup N] [--delete N] [--include R] [--exclude R] [--singer R=id] [--ruby N:a-b=かな] [--reannotate] [--fix-char N:pos=X] [--split-long N]` | stage-1 line ops; `--list` 显示内联注音 `{漢字||かんじ}`（打轴前逐行核对读音） |
 | `match JOB [--apply] [--ref ID]` | locate lines via ASR + synced reference |
 | `hires-source JOB [--on F] [--off F …] [--no-align] [--clear]` | stage-1 lossless source → timing audio |
 | `mv JOB [--kind mv\|montage] [--list-presets] [--preset ID] [--spec @f] [--show] [--stills] [--gallery] [--video] [--seconds N] [--overlay [@f]]` | 混剪 / 可视化 designer (alias `spectrum`)；`--overlay` 单独用 = 打印乐曲可视化叠加层，带 `@f` = 写入自定义图层 |

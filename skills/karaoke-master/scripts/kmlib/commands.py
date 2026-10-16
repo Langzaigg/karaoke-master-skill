@@ -520,8 +520,12 @@ def cmd_lines(args) -> int:
         store.update(lambda s: s["lyrics"].update(lines=lines))
         store.log("歌词行：" + "，".join(changed))
     if args.list or not changed:
+        from . import sugbridge
+
         for i, l in enumerate(lines):
-            print(f"{i + 1:>3} {'✓' if l.get('include', True) else '·'} [{l.get('singer') or '-'}] {l['text']}")
+            ruby = [r for r in (l.get("ruby") or []) if str(r[2]).strip()]
+            shown = sugbridge.line_to_utaten(l["text"], ruby) if ruby else l["text"]
+            print(f"{i + 1:>3} {'✓' if l.get('include', True) else '·'} [{l.get('singer') or '-'}] {shown}")
     return 0
 
 

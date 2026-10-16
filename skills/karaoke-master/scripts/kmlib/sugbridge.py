@@ -134,8 +134,37 @@ def build_project(lines: list[dict], *, singers: list[dict] | None = None, meta:
             ch.singer_id = sid
         project.add_sentence(sentence)
     # karaoke convention: no furigana on kana (checkpoints are kept)
-    _auto_check_service("\n".join(l["text"] for l in lines)).analyze_and_apply_pipeline(
+    all_text = "\n".join(l["text"] for l in lines)
+    svc = _auto_check_service(all_text)
+    # 输入自带注音的词（任何语言）一律保留：只补未注音的字符。
+    # - 纯汉字文本 + 假名注音（方言歌词按假名注音的惯例）：中文模式会整篇重注拼音、
+    #   丢掉用户读音 —— 改用日文路径，其 only_noruby 原生保留已注音字符、缺失的按假名补全。
+    # - 其余（中文+拼音注音 / 韩文+注音等）：_apply_*_to_sentence 会整句重建字符、无视
+    #   only_noruby —— 先快照已注音的词，管线跑完后再逐词还原。
+    provided: dict[tuple[int, int], tuple] = {}
+    for si, s in enumerate(project.sentences):
+        for ci, ch in enumerate(s.characters):
+            if ch.ruby and ch.ruby.parts:
+                provided[(si, ci)] = (ch.char, copy.deepcopy(ch.ruby), ch.check_count, ch.linked_to_next)
+    kana_rubies = sum(
+        1 for text, _ruby, _cc, _lk in provided.values()
+        for p in _ruby.parts
+        if all(0x3040 <= ord(c) <= 0x30FF or c in "ー" for c in p.text)
+    )
+    kana_provided = bool(provided) and kana_rubies * 2 >= sum(len(r.parts) for _t, r, _c, _l in provided.values())
+    if kana_provided and svc._chinese_mode:
+        from strange_uta_game.backend.application.auto_check_service import AutoCheckService
+
+        svc = AutoCheckService(auto_check_flags=auto_check_flags())
+    snapshot = provided if (svc._chinese_mode or svc._korean_mode) else {}
+    svc.analyze_and_apply_pipeline(
         project, only_noruby=True, delete_types=["hiragana", "katakana_hiragana_ruby"])
+    for (si, ci), (text, ruby, check_count, linked) in snapshot.items():
+        ch = project.sentences[si].characters[ci]
+        if ch.char == text:  # 字符序变化（拆行/合并）时放弃还原，保底不误伤
+            ch.ruby = ruby
+            ch.check_count = check_count
+            ch.linked_to_next = linked
     return project
 
 
@@ -800,9 +829,10 @@ def apply_edits(project, edits: list[dict]) -> list[str]:
         elif op == "smooth":
             idx = _line_list(ed, len(sentences)) if ("lines" in ed or "line" in ed or "from" in ed) \
                 else list(range(len(sentences)))
-            k = smooth_wipe(sentences, idx, float(ed.get("strength", 0.5)), int(ed.get("max_ms", 80)))
-            log.append(f"平滑走字（强度 {ed.get('strength', 0.5)}，最多 {ed.get('max_ms', 80)} ms）："
-                       f"{len(idx)} 行中调整了 {k} 个检查点")
+            k = smooth_wipe(sentences, idx, float(ed.get("strength", 0.5)), int(ed.get("max_ms", 80)),
+                            int(ed.get("passes", 2)))
+            log.append(f"平滑走字（强度 {ed.get('strength', 0.5)}，最多 {ed.get('max_ms', 80)} ms，"
+                       f"{ed.get('passes', 2)} 遍）：{len(idx)} 行中调整了 {k} 个检查点")
         elif op == "set_pause":
             # sung pause / release after a character (SUG is_sentence_end)
             ch = sentences[int(ed["line"])].characters[int(ed["char"])]
