@@ -44,6 +44,9 @@ const S = {
   peaks: null, peaksKey: "", view: null, viewRev: null, ws: null, wsRev: null,
   d1: null, d1Key: "", lastStage: 0, jobDir: "",
   wc: null, wcIdx: null,
+  expKinds: null, expSig: null, expTouched: false,   // 导出卡片勾选（本次页面会话内）
+  dirCur: null,                                      // 导出目录选择器当前所在文件夹
+  masterStale: false,                                // 成品 MP4 的画面落后于当前时间轴
 };
 
 /* ------------------------------------------------------------------ network */
@@ -100,6 +103,7 @@ function applyPayload(data, first = false) {
   const prevStage = S.job ? S.job.stage : 0;
   S.job = data.job; S.chat = data.chat || []; S.drafts = data.drafts || {}; S.pending = data.pending_actions || 0; S.jobDir = data.job_dir;
   S.wc = data.wavecheck || null;
+  S.masterStale = !!data.master_stale;
   if (first || S.viewing === 0 || (S.job.stage !== prevStage && S.viewing === prevStage)) S.viewing = S.job.stage;
   const want = first && /^#stage=([123])$/.exec(location.hash || ""); // e.g. #stage=1: open a finished stage
   if (want && +want[1] <= S.job.stage) S.viewing = +want[1];
@@ -1725,7 +1729,8 @@ function renderStage3() {
   const ef = (j.previews || {}).engine_frame;
   if (S.engineRev === undefined) S.engineRev = ef ? ef.rev : null; // don't pop up a frame from a previous session
   if (ef && ef.rev !== S.engineRev) { S.engineRev = ef.rev; const img = $("#s3-engine"); img.src = fileUrl(ef.path) + "?r=" + ef.rev; img.hidden = false; $("#s3-engine-badge").hidden = false; $("#s3-engine-badge").textContent = `引擎渲染帧 @ ${fmtT(ef.t)} · 点击关闭`; }
-  memo("exports", JSON.stringify(j.exports || []), renderExports);
+  memo("exports", JSON.stringify([j.exports || [], (j.options || {}).outputs, (j.options || {}).output_dir,
+    (j.options || {}).cast_delay_ms, (j.options || {}).hires, S.masterStale]), renderExports);
   memo("linetable", String(S.viewRev) + JSON.stringify((j.timing || {}).qa_summary || {}) + (S.ws ? S.ws.rev : ""), renderLineTable);
   const t3 = j.timing || {};
   memo("s3singers", JSON.stringify([(j.song || {}).singers, S.ws ? S.ws.rev : null, S.brush || [], t3.undo, t3.undo_label, t3.redo, t3.redo_label]), () => { renderS3Singers(); renderSelBar(); });
@@ -1733,37 +1738,60 @@ function renderStage3() {
   loadPeaks();
 }
 
+const KIND_LABEL = { mp4: "成品 MP4", sug: "SUG 工程", yurika: "字幕工程", lrc: "逐字 LRC", alpha: "透明字幕层",
+  onoff: "on/off vocal", mv: "无字幕版", hires: "Hi-Res" };
+function s3KindBoxes() { return $$("#s3-out-kinds input"); }
+function s3Kinds() { return s3KindBoxes().filter((c) => c.checked).map((c) => c.value); }
+
+/* ---- 导出目录：页面内的文件夹选择器（不弹本机对话框） ---- */
+async function loadDirPick(path, child) {
+  try {
+    S.dirCur = await act("list_dir", child ? { path, child } : { path });
+    renderDirPick();
+  } catch (e) { toast("读不到这个文件夹：" + e.message); }
+}
+function renderDirPick() {
+  const r = S.dirCur; if (!r) return;
+  $("#dp-path").textContent = r.path;
+  $("#dp-up").disabled = !r.parent;
+  const dr = $("#dp-drives"); dr.innerHTML = "";
+  for (const d of r.drives || [])
+    dr.append(el("button", { class: "dp-chip" + (r.path.toLowerCase().startsWith(d.toLowerCase()) ? " on" : ""), onclick: () => loadDirPick(d) }, d));
+  const list = $("#dp-list"); list.innerHTML = "";
+  if (!(r.dirs || []).length) list.append(el("div", { class: "muted small" }, "（没有子文件夹）"));
+  for (const name of r.dirs)
+    list.append(el("button", { class: "dp-dir", title: name, onclick: () => loadDirPick(r.path, name) }, "📁 " + name));
+}
+
 function renderExports() {
-  const j = S.job; const row = $("#export-row"); row.innerHTML = "";
-  const kinds = [["sug", "SUG 打轴工程"], ["yurika", "字幕工程 .yurika"], ["lrc", "逐字 LRC"], ["mp4", "成品 MP4"]];
+  const j = S.job; const opts = j.options || {};
   const running = (j.exports || []).some((e) => e.state === "running");
-  const outs = (j.options || {}).outputs || [];
-  const wantHires = outs.includes("hires"), wantOnOff = outs.includes("onoff"), wantAlpha = outs.includes("alpha");
-  const bgt = bgKind(((j.options || {}).background || {}).type);
-  const wantMV = outs.includes("mv") && (bgt === "mv" || bgt === "montage");
-  const extrasLabel = [wantAlpha ? "透明字幕" : "", wantOnOff ? "on/off vocal" : "", wantMV ? (bgt === "montage" ? "混剪" : "可视化") : "", wantHires ? "Hi-Res" : ""].filter(Boolean).join(" + ");
-  for (const [k, label] of kinds) row.append(el("button", { class: "btn " + (k === "mp4" ? "primary" : "ghost"), disabled: running, onclick: () => {
-    const ks = k === "mp4" ? ["sug", "yurika", "mp4"].concat(wantAlpha ? ["alpha"] : [], wantOnOff ? ["onoff"] : [], wantMV ? ["mv"] : [], wantHires ? ["hires"] : []) : [k];
-    act("export", { kinds: ks, hires: wantHires ? hiresPayload() : undefined });
-    toast(k === "mp4" ? "开始渲染成品 MP4（需要数分钟）" + (extrasLabel ? "，之后生成 " + extrasLabel : "") : "正在导出 " + label);
-  } }, (k === "mp4" ? "▶ 导出" : "导出 ") + label + (k === "mp4" && extrasLabel ? " + " + extrasLabel : "")));
-  row.append(el("button", { class: "btn ghost", disabled: running, title: "只渲染开头 25 秒，快速确认最终画面", onclick: () => {
-    act("export", { kinds: ["mp4"], clip: 25 }); toast("正在渲染 25 秒试看片段");
-  } }, "试看 25 秒"));
+  /* 勾选框：默认沿用阶段一确认时选的「导出内容」；本页改动只存在 S 里，
+     点「一键导出」时才写回 options.outputs。 */
+  const outs = (opts.outputs || []).length ? opts.outputs : ["mp4", "sug", "yurika", "onoff"];
+  const sig = JSON.stringify(outs);
+  if (!S.expKinds || (!S.expTouched && sig !== S.expSig)) { S.expKinds = new Set(outs); S.expSig = sig; }
+  const bgt = bgKind((opts.background || {}).type);
+  const mvOK = bgt === "mv" || bgt === "montage";
+  $("#s3-kind-mv").hidden = !mvOK;
+  $("#s3-kind-mv-label").textContent = bgt === "montage" ? "混剪（无字幕版）" : "可视化（无字幕版）";
+  if (!mvOK) S.expKinds.delete("mv");   // 背景不是生成的设计时没有无字幕版可导
+  s3KindBoxes().forEach((c) => (c.checked = S.expKinds.has(c.value)));
+  const kinds = s3Kinds();
+  const deps = kinds.includes("onoff") || kinds.includes("hires");   // 只复制成品视频流 + 换音轨
   const hasMaster = (j.exports || []).some((e) => e.kind === "mp4" && e.state === "done");
-  row.append(el("button", { class: "btn ghost", disabled: running || !hasMaster, title: hasMaster ? "复制视频流，只替换音轨" : "请先导出成品 MP4", onclick: () => {
-    act("export", { kinds: ["onoff"], hires: hiresPayload() }); toast("正在生成 on / off vocal 版本");
-  } }, "on / off vocal"));
-  const cd = (j.options || {}).cast_delay_ms;
-  const cast = el("input", { type: "number", step: 50, value: cd === undefined || cd === null ? 200 : cd, class: "cast-in",
-    title: "投屏延迟：画面比声音提前的毫秒数，导出时生效", onchange: (ev) => { act("set_option", { cast_delay_ms: Math.round(+ev.target.value || 0) }); toast("投屏延迟已更新，下次导出生效"); } });
-  row.append(el("label", { class: "cast-label muted small" }, "投屏延迟", cast, "ms"));
-  row.append(el("button", { class: "btn ghost", disabled: running, title: "只有字幕、带透明通道的 ProRes 4444 MOV，导入剪辑软件叠加使用", onclick: () => {
-    act("export", { kinds: ["alpha"] }); toast("正在渲染透明字幕层（整首歌，体积较大）");
-  } }, "透明字幕层 MOV"));
-  $("#s3-hires").disabled = running || !(j.exports || []).some((e) => e.kind === "mp4" && e.state === "done");
-  $("#s3-hires").title = $("#s3-hires").disabled ? "请先导出成品 MP4" : "以已导出的成品 MP4 为视频轨，音轨统一转为 FLAC 32bit / ≥48kHz，分别输出原唱与伴奏 MKV";
-  const hr = (j.options || {}).hires || {};
+  $("#s3-export").disabled = running || !kinds.length;
+  $("#s3-exp-state").textContent = !kinds.length ? "先勾选要导出的内容"
+    : deps && !hasMaster ? "还没有成品 MP4，导出时会先渲染一遍"
+    : deps && S.masterStale ? "时间轴在上次导出后有改动：会先重新渲染成品 MP4"
+    : kinds.includes("mp4") || kinds.includes("alpha") ? "成品渲染需要几分钟" : "";
+  const cd = opts.cast_delay_ms;
+  const ci = $("#s3-cast");
+  if (document.activeElement !== ci) ci.value = cd === undefined || cd === null ? 200 : cd;
+  const oi = $("#s3-out-dir");
+  if (document.activeElement !== oi) oi.value = opts.output_dir || "";
+  oi.placeholder = "（默认）" + (S.jobDir || "") + "\\export";
+  const hr = opts.hires || {};
   if (document.activeElement !== $("#s3-hires-on") && !$("#s3-hires-on").value) $("#s3-hires-on").value = hr.on || "";
   if (document.activeElement !== $("#s3-hires-off") && !$("#s3-hires-off").value) $("#s3-hires-off").value = (hr.off || []).join("; ");
   const list = $("#export-list"); list.innerHTML = "";
@@ -2300,7 +2328,38 @@ function bindStage3() {
     if (!has) { toast("请先导出 SUG 或字幕工程"); return; }
     await act("open_app", {}); toast("正在启动 Lin-K Lyrics 并载入工程…");
   });
-  $("#s3-hires").addEventListener("click", () => { act("export", { kinds: ["hires"], hires: hiresPayload() }); toast("开始 Hi-Res 混流（对齐 + 分离伴奏可能需要几分钟）"); });
+  /* ---- 导出：勾选 + 一键导出 · 投屏延迟 · 导出目录 ---- */
+  s3KindBoxes().forEach((c) => c.addEventListener("change", () => {
+    S.expTouched = true; S.expKinds = new Set(s3Kinds()); renderExports();
+  }));
+  $("#s3-export").addEventListener("click", () => {
+    const kinds = s3Kinds();
+    if (!kinds.length) { toast("先勾选要导出的内容"); return; }
+    S.expTouched = false;
+    act("export", { kinds, hires: kinds.includes("hires") ? hiresPayload() : undefined, remember: true });
+    const deps = kinds.includes("onoff") || kinds.includes("hires");
+    const heavy = deps || kinds.includes("mp4") || kinds.includes("alpha");
+    toast("开始导出：" + kinds.map((k) => KIND_LABEL[k] || k).join(" + ")
+      + (deps && S.masterStale ? "（会先重新渲染成品 MP4，需要几分钟）" : heavy ? "（需要几分钟）" : ""));
+  });
+  $("#s3-preview25").addEventListener("click", () => { act("export", { kinds: ["mp4"], clip: 25 }); toast("正在渲染 25 秒试看片段"); });
+  $("#s3-cast").addEventListener("change", (ev) => { act("set_option", { cast_delay_ms: Math.round(+ev.target.value || 0) }); toast("投屏延迟已更新，下次导出生效"); });
+  const outDir = $("#s3-out-dir");
+  const saveOutDir = (v) => { act("set_option", { output_dir: v || null }); toast(v ? "导出目录：" + v : "导出目录已改回工程内的 export 文件夹"); };
+  outDir.addEventListener("keydown", (ev) => { if (ev.key === "Enter") { ev.preventDefault(); outDir.blur(); } });
+  outDir.addEventListener("change", () => saveOutDir(outDir.value.trim()));
+  $("#s3-out-dir-default").addEventListener("click", () => { outDir.value = ""; saveOutDir(""); });
+  $("#s3-out-dir-pick").addEventListener("click", () => {
+    $("#s3-dirpick").hidden = false;
+    loadDirPick(outDir.value.trim() || (S.job.options || {}).output_dir || "");
+  });
+  $("#dp-cancel").addEventListener("click", () => ($("#s3-dirpick").hidden = true));
+  $("#dp-up").addEventListener("click", () => { if (S.dirCur && S.dirCur.parent) loadDirPick(S.dirCur.parent); });
+  $("#dp-use").addEventListener("click", () => {
+    if (!S.dirCur) return;
+    outDir.value = S.dirCur.path; saveOutDir(S.dirCur.path); $("#s3-dirpick").hidden = true;
+  });
+  document.addEventListener("keydown", (ev) => { if (ev.key === "Escape") $("#s3-dirpick").hidden = true; });
   /* ---- A/B 循环 · 帧步进 · 细调工具条 ---- */
   $("#ab-a").addEventListener("click", () => setAB("a"));
   $("#ab-b").addEventListener("click", () => setAB("b"));

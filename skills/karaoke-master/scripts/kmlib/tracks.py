@@ -131,6 +131,37 @@ def master_mp4(store: JobStore, st: dict) -> Path | None:
     return None
 
 
+def sug_stamp(store: JobStore) -> str:
+    """Fingerprint of the timing project (``timing/project.sug``) as exported."""
+    import hashlib
+
+    try:
+        return hashlib.sha1((store.dir / "timing" / "project.sug").read_bytes()).hexdigest()[:16]
+    except OSError:
+        return ""
+
+
+def master_stale(store: JobStore, st: dict | None = None) -> bool:
+    """成品 MP4 的画面是否落后于当前时间轴（没有母版也算）。
+
+    on / off vocal 与 Hi-Res 混流只是 ``-c:v copy`` 复制母版视频流再换音轨，
+    母版过期时它们会静默沿用旧画面——所以这几项导出前必须确保母版是最新的。
+    """
+    st = st if st is not None else store.load()
+    master = master_mp4(store, st)
+    if master is None or not master.is_file():
+        return True
+    record = next((e for e in st.get("exports", [])
+                   if e.get("kind") == "mp4" and e.get("state") == "done"), {})
+    stamp, current = record.get("sug_stamp"), sug_stamp(store)
+    if stamp and current:
+        return stamp != current
+    try:  # 早期导出的记录没有指纹：按文件时间比较，母版不比时间轴旧就算一致
+        return (store.dir / "timing" / "project.sug").stat().st_mtime > master.stat().st_mtime + 1.0
+    except OSError:
+        return False
+
+
 def default_sources(store: JobStore, st: dict) -> tuple[Path | None, list[Path]]:
     """原唱 / 伴奏 when the caller names none: the Hi-Res source registered in
     stage 1 (already on the video timeline) wins, then the job's own audio."""

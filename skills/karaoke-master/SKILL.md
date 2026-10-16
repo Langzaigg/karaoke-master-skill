@@ -129,7 +129,7 @@ KM stop <job>             # at the very end: closes this project's page server
 
 - `--out` sends finished files to a folder of the user's choice (e.g. `<media folder>/output`);
   otherwise they go to `<job>/export/`. Change later with `KM set <job> --options @f` →
-  `{"output_dir": "..."}`.
+  `{"output_dir": "..."}` or the stage-3 「导出到」 field (both write the same option).
 - The page server's URL / port / pid are in `<job>/live_preview/lock.json`; `serve` never starts a
   second server for the same project. Tell the user the URL.
 - **Closing**: when everything is delivered, run `KM stop <job>` (the page shows that the project
@@ -592,8 +592,9 @@ after `qa` is clean, or to chase down what `qa` / the user flagged.
 
 The page plays the media with a live karaoke overlay (engine sprites), a draggable timeline,
 per-line 「调句子」 / 「精调」 buttons and "⇤ 播放头", a singer bar (歌割り by hand), 「平滑走字」, 「↶ 撤销」 /
-「↷ 重做」, an "引擎帧预览" button (real renderer frame) and export buttons. Those are handled by
-the server. You run the wait loop and handle `prompt`s:
+「↷ 重做」, an "引擎帧预览" button (real renderer frame) and an export card (tick what to output →
+「⬇ 一键导出」, plus a 「导出到」 folder picker). Those are handled by the server. You run the wait
+loop and handle `prompt`s:
 
 - **字符级细调** (word- and line-boundary scales + reading edits): a line's 「调句子」 / 「精调」
   buttons zoom the timeline into that line — four lanes:
@@ -641,6 +642,18 @@ the server. You run the wait loop and handle `prompt`s:
   `hires`). MP4 ≈ 1–1.5× song length on 8 CPU cores, at the chosen frame rate. `--clip 25` first
   renders a 25-second trial `<name> (preview).mp4` (and `(透明字幕 preview).mov` with `alpha`) —
   offer it before a long full render (the page has "试看 25 秒").
+- On the page the export card is the same thing: **tick the kinds → 「⬇ 一键导出」** (the ticked set
+  is saved to `options.outputs` and restored next time), and 「导出到」 picks the folder (「浏览…」
+  drills through folders in-page — no OS dialog — 「默认」 = `<job>/export`; saved to
+  `options.output_dir`, same field as `--out` / `KM set --options`). The card also shows the
+  投屏延迟 field and whether the last export is up to date.
+- **成品 MP4 过期自动重渲**: `onoff` / `hires` reuse the master MP4's video stream (copy), so
+  `KM export` checks whether that master was rendered from the current timing — every MP4 export
+  records a fingerprint of `timing/project.sug`, falling back to file mtimes for older projects
+  (`tracks.master_stale`). If the axis changed since, it **re-renders the master MP4 first** (log:
+  「时间轴在上次成品导出之后有改动：先重新渲染成品 MP4…」) and only then builds the versions; the
+  page warns the same before you tick 一键导出. So after timing edits, exporting just `onoff` /
+  `hires` (or `sug,lrc`) is enough — the picture is never silently stale.
 - `alpha` = `<name> (透明字幕).mov`: subtitles only, ProRes 4444 with alpha + PCM audio, for PR / AE /
   DaVinci (a whole song is several GB; ordinary players may show it on black — that is normal).
 - **投屏延迟** (`options.cast_delay_ms`, default **+200 ms**): how far the picture leads the sound in
@@ -656,7 +669,8 @@ furigana spacing automatically, so the popping glyph never runs into the reading
 Always confirm what you changed with `say` (e.g. "已将第 12 行整体提前 0.2 秒"). Prompt patterns,
 Style fields and edit-op schemas: [references/recipes.md](references/recipes.md).
 
-Outputs land in the output folder (`--out`) or `<job>/export/`: `<artist> - <title>.sug` (open in Lin-K Lyrics / SUG for manual
+Outputs land in the output folder (`--out` / `options.output_dir` / the page's 「导出到」) or
+`<job>/export/`: `<artist> - <title>.sug` (open in Lin-K Lyrics / SUG for manual
 fine timing), `.yurika` (Lin-K Lyrics step-5 subtitle project; media paths are absolute), `.lrc`
 (word-level), `.mp4` (1080p60 H.264 by default, title card at the start; hardware encoder from the
 `encoder` setting, falls back to libx264).
@@ -712,7 +726,7 @@ with the skill venv and loads the exported project.
 | `singers JOB --from FILE\|URL [--map KEY=歌手 …] [--ignore-unmapped] [--dry-run]` | 歌割り from a subtitle file / part-distribution source (ASS, LRC, TXT, colour-coded HTML, JSON runs) |
 | `edit JOB @ops.json` · `style JOB @patch.json` · `frame JOB T` | review |
 | `wavecheck JOB [--lines R] [--pad S] [--audio F] [--out DIR] [--hop S]` | per-line vocal spectrogram + current-axis strips for by-eye timing refinement (optional post-timing pass) |
-| `export JOB [--kinds sug,yurika,lrc,mp4,alpha,onoff,mv,hires] [--clip N] [--cast-delay MS]` | output (default `sug,yurika,mp4,onoff`; 投屏延迟 default +200 ms) |
+| `export JOB [--kinds sug,yurika,lrc,mp4,alpha,onoff,mv,hires] [--clip N] [--cast-delay MS]` | output (default `sug,yurika,mp4,onoff`; 投屏延迟 default +200 ms；成品母版落后于时间轴时 onoff / hires 会先自动重渲) |
 | `versions JOB [--video V] [--on F] [--off F …] [--no-align]` | on / off vocal versions |
 | `hires JOB [--on F] [--off F …] [--video V] [--no-align]` · `open-app JOB [--file yurika\|sug] [--exe EXE]` | optional extras |
 

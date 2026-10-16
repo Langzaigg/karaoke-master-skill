@@ -594,7 +594,15 @@ def cmd_export(store: JobStore, kinds: list[str], *, clip: float | None = None) 
         _record_export(store, "yurika", state="done", path=store.rel(path), label="字幕渲染工程（.yurika）")
         store.log(f"已导出字幕工程：{path.name}")
     design = bg.get("pending_design") or bg.get("design")
-    if design and ("mv" in kinds or ("mp4" in kinds and bg.get("pending_design"))):
+    # on / off vocal 与 Hi-Res 混流只复制母版的视频流再换音轨（见 versions.py）：母版过期
+    # 的时候它们会静默沿用旧画面，所以先确认母版是当前时间轴渲出来的，不然先重渲成品。
+    from . import tracks as _tracks
+
+    stale_master = not clip and any(k in kinds for k in ("onoff", "hires")) and _tracks.master_stale(store, st)
+    if stale_master:
+        store.log("时间轴在上次成品导出之后有改动：先重新渲染成品 MP4，再生成依赖它的版本"
+                  if _tracks.master_mp4(store, st) else "还没有成品 MP4：先渲染成品，再生成依赖它的版本")
+    if design and ("mv" in kinds or (("mp4" in kinds or stale_master) and bg.get("pending_design"))):
         from . import mv
 
         if clip:
@@ -607,6 +615,9 @@ def cmd_export(store: JobStore, kinds: list[str], *, clip: float | None = None) 
     if "mp4" in kinds:
         out = out_dir / (f"{name} (preview).mp4" if clip else f"{name}.mp4")
         _export_mp4(store, st, out, track, extras, style, bg, w, h, fps, clip=clip)
+    elif stale_master:
+        store.set_status("时间轴有改动，正在重新渲染成品 MP4", "working")
+        _export_mp4(store, st, out_dir / f"{name}.mp4", track, extras, style, bg, w, h, fps)
     if "alpha" in kinds:
         out = out_dir / (f"{name} (透明字幕 preview).mov" if clip else f"{name} (透明字幕).mov")
         _guarded(store, "alpha", "透明字幕层（ProRes 4444 MOV）",
@@ -792,10 +803,11 @@ def _export_mp4(store, st, out: Path, track, extras, style, bg, w, h, fps, *, cl
     )
     kind, label = ("preview", "试看片段") if clip else ("mp4", "成品 MP4")
     preview_jpg = store.path("render", "export_preview.jpg")
+    stamp = tracks.sug_stamp(store)  # 这一版画面是从哪一版时间轴渲出来的
     t0 = time.time()
     last = [0.0]
     _record_export(store, kind, state="running", progress=0.0, path=store.rel(out), label=label,
-                   preview="render/export_preview.jpg")
+                   preview="render/export_preview.jpg", sug_stamp=stamp)
     store.set_status("正在渲染成品 MP4", "working")
 
     def on_progress(done: int, total: int) -> None:
@@ -807,7 +819,7 @@ def _export_mp4(store, st, out: Path, track, extras, style, bg, w, h, fps, *, cl
         eta = (now - t0) / max(1e-3, frac) - (now - t0) if frac > 0.02 else None
         _record_export(store, kind, state="running", progress=round(frac, 4), path=store.rel(out),
                        label=label, eta=None if eta is None else round(eta), preview="render/export_preview.jpg",
-                       frames=f"{done}/{total}")
+                       frames=f"{done}/{total}", sug_stamp=stamp)
 
     try:
         render_subtitle_video(job, logger=lambda m: store.log("渲染：" + str(m)), on_progress=on_progress,
@@ -825,6 +837,6 @@ def _export_mp4(store, st, out: Path, track, extras, style, bg, w, h, fps, *, cl
         os.replace(tmp, out)
     size = out.stat().st_size if out.exists() else 0
     _record_export(store, kind, state="done", progress=1.0, path=store.rel(out), label=label,
-                   size=size, seconds=round(time.time() - t0))
+                   size=size, seconds=round(time.time() - t0), sug_stamp=stamp)
     store.set_status(f"成品 MP4 已导出（用时 {time.time() - t0:.0f} 秒）", "done")
     return out

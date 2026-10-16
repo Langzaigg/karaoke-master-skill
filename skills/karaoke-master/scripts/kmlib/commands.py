@@ -2314,6 +2314,8 @@ def cmd_ui_action(args) -> int:
             kinds = payload.get("kinds") or ["sug", "yurika", "mp4"]
             if payload.get("hires"):
                 store.update(lambda st: st.setdefault("options", {}).update(hires=payload["hires"]))
+            if payload.get("remember"):  # 下次打开页面沿用这次的勾选（与阶段一口径相同）
+                store.update(lambda st: st.setdefault("options", {}).update(outputs=list(kinds)))
             render.cmd_export(store, kinds, clip=payload.get("clip"))
         else:
             store.log(f"未知操作 {kind}")

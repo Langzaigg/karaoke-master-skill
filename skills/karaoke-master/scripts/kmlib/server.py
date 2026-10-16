@@ -97,7 +97,7 @@ TOOL_ACTIONS = {
 NOTIFY_AGENT = {"confirm_stage1", "set_background", "montage_source", "mv_assets_import", "mv_video_use",
                 "mv_video_local"}
 # Actions that only touch drafts or the OS.
-LOCAL_ACTIONS = {"save_draft", "open_folder", "open_file", "open_app", "close_page"}
+LOCAL_ACTIONS = {"save_draft", "open_folder", "open_file", "open_app", "close_page", "list_dir"}
 
 
 def lock_path(job_dir: str | Path) -> Path:
@@ -232,6 +232,66 @@ def _spawn_tool(store: JobStore, action: dict) -> None:
     threading.Thread(target=run, daemon=True).start()
 
 
+def _drives() -> list[str]:
+    """本机盘符（非 Windows 给一个根）。"""
+    if os.name != "nt":
+        return ["/"]
+    try:
+        return list(os.listdrives())  # Python 3.12+
+    except AttributeError:  # pragma: no cover - older interpreters
+        return [f"{c}:\\" for c in "CDEFGH" if os.path.exists(f"{c}:\\")]
+
+
+def _list_dir(store: JobStore, path: str | None = None, child: str | None = None) -> dict:
+    """页面的「选择导出文件夹」用：当前目录、上级目录、子文件夹与盘符。
+
+    只列子文件夹（不列文件名）——足够挑一个输出目录，也不把用户的文件清单暴露给网页。
+    """
+    base = Path(path).expanduser() if path else None
+    if base is None:
+        out = (store.load().get("options") or {}).get("output_dir")
+        base = Path(out) if out else store.dir / "export"
+    if not base.is_absolute():
+        base = store.dir / base
+    if child:
+        if child in (".", "..") or any(s in child for s in ("/", "\\")):
+            raise ValueError("非法的文件夹名")
+        base = base / child
+    try:
+        base = base.resolve()
+    except OSError:
+        pass
+    if not base.is_dir():  # 目录没了 / 手填的路径不存在：退到能用的地方
+        for candidate in (base.parent, store.dir / "export", Path.home()):
+            if candidate.is_dir():
+                base = candidate.resolve()
+                break
+    names = []
+    try:
+        for entry in sorted(base.iterdir(), key=lambda p: p.name.lower()):
+            if entry.name.startswith("."):
+                continue
+            try:
+                if entry.is_dir():
+                    names.append(entry.name)
+            except OSError:
+                continue
+    except OSError as exc:
+        raise ValueError(f"读不到这个文件夹：{exc}")
+    return {"path": str(base), "parent": str(base.parent) if base.parent != base else "",
+            "dirs": names[:500], "drives": _drives()}
+
+
+def _master_stale(store: JobStore, job: dict) -> bool:
+    """成品 MP4 的画面是否落后于当前时间轴（页面据此提示「导出前会先重渲」）。"""
+    try:
+        from .tracks import master_stale
+
+        return bool(master_stale(store, job))
+    except Exception:  # 只是提示用的标记，读不出来就当不过期
+        return False
+
+
 def _wavecheck_payload(store: JobStore) -> dict:
     """对轴证据（``KM wavecheck`` 的每行时频图）：有哪些行、整批修订号、是否已落后于当前轴。"""
     out: dict = {"rev": 0.0, "stale": False, "lines": []}
@@ -346,6 +406,7 @@ class Handler(BaseHTTPRequestHandler):
             "pending_actions": sum(1 for a in store.pending_actions() if a.get("handled_by", "agent") != "server"),
             "job_dir": str(store.dir),
             "wavecheck": _wavecheck_payload(store),
+            "master_stale": _master_stale(store, job),
         }
 
     # ---------------------------------------------------------------- GET
@@ -487,6 +548,14 @@ class Handler(BaseHTTPRequestHandler):
                     else:
                         os.startfile(str(target))  # noqa: S606
                 return self._send_json({"ok": True})
+            if kind == "list_dir":
+                # 「选择导出文件夹」：页面的文件夹选择器逐层问目录（不弹本机对话框——
+                # 服务派生的 GUI 窗口到不了用户桌面，只会静默卡住）
+                payload = action.get("payload") or {}
+                try:
+                    return self._send_json(_list_dir(store, payload.get("path"), payload.get("child")))
+                except ValueError as exc:
+                    return self._send_error(400, str(exc))
             handled = "agent"
             if kind in TOOL_ACTIONS:
                 handled = "server+agent" if kind in NOTIFY_AGENT else "server"
