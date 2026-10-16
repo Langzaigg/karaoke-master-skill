@@ -76,6 +76,7 @@ TOOL_ACTIONS = {
     "edit_timing",      # manual nudges / 平滑走字 from the review table
     "singers",          # stage-3 singer palette: add / recolour, assign lines (several = 拼色 chorus)
     "undo",             # restore the timing project before the last manual change
+    "redo",             # re-apply the last undone manual change
     "set_option",       # change a render option from the review page
     "export",           # .sug / .yurika / mp4
     "confirm_stage1",   # apply the user's stage-1 decisions (agent is notified too)
@@ -196,18 +197,65 @@ def stop(job_dir: str | Path) -> dict:
 
 _running_tools: dict[str, subprocess.Popen] = {}
 _tools_lock = threading.Lock()
+# Timing edits read-modify-write timing/project.sug; two of them at once would
+# race (lost updates / scrambled snapshots). Run this group strictly one at a time.
+SERIAL_TOOLS = {"edit_timing", "undo", "redo", "singers"}
+_serial_lock = threading.Lock()
 
 
 def _spawn_tool(store: JobStore, action: dict) -> None:
     action_file = store.path("logs", f"action_{action['id']}.json")
     write_json(action_file, action)
-    cmd = [sys.executable, str(SCRIPTS_DIR / "km.py"), "ui-action", "--job", str(store.dir),
-           "--action-file", str(action_file)]
-    log = open(store.path("logs", "ui_actions.log"), "a", encoding="utf-8")
-    proc = subprocess.Popen(cmd, stdout=log, stderr=subprocess.STDOUT, cwd=str(store.dir),
-                            **hidden_subprocess_kwargs())
-    with _tools_lock:
-        _running_tools[action["id"]] = proc
+
+    def run() -> None:
+        def launch() -> subprocess.Popen:
+            cmd = [sys.executable, str(SCRIPTS_DIR / "km.py"), "ui-action", "--job", str(store.dir),
+                   "--action-file", str(action_file)]
+            log = open(store.path("logs", "ui_actions.log"), "a", encoding="utf-8")
+            return subprocess.Popen(cmd, stdout=log, stderr=subprocess.STDOUT, cwd=str(store.dir),
+                                    **hidden_subprocess_kwargs())
+
+        if action.get("type") in SERIAL_TOOLS:
+            with _serial_lock:
+                proc = launch()
+                with _tools_lock:
+                    _running_tools[action["id"]] = proc
+                proc.wait()
+        else:
+            proc = launch()
+            with _tools_lock:
+                _running_tools[action["id"]] = proc
+            proc.wait()
+        with _tools_lock:
+            _running_tools.pop(action["id"], None)
+
+    threading.Thread(target=run, daemon=True).start()
+
+
+def _wavecheck_payload(store: JobStore) -> dict:
+    """对轴证据（``KM wavecheck`` 的每行时频图）：有哪些行、整批修订号、是否已落后于当前轴。"""
+    out: dict = {"rev": 0.0, "stale": False, "lines": []}
+    d = store.dir / "timing" / "wavecheck"
+    if not d.is_dir():
+        return out
+    items: list[tuple[int, str, float]] = []
+    for f in d.glob("line_*.png"):
+        try:
+            i = int(f.stem.rsplit("_", 1)[1])
+            mt = f.stat().st_mtime
+        except (ValueError, OSError):
+            continue
+        items.append((i, f.name, mt))
+    for i, name, mt in sorted(items):
+        out["lines"].append({"i": i - 1, "f": name, "mt": round(mt, 3)})
+    if out["lines"]:
+        out["rev"] = round(max(l["mt"] for l in out["lines"]), 3)
+        sug = store.dir / "timing" / "project.sug"
+        try:
+            out["stale"] = bool(sug.is_file() and sug.stat().st_mtime > out["rev"] + 0.5)
+        except OSError:
+            out["stale"] = False
+    return out
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -297,6 +345,7 @@ class Handler(BaseHTTPRequestHandler):
             "drafts": drafts,
             "pending_actions": sum(1 for a in store.pending_actions() if a.get("handled_by", "agent") != "server"),
             "job_dir": str(store.dir),
+            "wavecheck": _wavecheck_payload(store),
         }
 
     # ---------------------------------------------------------------- GET

@@ -32,7 +32,7 @@ web page served by `km.py serve`. The page and you talk only through the job dir
 user ─▶ web page ──POST──▶ inbox.jsonl ──km.py wait──▶ you ──km.py <cmd>──▶ job.json ──SSE──▶ web page
 ```
 
-Deterministic page actions (nudges, style previews, engine frames, exports, applying the stage-1
+Deterministic page actions (timing edits, style previews, engine frames, exports, applying the stage-1
 form) are executed by the server itself; `km.py wait` only wakes you for things that need judgement.
 
 ## Hard rules
@@ -285,7 +285,7 @@ Run these in this order; start the slow one first.
 | `mv_assets_import` `{paths}` | the user uploaded an image pack (already imported, stills re-rendered) | check `mv-assets --plan`; say how many were used; top up with web images if `mixed` and short |
 | `mv_video_use` / `mv_video_local` `{url}` / `{path}` | the user picked an MV in the page (already downloaded, aligned, previews refreshed) | read `media.mv_video.notes` (`KM status --full`); a bad alignment → suggest another candidate; `say` |
 | `prompt` `{text, stage, t, active_line}` | free-text request | interpret, act, reply with `say` |
-| `handled_by: "server"` items | nudges, previews, exports, Hi-Res registration, preset / stills / gallery, image removal / re-plan — already done | context only (react if the user's choices change your plan) |
+| `handled_by: "server"` items | timing edits, previews, exports, Hi-Res registration, preset / stills / gallery, image removal / re-plan — already done | context only (react if the user's choices change your plan) |
 
 ### MV from the web (audio projects)
 
@@ -566,19 +566,61 @@ is busy enough) and adapt it to the song.
 3. `KM say` a summary (lines timed, fixes made, lines the user should listen to), then
    `KM set <job> --stage 3 --await-user --status "打轴完成，请审阅"`.
 
+### 打完轴后的两种可选后处理（也可以不加）
+
+Both write through `edit` (or the page), so 「↶ 撤销」 covers them. Neither is required — use them
+after `qa` is clean, or to chase down what `qa` / the user flagged.
+
+* **平滑走字** — `edit` `[{"op":"smooth"}]` (`lines` / `strength` / `max_ms` / `passes`; details in
+  Stage 3 and `references/recipes.md`): evens the wipe speed inside phrases — phrase starts,
+  pauses and held notes stay, no checkpoint moves more than `max_ms` (typical 0.6 / 200 ms / 2 遍).
+  Use when 逐字闪跳 / 忽快忽慢; the review page's 「平滑走字」 button is the same op.
+* **对时频图细调** — `KM wavecheck <job>` renders one zoomed **spectrogram strip per line**
+  (`timing/wavecheck/line_NN.png`, plus `axis.json` with the same numbers): the separated vocal's
+  spectrogram with the current axis on top (绿=行起 · 青=每字亮起 · 红=收尾/换气 · 灰虚=上行止/下行起,
+  下=dB 能量与门限) — 辅音起音（垂直宽频冲击）、元音谐波、长音尾、换气 都看得见. Read the strips
+  line by line and refine the axis by eye:
+  - 判读：字亮起线对辅音起音上沿；换气点对谐波空档；收尾盖到谐波真正结束处（模糊拖尾 = 混响，
+    不算）；紧贴「下行起」灰线的谐波属于下一行，别算作本行的尾巴。
+  - 修正照常走 `edit`（`set_char` / `set_line_end` / `set_pause` / `shift_lines`…），改完
+    `wavecheck --lines N` 再出同一批图复核。全曲 77 行约 6 s，`--lines 3-12` 只渲一部分，
+    `--pad 2` 渲更宽的上下文（默认 0.8 s；上下行的边界线在 2.5 s 内会自动纳入窗口，尾巴 /
+    起唱复核一般直接可做），`--audio` / `--out` 可换音源与目录。
+  - 整行错位 / 整段无人声的行走 `realign`（见步骤 2），wavecheck 用于它之后的几十毫秒级细调。
+
 ## Stage 3 — review, tweaks, export
 
 The page plays the media with a live karaoke overlay (engine sprites), a draggable timeline,
-per-line ±0.02/0.1 s nudges and "⇤ 播放头", a singer bar (歌割り by hand), 「平滑走字」, 「↶ 撤销」,
-an "引擎帧预览" button (real renderer frame) and export buttons. Those are handled by the server.
-You run the wait loop and handle `prompt`s:
+per-line 「调句子」 / 「精调」 buttons and "⇤ 播放头", a singer bar (歌割り by hand), 「平滑走字」, 「↶ 撤销」 /
+「↷ 重做」, an "引擎帧预览" button (real renderer frame) and export buttons. Those are handled by
+the server. You run the wait loop and handle `prompt`s:
 
+- **字符级细调** (word- and line-boundary scales + reading edits): a line's 「调句子」 / 「精调」
+  buttons zoom the timeline into that line — four lanes:
+  上下文轨 (drag the `▲上行收尾` / `▼下行起唱` marks = the previous line's release / the next
+  line's start; the gap is read on the canvas), 整行条 (drag = move the line; drag either end
+  handle = 拉长 / 缩短，改行首起唱 / 行尾收尾), 词轨 (word cards = ruby groups: drag = move the whole word, double-click = popup
+  for 读音 / ⇤ 并入前词 · ✂ 拆分 · ⌫ 清注音), 字块轨 (drag a char = move it; click/Ctrl-click
+  selects; 圆点 = checkpoints — one per 注音拍, with a strip of the kana inside the block; hover /
+  drag shows 拍名 + 时间 in the hint row; 粉旗 = 换气点). Empty area drags
+  pan / clicks seek, wheel zooms; double-click a char block = 试听; right-click a char opens the
+  menu (试听 / ±节奏点 / 换气点 / 均分 / 清节奏点), right-click empty area exits. Keyboard: `←→` 跳字 ·
+  `↑↓` 跳行 · `Alt+←→` 平移所选 (`Shift` = ±50 ms) · `Alt+↑↓` ∓10 ms (`Shift` = ±50) · `=` / `−`
+  节奏点 · `P` 换气 · `[` `]` A/B 循环 · `,` `.` 逐帧 · Space play · `1–9` singers · `Esc` exit.
+  Tool row: ±节奏点 · 换气点 · 均分 · 试听字 · ✎ 歌词/注音; hover any element to see what it does.
+  Everything goes through `edit_timing` ops (`set_char` / `shift_chars` / `add_checkpoint` /
+  `remove_checkpoint` / `set_pause` / `set_line_end` / `set_word_links` / `set_word_ruby`),
+  debounced in batches, each batch one undo step. Word-level ops never touch timestamps:
+  `set_word_ruby` rewrites readings only, `set_word_links` flips word links only.
 - Timing: "第 12 行晚了 0.2 秒" → `edit` `[{"op":"shift_lines","lines":[11],"ms":-200}]`;
   "整体提前 0.1 秒" → `shift_all`; "这句" uses `active_line` / `t` from the payload.
 - Readings: `edit` `set_ruby` then `realign --lines N`. **The page can do text and ruby edits
-  itself**: the ✎ button on each line of the stage-3 table opens an editor for the lyric text and
-  its readings (UtaTen inline syntax `漢字(かな)`); it submits `set_text` / `set_ruby` ops — timing
-  is kept when the text is unchanged, and undo (「↶ 撤销」) covers these edits too.
+  itself**: the ✎ button on each line of the stage-3 table (or the toolbar's ✎ 歌词/注音 / double-click
+  a line bar) opens an editor with the lyric-text box, a per-word list (one reading box per word;
+  ⇤ 并入前词 · ✂ 对半拆开 · ⌫ 清注音 — the lyric↔reading word mapping) and the raw UtaTen inline
+  line (`漢字(かな)`) under 「原始注音行（高级）」; it submits `set_text` / `set_ruby` / `set_word_ruby` /
+  `set_word_links` ops — timing is kept when the text is unchanged, undo (「↶ 撤销」) covers these
+  edits, and the stage-1 lyric line is synced back (a rebuild keeps the edits).
 - Singers on the page: click line numbers to select (Shift = range; none = the playing line),
   click one or more singers in the bar (several = chorus 「A＆B」, drawn in 拼色), then 「设为…」 or
   press 1–9; a singer's colour dot recolours it, 「＋ 歌手」 adds one. In chat use `KM singers` /
@@ -586,7 +628,10 @@ You run the wait loop and handle `prompt`s:
 - "走字不够平滑 / 速度忽快忽慢" → `edit` `[{"op":"smooth"}]` (or the page's 「平滑走字」; `lines` to
   limit it, run again for more): evens the wipe speed between neighbouring characters, keeps phrase
   starts, pauses and held notes, moves no checkpoint more than `max_ms` (80). Every manual change
-  on the page can be undone (「↶ 撤销」 / ui-action `undo`, last 30 changes).
+  on the page can be undone (「↶ 撤销」 / ui-action `undo`, last 30 changes) and redone
+  (「↷ 重做」 / `redo`, up to the last fresh edit).
+- 要逐行核对到几十毫秒（起唱 / 收尾 / 换气 vs 实际人声）→ `KM wavecheck <job>`（见 Stage 2 的两个
+  可选后处理：每行一张 人声时频图 + 当前轴 的放大图，照图判读后 `edit` 修正）。
 - Look: `KM style <job> @patch.json` with `template`, `effect`, `overrides` (Style fields),
   `singer_styles {id: {color}}`, `ruby`, `title`, `background`, `resolution`, `fps` (24 / 25 / 30 / 50 / 60 / 120, or `"source"` = the material's own rate).
   English lyrics: `"ruby": false` and a Latin font in `overrides` — `font_family_latin`
@@ -666,6 +711,7 @@ with the skill venv and loads the exported project.
 | `timing JOB [--device DEV] [--no-chunk] [--no-words] [--aligner]` · `realign JOB --lines R [--window a,b] [--english [--asr-first] [--fresh-asr]] [--no-words]` | alignment (English songs: word-level lyrics / English recognizer instead of the aligner) |
 | `singers JOB --from FILE\|URL [--map KEY=歌手 …] [--ignore-unmapped] [--dry-run]` | 歌割り from a subtitle file / part-distribution source (ASS, LRC, TXT, colour-coded HTML, JSON runs) |
 | `edit JOB @ops.json` · `style JOB @patch.json` · `frame JOB T` | review |
+| `wavecheck JOB [--lines R] [--pad S] [--audio F] [--out DIR] [--hop S]` | per-line vocal spectrogram + current-axis strips for by-eye timing refinement (optional post-timing pass) |
 | `export JOB [--kinds sug,yurika,lrc,mp4,alpha,onoff,mv,hires] [--clip N] [--cast-delay MS]` | output (default `sug,yurika,mp4,onoff`; 投屏延迟 default +200 ms) |
 | `versions JOB [--video V] [--on F] [--off F …] [--no-align]` | on / off vocal versions |
 | `hires JOB [--on F] [--off F …] [--video V] [--no-align]` · `open-app JOB [--file yurika\|sug] [--exe EXE]` | optional extras |

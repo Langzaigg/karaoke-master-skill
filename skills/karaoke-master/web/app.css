@@ -258,6 +258,19 @@ canvas { width: 100%; display: block; border-radius: 9px; background: var(--bg-2
 .live-lines .ll .t { font: 12px var(--mono); color: var(--muted); }
 .live-lines .ll .x { font-family: "Yu Gothic UI", var(--font); font-size: 15px; }
 
+/* stage 2 · 对轴证据（KM wavecheck 时频图，有产物时才出现） */
+#card-wavecheck .wc-imgwrap { background: #f2f4f9; border: 1px solid var(--line); border-radius: 10px; overflow: auto; }
+#card-wavecheck .wc-imgwrap img { display: block; width: 100%; min-width: 980px; height: auto; }
+.wc-nav { display: flex; align-items: center; gap: 8px; margin-bottom: 10px; flex-wrap: wrap; }
+.wc-nav select { max-width: 430px; }
+.wc-stale {
+  display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-bottom: 10px; padding: 7px 12px;
+  border: 1px solid rgba(255, 194, 75, .45); background: rgba(255, 194, 75, .1);
+  border-radius: 10px; color: var(--warn); font-size: 13px;
+}
+.wc-legend { margin-top: 8px; }
+a.btn { text-decoration: none; }
+
 /* ------------------------------------------------------------ stage 3 */
 .stage-player { position: relative; background: #000; aspect-ratio: 16/9; }
 .stage-player video { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: contain; }
@@ -266,7 +279,30 @@ canvas { width: 100%; display: block; border-radius: 9px; background: var(--bg-2
 .engine-badge { position: absolute; top: 10px; left: 10px; background: rgba(0, 0, 0, .7); padding: 3px 10px; border-radius: 8px; font-size: 12px; color: var(--warn); cursor: pointer; }
 .transport { display: flex; align-items: center; gap: 12px; padding: 10px 14px; border-top: 1px solid var(--line); }
 .transport input[type=range] { flex: 1; }
-#s3-timeline { border-radius: 0; cursor: pointer; }
+.btn.sq { padding: 5px 7px; font-size: 11px; font-family: var(--mono); }
+.ab-ctl { display: inline-flex; align-items: center; gap: 5px; padding: 3px 8px; border: 1px solid var(--line-2); border-radius: 9px; background: var(--bg-2); }
+.ab-ctl.on { border-color: var(--accent-2); box-shadow: 0 0 0 2px rgba(124, 92, 255, .25); }
+.ab-ctl #ab-txt { min-width: 46px; text-align: center; color: var(--muted); }
+.abbtn { border: 0; background: transparent; color: var(--dim); font: 600 12px var(--font); cursor: pointer; padding: 2px 5px; border-radius: 6px; }
+.abbtn:hover { color: var(--text); background: rgba(255, 255, 255, .06); }
+.abbtn.set { color: #fff; background: var(--accent-2); }
+.abbtn.clr { color: var(--dim); font-weight: 400; }
+.tl-wrap { border-top: 1px solid var(--line); }
+.tl-bar { display: flex; align-items: center; gap: 10px; padding: 6px 14px 0; white-space: nowrap; overflow: hidden; }
+#s3-timeline { border-radius: 0; cursor: crosshair; touch-action: none; }
+.tl-tools { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; padding: 7px 14px 9px; border-top: 1px solid var(--line); background: rgba(255, 255, 255, .02); }
+.tl-tools #tl-sel { color: var(--text); min-width: 130px; }
+.tbtn { background: var(--bg-2); border: 1px solid var(--line-2); color: var(--muted); border-radius: 7px; font: 11.5px var(--mono); padding: 3px 9px; cursor: pointer; }
+.tbtn:hover { color: var(--text); border-color: var(--accent-2); }
+.tbtn.on { color: #fff; border-color: var(--accent); background: rgba(255, 95, 162, .18); }
+.tl-tools .tl-hintbox { margin-left: auto; max-width: 46%; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; opacity: .85; }
+.lrow.fine { background: rgba(53, 208, 255, .10); border-color: rgba(53, 208, 255, .65); }
+.lrow.fine::before { content: ""; position: absolute; left: 0; top: 7px; bottom: 7px; width: 3px; border-radius: 3px; background: var(--cyan); }
+.ctx-menu { position: fixed; z-index: 50; background: var(--panel-2); border: 1px solid var(--line-2); border-radius: 10px; box-shadow: var(--shadow); padding: 5px; min-width: 168px; }
+.ctx-menu button { display: block; width: 100%; text-align: left; background: none; border: 0; color: var(--text); font: 13px var(--font); padding: 6px 10px; border-radius: 7px; cursor: pointer; }
+.ctx-menu button:hover { background: rgba(255, 255, 255, .07); }
+.ctx-menu button:disabled { color: var(--dim); cursor: default; }
+.ctx-menu .sep { height: 1px; background: var(--line); margin: 4px 6px; }
 /* 可折叠卡片（默认折叠，点标题栏展开 / 收起） */
 .card.collapse > header { cursor: pointer; user-select: none; margin-bottom: 0; }
 .card.collapse.open > header { margin-bottom: 14px; }
@@ -376,6 +412,8 @@ canvas { width: 100%; display: block; border-radius: 9px; background: var(--bg-2
 .nudge { display: inline-flex; gap: 3px; margin-left: auto; }
 .nudge button { background: var(--bg-2); border: 1px solid var(--line-2); color: var(--muted); border-radius: 6px; font: 11px var(--mono); padding: 1px 6px; cursor: pointer; }
 .nudge button:hover { color: var(--text); border-color: var(--accent-2); }
+.nudge button.mode { font-family: var(--font); padding: 1px 8px; }
+.nudge button.mode.on { color: #fff; border-color: var(--cyan); background: rgba(53, 208, 255, .16); }
 
 /* ------------------------------------------------------------ misc */
 .empty { display: grid; place-items: center; gap: 14px; padding: 120px 0; color: var(--muted); }
@@ -398,3 +436,17 @@ canvas { width: 100%; display: block; border-radius: 9px; background: var(--bg-2
 .ledit { margin: 2px 0 8px 34px; padding: 10px; border: 1px solid var(--line-2); border-radius: 9px; background: var(--bg-2); display: flex; flex-direction: column; gap: 6px; }
 .ledit .row { align-items: center; }
 .ledit .row > span { min-width: 32px; }
+.ledit .wlist { display: flex; flex-direction: column; gap: 4px; border-top: 1px dashed var(--line); padding-top: 6px; }
+.ledit .wrow { display: flex; gap: 6px; align-items: center; }
+.ledit .wrow .wrg { min-width: 46px; color: var(--muted); font-size: 11px; text-align: right; }
+.ledit .wrow .wtx { font-family: "Yu Gothic UI", "Meiryo", var(--font); font-size: 14px; min-width: 46px; white-space: nowrap; }
+.ledit .wrow input { max-width: 260px; padding: 3px 8px; }
+.ledit details.raw { border-top: 1px dashed var(--line); padding-top: 6px; }
+.ledit details.raw > summary { cursor: pointer; user-select: none; margin-bottom: 6px; }
+
+/* 词级弹窗（细调轨词卡）：改读音 / 合并 / 拆分 / 清除注音 */
+.wordpop { position: fixed; z-index: 60; width: 372px; background: var(--panel-2); border: 1px solid var(--line-2); border-radius: 10px; box-shadow: var(--shadow); padding: 10px 12px; display: flex; flex-direction: column; gap: 8px; }
+.wordpop .wp-h { font: 12px var(--font); color: var(--muted); }
+.wordpop .wp-r { display: flex; gap: 8px; align-items: center; }
+.wordpop .wp-r input { padding: 4px 8px; }
+.wordpop .wp-b { display: flex; flex-wrap: wrap; gap: 6px; }

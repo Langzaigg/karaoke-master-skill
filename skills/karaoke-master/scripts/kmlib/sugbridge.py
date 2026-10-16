@@ -205,10 +205,17 @@ def save_project(project, path: str | Path, *, media_path: str | None = None) ->
 
 
 # --------------------------------------------------------------------------- view
+_RUBY_PAUSE = str.maketrans("", "", "^＾")  # 停顿占位符（含全角变体），显示/导出前一律剥离
+
+
+def _strip_pause(text: str) -> str:
+    return text.replace("^pause^", "").translate(_RUBY_PAUSE)
+
+
 def _ruby_parts(ch) -> list[str]:
     if ch.ruby is None:
         return []
-    return [p.text for p in ch.ruby.parts]
+    return [_strip_pause(p.text) for p in ch.ruby.parts]
 
 
 def char_windows(sentence) -> list[tuple[float | None, float | None, list[float]]]:
@@ -262,6 +269,7 @@ def project_view(project, *, qa: dict | None = None) -> dict:
                 "cp": [round(t, 3) for t in cps],
                 "link": bool(ch.linked_to_next),
                 "sg": ch.singer_id or sentence.singer_id,
+                "se": bool(ch.is_sentence_end and ch.sentence_end_ts is not None),  # 换气点（e 即其时间）
             })
         timed = [c for c in chars if c["s"] is not None]
         lines.append({
@@ -347,10 +355,16 @@ def ensure_align_model(progress: Optional[Callable[[int, str], None]] = None) ->
 
 def _shift_sentence(sentence, delta_ms: int) -> None:
     for ch in sentence.characters:
-        if ch.timestamps:
-            ch.timestamps = [max(0, int(t + delta_ms)) for t in ch.timestamps]
-        if ch.sentence_end_ts is not None:
-            ch.sentence_end_ts = max(0, int(ch.sentence_end_ts + delta_ms))
+        _shift_char(ch, delta_ms)
+
+
+def _shift_char(ch, delta_ms: int) -> None:
+    """Rigid move of one character: checkpoints + release. Relative offsets stay valid."""
+    if ch.timestamps:
+        ch.timestamps = [max(0, int(t + delta_ms)) for t in ch.timestamps]
+    if ch.sentence_end_ts is not None:
+        ch.sentence_end_ts = max(0, int(ch.sentence_end_ts + delta_ms))
+    ch._update_offset_timestamps()
 
 
 def align(project, vocal_wav: str | Path, *, ai_python: str, model_dir: str | Path, device: str = "cpu",
@@ -720,6 +734,65 @@ def _rebuild_line(project, li: int, text: str, ruby: list) -> None:
     return old, rebuilt
 
 
+def _split_reading_over_word(word: str, reading: str, n_chars: int) -> list[str]:
+    """Split a word reading into per-character segments (same policy as the
+    UtaTen importer: kanji-dictionary split first, even distribution fallback)."""
+    if not reading:
+        return [""] * n_chars
+    parts: list[str] = []
+    try:
+        from strange_uta_game.backend.infrastructure.parsers.kanji_reading_split import (
+            compute_per_kanji_readings,
+        )
+
+        parts = [str(p or "") for p in compute_per_kanji_readings(word, reading)[0]]
+    except Exception:
+        parts = []
+    if not parts or "".join(parts) != reading:
+        parts = [reading] + [""] * (n_chars - 1)  # 兜底：不丢读音
+    parts = parts[:n_chars]
+    while len(parts) < n_chars:
+        parts.append("")
+    return parts
+
+
+def _apply_word_reading(chars, a: int, b: int, reading: str) -> None:
+    """Rewrite the ruby of ``chars[a..b]`` as one word reading (empty = clear).
+
+    Each character keeps its check count / timestamps; only ``ruby.parts`` are
+    rebuilt (segment per char, then split over the char's existing checkpoints
+    with mora alignment). Kana segments identical to the character itself count
+    as "no furigana", same as the UtaTen importer."""
+    from strange_uta_game.backend.domain.models import Ruby, RubyPart
+
+    word = "".join(chars[i].char for i in range(a, b + 1))
+    segs = _split_reading_over_word(word, reading, b - a + 1)
+    for off, ci in enumerate(range(a, b + 1)):
+        ch = chars[ci]
+        seg = (segs[off] or "").strip()
+        if not seg or (seg == ch.char and _is_kana(seg)):
+            ch.ruby = None
+            continue
+        parts = [seg] if ch.check_count <= 0 else _split_ruby_parts(seg, ch.check_count)
+        ch.set_ruby(Ruby(parts=[RubyPart(text=p) for p in parts]))
+
+
+def _split_ruby_parts(text: str, count: int) -> list[str]:
+    from strange_uta_game.backend.domain.models import get_ruby_pause_char
+    from strange_uta_game.backend.infrastructure.parsers.inline_format import (
+        split_ruby_for_checkpoints,
+    )
+
+    try:
+        parts = [str(p) for p in split_ruby_for_checkpoints(text, count)]
+    except Exception:
+        parts = []
+    if len(parts) != count:
+        pause = get_ruby_pause_char()
+        parts = ([text] + [pause] * (count - 1))[:count]
+    return parts
+
+
 def apply_edits(project, edits: list[dict]) -> list[str]:
     """Deterministic timing edits used by the review page and by the agent.
 
@@ -727,15 +800,22 @@ def apply_edits(project, edits: list[dict]) -> list[str]:
     the new line; timing kept) · smooth {lines?, strength?=0.5, max_ms?=80}
     (even wipe speed inside phrases) · set_line_span {line, start, end}
     (seconds; rescales the line linearly) · set_char {line, char, cp?, t} ·
-    set_check_count {line, char, count} (grow a character's checkpoint capacity; needed before
-    writing several checkpoints into one character, e.g. sweeping a multi-glyph Latin word) ·
+    shift_chars {line, chars?: [first, last] 0-based inclusive, ms} (move a few characters of one
+    line: their checkpoints + release; e.g. dragged in the review page) ·
+    set_check_count {line, char, count} (grow or shrink a character's checkpoints; needed before
+    writing several checkpoints into one character, e.g. sweeping a multi-glyph Latin word;
+    count 0 = clear, ruby degrades to the Nicokara no-mora form) ·
     set_line_end {line, t} · set_pause {line, char, t|None} ·
     set_singer {lines, singer (id or name), chars?: [first, last]} (chars = 0-based, inclusive:
     only that part of the line, e.g. a trio entering mid-line) · add_singer {name, color} ·
     set_text {line, text} (equal length → same times; length change → chars before the edit keep
     theirs, the rest spread linearly over the line's old span; ruby spans shift / truncate) ·
     set_ruby {line, ruby: [[start, end, reading]] | inline: "漢字(かな)"} (rebuilds the line;
-    timing is kept when the text is unchanged, otherwise realign it afterwards)
+    timing is kept when the text is unchanged, otherwise realign it afterwards) ·
+    set_word_links {line, chars: [first, last]} (0-based inclusive: make that run one word /
+    ruby group — merge; call per part to split) · set_word_ruby {line, chars: [first, last],
+    reading} (rewrite that word's reading, "" clears the furigana; timestamps and check
+    counts are left untouched)
     """
     log = []
     sentences = project.sentences
@@ -779,10 +859,73 @@ def apply_edits(project, edits: list[dict]) -> list[str]:
             log.append(f"第 {int(ed['line']) + 1} 行时间范围设为 {ed['start']}–{ed['end']} 秒")
         elif op == "set_check_count":
             ch = sentences[int(ed["line"])].characters[int(ed["char"])]
+            old = ch.check_count
             want = int(ed["count"])
-            if ch.check_count < want:
+            if want != old:
+                # grows (extra checkpoints for a multi-mora char) or shrinks (merge ruby tail;
+                # 0 = Nicokara no-mora form, ruby text kept) — the domain setter owns both
                 ch.set_check_count(want, force=True, ruby_split_mode="direct")
-                log.append(f"第 {int(ed['line']) + 1} 行第 {int(ed['char']) + 1} 字节奏点扩为 {want}")
+                log.append(f"第 {int(ed['line']) + 1} 行第 {int(ed['char']) + 1} 字节奏点 {old} → {want}")
+        elif op == "add_checkpoint":
+            # append one rhythm checkpoint (server-relative: ±1 is resolved here, so a
+            # stale client view can never corrupt the count). ``t`` = where it lands.
+            ch = sentences[int(ed["line"])].characters[int(ed["char"])]
+            old = ch.check_count
+            if old < 16:
+                ch.set_check_count(old + 1, force=True, ruby_split_mode="direct")
+                ms = int(float(ed["t"]) * 1000)
+                if old < len(ch.timestamps):
+                    ch.timestamps[old] = ms
+                else:
+                    ch.add_timestamp(ms, old)
+                log.append(f"第 {int(ed['line']) + 1} 行第 {int(ed['char']) + 1} 字节奏点 {old} → {old + 1}")
+        elif op == "remove_checkpoint":
+            ch = sentences[int(ed["line"])].characters[int(ed["char"])]
+            old = ch.check_count
+            if old > 1:  # 0 is the no-mora form — only clearCPs goes there
+                ch.set_check_count(old - 1, force=True, ruby_split_mode="direct")
+                log.append(f"第 {int(ed['line']) + 1} 行第 {int(ed['char']) + 1} 字节奏点 {old} → {old - 1}")
+        elif op == "set_word_links":
+            # 注音↔歌词对应关系：把字区间 [a..b] 定义为一个词（连词链）。
+            # 只动 linked_to_next —— 读音仍挂在各字自己的 ruby 上（词读音 =
+            # 组内读音相接），时间戳不受影响；合并 / 拆分都是本 op。
+            li = int(ed["line"])
+            a, b = int(ed["chars"][0]), int(ed["chars"][1])
+            chars = sentences[li].characters
+            if not 0 <= a <= b < len(chars):
+                raise ValueError(f"第 {li + 1} 行词范围越界：{a}-{b}")
+            for i in range(a, b):
+                chars[i].linked_to_next = True
+            chars[b].linked_to_next = False
+            log.append(f"第 {li + 1} 行第 {a + 1}–{b + 1} 字并为一个词")
+        elif op == "set_word_ruby":
+            # 词级读音编辑：把 [a..b] 的注音整体改写为 reading（空 = 清除注音）。
+            # 读音按字切分（字典 → 均分，与 Utaten 导入同口径、经
+            # kanji_reading_split），每字再按自己的节奏点数分段；时间戳 /
+            # 节奏点数一律不动 —— 「改注音不破坏已细调的时间轴」。
+            li = int(ed["line"])
+            a, b = int(ed["chars"][0]), int(ed["chars"][1])
+            chars = sentences[li].characters
+            if not 0 <= a <= b < len(chars):
+                raise ValueError(f"第 {li + 1} 行词范围越界：{a}-{b}")
+            reading = str(ed.get("reading") or "").strip()
+            _apply_word_reading(chars, a, b, reading)
+            log.append(f"第 {li + 1} 行第 {a + 1}–{b + 1} 字读音"
+                       + (f"改为「{reading}」" if reading else "已清除"))
+        elif op == "shift_chars":
+            # move some characters of one line (their checkpoints + release), e.g. dragged in the
+            # review page's fine-edit strip. Ranges are 0-based inclusive; omitted = whole line
+            s = sentences[int(ed["line"])]
+            ms = int(ed["ms"])
+            rng = ed.get("chars")
+            chars = s.characters
+            idxs = range(len(chars)) if not rng else \
+                range(max(0, int(rng[0])), min(len(chars) - 1, int(rng[1])) + 1)
+            for ci in idxs:
+                _shift_char(chars[ci], ms)
+            spread = "整行" if not rng else (f"第 {int(rng[0]) + 1} 字" if int(rng[0]) == int(rng[1])
+                                             else f"第 {int(rng[0]) + 1}–{int(rng[1]) + 1} 字")
+            log.append(f"第 {int(ed['line']) + 1} 行{spread}平移 {ms} ms")
         elif op == "set_char":
             ch = sentences[int(ed["line"])].characters[int(ed["char"])]
             cp = int(ed.get("cp", 0))

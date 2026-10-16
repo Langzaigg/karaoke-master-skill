@@ -244,6 +244,27 @@
             <div class="live-lines" id="live-lines"></div>
           </article>
         </div>
+        <article class="card" id="card-wavecheck" hidden>
+          <header>
+            <h2>对轴证据（时频图）</h2>
+            <span class="muted small" id="wc-sum"></span>
+            <span class="grow"></span>
+            <button class="btn ghost sm" id="wc-refresh" title="Agent 重新生成后，用这个重新载入">↻ 刷新</button>
+            <a class="btn ghost sm" id="wc-open" href="#" target="_blank" rel="noopener" title="在新标签页打开原图">原图</a>
+          </header>
+          <div class="wc-stale" id="wc-stale" hidden>
+            <span>⚠ 时间轴在这批图生成之后有改动，图可能已过期。</span>
+            <button class="btn ghost sm" id="wc-regen">请 Agent 重新生成</button>
+          </div>
+          <div class="wc-nav">
+            <button class="btn ghost sm" id="wc-prev" title="上一张">◂</button>
+            <select id="wc-sel"></select>
+            <button class="btn ghost sm" id="wc-next" title="下一张">▸</button>
+            <span class="muted small" id="wc-cap"></span>
+          </div>
+          <div class="wc-imgwrap"><img id="wc-img" alt="对轴时频图"></div>
+          <div class="muted small wc-legend">青线=字亮起 · 绿=行起 · 红=收尾/换气 · 灰虚=上行止/下行起 · 黄虚=人声门限 · △=起唱点。横轴为秒，纵轴 50Hz–5.5kHz；由 <span class="mono">KM wavecheck</span> 生成 —— 判读后可通过 Agent 调整时间轴，再重新生成复核。</div>
+        </article>
       </section>
 
       <!-- ============================== STAGE 3 ============================== -->
@@ -266,10 +287,38 @@
                 <button class="btn icon" id="s3-play" title="播放/暂停 (空格)">▶</button>
                 <span class="mono" id="s3-time">0:00.00</span>
                 <input type="range" id="s3-seek" min="0" max="1000" value="0" step="1">
-                <select id="s3-rate"><option value="0.5">0.5×</option><option value="0.75">0.75×</option><option value="1" selected>1×</option></select>
+                <button class="btn ghost sm sq" id="s3-fprev" title="后退一帧 (,)">◂|</button>
+                <button class="btn ghost sm sq" id="s3-fnext" title="前进一帧 (.)">|▸</button>
+                <div class="ab-ctl" id="ab-ctl" title="循环区间：按 [ 设起点、] 设终点，播放到终点自动跳回起点；点亮 A / B 也可直接设为播放位置">
+                  <button class="abbtn" id="ab-a">A</button>
+                  <span class="mono small" id="ab-txt">—</span>
+                  <button class="abbtn" id="ab-b">B</button>
+                  <button class="abbtn clr" id="ab-clear" hidden>✕</button>
+                </div>
+                <select id="s3-rate"><option value="0.25">0.25×</option><option value="0.5">0.5×</option><option value="0.75">0.75×</option><option value="1" selected>1×</option></select>
                 <button class="btn ghost sm" id="s3-frame">引擎帧预览</button>
               </div>
-              <canvas id="s3-timeline" height="120"></canvas>
+              <div class="tl-wrap">
+                <div class="tl-bar">
+                  <span class="muted small" id="tl-lbl">时间轴</span>
+                  <span class="muted small" id="tl-guide">点逐行检查里的「调句子」或「精调」开始调整</span>
+                  <span class="grow"></span>
+                  <span class="muted small" id="tl-keys" hidden>←→ 跳字 · ↑↓ 跳行 · Alt+←→ 平移所选 · Alt+↑↓ 微调 · =/− 节奏点 · P 换气 · [ ] 循环 · , . 帧</span>
+                  <button class="btn ghost sm" id="tl-exit" hidden>× 退出细调</button>
+                </div>
+                <canvas id="s3-timeline" height="150"></canvas>
+                <div class="tl-tools" id="tl-tools" hidden>
+                  <button class="tbtn" id="tl-cpadd" title="增加节奏点：该字多一拍（延音 / 多 mora）">＋节奏点</button>
+                  <button class="tbtn" id="tl-cpsub" title="减少节奏点：合并尾段（有撤销兜底）">−节奏点</button>
+                  <button class="tbtn" id="tl-pause" title="设为 / 取消换气点：本字唱完后停住（P）">换气点</button>
+                  <span class="sep"></span>
+                  <button class="tbtn" id="tl-even" title="在所选范围的首尾之间、按字宽均分所有检查点">均分</button>
+                  <button class="tbtn" id="tl-listen" title="从所选字前 0.2 秒开始播放">▶ 试听字</button>
+                  <button class="tbtn" id="tl-edit" title="编辑这一行的歌词 / 逐词注音（词间对应关系、合并拆分）">✎ 歌词/注音</button>
+                  <span class="grow"></span>
+                  <span class="muted small tl-hintbox" id="tl-hint"></span>
+                </div>
+              </div>
             </article>
             <article class="card collapse" id="export-card">
               <header id="export-head"><h2 title="点击展开 / 收起"><span class="caret">▸</span>导出</h2><button class="btn ghost sm" id="open-app" title="用 Lin-K Lyrics 打开导出的 .yurika / .sug，继续手工精修">在 Lin-K Lyrics 中打开</button><button class="btn ghost sm" id="open-export">打开导出文件夹</button></header>

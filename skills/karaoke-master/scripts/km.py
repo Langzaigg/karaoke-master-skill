@@ -317,6 +317,14 @@ def main(argv: list[str] | None = None) -> int:
     p = sub.add_parser("qa", help="打印质检摘要")
     p.add_argument("job")
 
+    p = sub.add_parser("wavecheck", help="打轴后可选复核：渲染人声波形 + 当前时间轴对照图（供 Agent 按波形细调）")
+    p.add_argument("job")
+    p.add_argument("--lines", help="如 3-12（缺省：全部行）")
+    p.add_argument("--pad", type=float, help="窗口前后留白秒数（缺省 0.8；邻行边界在 2.5s 内自动纳入）")
+    p.add_argument("--audio", help="波形音源（缺省：分离人声）")
+    p.add_argument("--out", help="输出目录（缺省 timing/wavecheck）")
+    p.add_argument("--hop", type=float, help="帧步长秒（缺省 0.01）")
+
     p = sub.add_parser("frame", help="用渲染引擎输出某一时刻的画面")
     p.add_argument("job")
     p.add_argument("t", type=float)

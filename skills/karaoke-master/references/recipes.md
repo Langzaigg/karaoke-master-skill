@@ -13,8 +13,14 @@ milliseconds (`ms`). Several ops can go in one list; checkpoints are kept monoto
 | `shift_lines` | `lines: [i…]` or `from`,`to`, `ms` | one line / a passage early/late |
 | `set_line_span` | `line, start, end` | stretch/squeeze a line into a new range (linear); an untimed line (no timestamps, e.g. an English line the recognizer missed) is distributed evenly over the range — use the synced lyric line's time as the anchor, not a guess |
 | `set_char` | `line, char, cp?, t` | move one checkpoint (char 0-based, cp = mora index) |
+| `shift_chars` | `line`, `chars: [first, last]` (0-based, inclusive; omitted = whole line), `ms` | move some characters of a line (checkpoints + release) without touching their neighbours |
+| `add_checkpoint` | `line, char, t` | one more rhythm checkpoint on a character — the count is resolved on the current project (±1 is server-relative, safe after stale UI reads) |
+| `remove_checkpoint` | `line, char` | drop the last checkpoint of a character (floor 1; `0` = no-mora form is only via `set_check_count`) |
+| `set_check_count` | `line, char, count` | exact checkpoint count (0–16; growing appends `^` pause placeholders, shrinking merges the ruby tail) |
 | `set_line_end` | `line, t` | when the last syllable is released |
 | `set_pause` | `line, char, t` (`t: "auto"` = last voiced moment from the vocal stem; `t: null` removes) | breath / release after a syllable inside the line |
+| `set_word_links` | `line`, `chars: [first, last]` (0-based inclusive) | make that run one word / ruby group — merge with one call, split by calling once per part; only the links flip (timestamps and readings untouched) |
+| `set_word_ruby` | `line`, `chars: [first, last]`, `reading` (`""` clears) | rewrite a word's reading (split across its characters with the engine dictionary, `^` fills short check counts); check counts / timestamps are left untouched |
 | `smooth` | optional `lines`, `strength` (0.5), `max_ms` (80) | 平滑走字: even wipe speed inside phrases |
 | `split_line` | `line`, `char` (first character of the new line, 0-based) | a timed line wider than the frame (qa 「超出画面宽度」); timing kept, stage-1 line split too |
 | `set_singer` | `lines`, `singer` (SUG singer id or name from `timing/timed.json → singers`), optional `chars: [first, last]` (0-based, inclusive) | duet re-assignment after timing; part of a line (a trio entering mid-line) |
@@ -48,6 +54,7 @@ sung at the playhead) — use them for "这句 / 这里 / 刚才那句".
 | 视频段 + 自制图片段拼成一个背景 | 各段写成视频文件，带歌曲音轨才能自动对齐（无音轨用 `--shift`）；`KM oped --add` 依次添加；段内容重做过就 `--render --force`（segment-editing.md §4） |
 | 两首歌别用同样的镜头 | `mv-clips <job2> --avoid-from <job1>` |
 | 走字不够平滑 / 忽快忽慢 | `edit` `[{"op":"smooth"}]` (strength 0.5, ≤ 80 ms per checkpoint; again for more) |
+| 打轴后想对着波形逐行细调（起唱/收尾/换气差几十毫秒） | `KM wavecheck <job> [--lines 3-12] [--pad 2]` → 逐张读 `timing/wavecheck/line_NN.png`（人声时频图 + 当前轴 + 能量/门限曲线，`axis.json` 同数据）判读 → `edit` 修正 → 同批 `wavecheck` 复核；整行错位先 `realign`。字亮起对辅音起音、换气对谱图空档、收尾盖到谐波真正结束（混响拖尾不算），贴「下行起」灰线的谐波是下一行 |
 | 第 3、5、8 行是合唱 | page: select the line numbers, click both singers, 「设为」; chat: `KM singers`/`set_singer` with a 「A＆B」 singer |
 | 「明日」应该读 あした | `set_ruby` on that line（文本没变时时间轴保留，一般无需 realign；页面行表的 ✎ 可直接改） |
 | 第 3–6 行是美雲唱的 | before timing: `lines --singer 3-6=mikumo`; after: `set_singer` with the SUG id |

@@ -1353,8 +1353,10 @@ def _sync_split_stage1(store: JobStore, ops: list[dict]) -> None:
 
 
 def _sync_text_stage1(store: JobStore, project, ops: list[dict]) -> None:
-    """``set_text`` / ``set_ruby`` on the timing project → same change on the stage-1 lyric line."""
-    idxs = [int(o["line"]) for o in ops if o.get("op") in ("set_text", "set_ruby")]
+    """``set_text`` / ``set_ruby`` / ``set_word_ruby`` / ``set_word_links`` on the timing
+    project → same change on the stage-1 lyric line."""
+    idxs = [int(o["line"]) for o in ops
+            if o.get("op") in ("set_text", "set_ruby", "set_word_ruby", "set_word_links")]
     if not idxs:
         return
     from . import sugbridge
@@ -1373,9 +1375,13 @@ def _sync_text_stage1(store: JobStore, project, ops: list[dict]) -> None:
                 line.pop("words", None)  # word-level anchors index into the old text
                 line.pop("match", None)
             spans = [list(r[:3]) for r in sugbridge.ruby_spans_from_project(sugbridge._OneLine(s))[0]]
-            merged: list[list] = []  # 相邻逐字 span 合并回词级（[12,12,'と'],[13,13,'き'] → [12,13,'とき']）
+            # 相邻逐字 span 合并回词级（[12,12,'と'],[13,13,'き'] → [12,13,'とき']），
+            # 但 links 已断开的相邻独立词保持分开（页面上拆分/合并的词重建工程时不丢）
+            chars = s.characters
+            merged: list[list] = []
             for sp in spans:
-                if merged and sp[0] == merged[-1][1] + 1:
+                if (merged and sp[0] == merged[-1][1] + 1
+                        and chars[sp[0] - 1].linked_to_next):
                     merged[-1][1] = sp[1]
                     merged[-1][2] += sp[2]
                 else:
@@ -1517,6 +1523,12 @@ def cmd_qa(args) -> int:
         else:
             store.step("qa", state="done", detail=f"正常 {summ['ok']} · 需注意 {summ['warn']} · 无疑似错误")
     return 0
+
+
+def cmd_wavecheck(args) -> int:
+    from . import wavecheck
+
+    return wavecheck.cmd_wavecheck(args)
 
 
 # ============================================================ render helpers
@@ -1977,11 +1989,18 @@ def apply_stage1(store: JobStore, payload: dict) -> None:
 HISTORY_KEEP = 30
 
 
+def _stamp() -> str:
+    return time.strftime("%Y%m%d-%H%M%S") + f"-{int(time.time() * 1000) % 1000:03d}"
+
+
 def _snapshot(store: JobStore, label: str) -> None:
     """Keep the timing project + singers before a manual change (stage-3 撤销)."""
     hist = store.path("timing", "history")
     hist.mkdir(parents=True, exist_ok=True)
-    stamp = time.strftime("%Y%m%d-%H%M%S") + f"-{int(time.time() * 1000) % 1000:03d}"
+    redo = store.path("timing", "redo")
+    if redo.exists():  # a fresh edit invalidates the redo chain
+        shutil.rmtree(redo)
+    stamp = _stamp()
     shutil.copy2(store.dir / "timing" / "project.sug", hist / f"{stamp}.sug")
     st = store.load()
     write_json(hist / f"{stamp}.json", {"label": label, "singers": st["song"].get("singers") or [],
@@ -1990,35 +2009,85 @@ def _snapshot(store: JobStore, label: str) -> None:
     for old in snaps[:-HISTORY_KEEP]:
         old.unlink(missing_ok=True)
         old.with_suffix(".json").unlink(missing_ok=True)
-    store.update(lambda s: s["timing"].update(undo=len(snaps[-HISTORY_KEEP:]), undo_label=label))
+    store.update(lambda s: s["timing"].update(undo=len(snaps[-HISTORY_KEEP:]), undo_label=label, redo=0))
 
 
-def _undo(store: JobStore) -> str | None:
+def _replay_state(store: JobStore, src: Path, meta: dict) -> None:
+    """Put a saved timing project + job side info back on disk (undo / redo)."""
     from . import render, sugbridge
 
-    hist = store.path("timing", "history")
-    snaps = sorted(hist.glob("*.sug")) if hist.exists() else []
-    if not snaps:
-        return None
-    last = snaps[-1]
-    meta = read_json(last.with_suffix(".json")) or {}
-    shutil.copy2(last, store.dir / "timing" / "project.sug")
-    last.unlink()
-    last.with_suffix(".json").unlink(missing_ok=True)
-    rest = sorted(hist.glob("*.sug"))
-    prev = (read_json(rest[-1].with_suffix(".json")) or {}).get("label") if rest else None
+    shutil.copy2(src, store.dir / "timing" / "project.sug")
+    src.unlink()
+    src.with_suffix(".json").unlink(missing_ok=True)
 
     def upd(s):
         if meta.get("singers"):
             s["song"]["singers"] = meta["singers"]
         if meta.get("lyrics_lines"):
             s["lyrics"]["lines"] = meta["lyrics_lines"]
-        s["timing"].update(undo=len(rest), undo_label=prev)
 
     store.update(upd)
     render.write_web_style(store, refresh=False)
     _run_qa(store, sugbridge.load_project(store.dir / "timing" / "project.sug"))
-    return meta.get("label") or "上一次修改"
+
+
+def _stack_save(src_project: Path, dest_dir: Path, name: str) -> None:
+    """Copy the current project into a stack dir; newest entry last by mtime."""
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    dst = dest_dir / name
+    shutil.copy2(src_project, dst)
+    os.utime(dst, None)  # copy2 keeps the source mtime; the stack order relies on write order
+
+
+def _undo(store: JobStore) -> str | None:
+    hist = store.path("timing", "history")
+    snaps = sorted(hist.glob("*.sug")) if hist.exists() else []
+    if not snaps:
+        return None
+    last = snaps[-1]
+    meta = read_json(last.with_suffix(".json")) or {}
+    # keep the state we are undoing *from*, so 重做 can bring it back
+    redo = store.path("timing", "redo")
+    st = store.load()
+    name = _stamp()  # a fresh name — reusing last.name would overwrite a live snapshot
+    _stack_save(store.dir / "timing" / "project.sug", redo, f"{name}.sug")
+    write_json(redo / f"{name}.json",
+               {"label": meta.get("label"), "singers": st["song"].get("singers") or [],
+                "lyrics_lines": st["lyrics"]["lines"]})
+    rest = sorted(hist.glob("*.sug"))[:-1]
+    prev = (read_json(rest[-1].with_suffix(".json")) or {}).get("label") if rest else None
+    _replay_state(store, last, meta)
+    redos = len(sorted(redo.glob("*.sug")))
+    label = meta.get("label") or "上一次修改"
+    store.update(lambda s: s["timing"].update(undo=len(rest), undo_label=prev, redo=redos,
+                                              redo_label=label))
+    return label
+
+
+def _redo(store: JobStore) -> str | None:
+    redo = store.path("timing", "redo")
+    entries = sorted(redo.glob("*.sug"), key=lambda p: p.stat().st_mtime) if redo.exists() else []
+    if not entries:
+        return None
+    last = entries[-1]  # most recently undone change = next to reapply
+    meta = read_json(last.with_suffix(".json")) or {}
+    # push the current state back onto the undo stack so 撤销 can return here
+    hist = store.path("timing", "history")
+    st = store.load()
+    name = _stamp()  # a fresh name — reusing last.name could collide with a live snapshot
+    _stack_save(store.dir / "timing" / "project.sug", hist, f"{name}.sug")
+    write_json(hist / f"{name}.json",
+               {"label": meta.get("label"), "singers": st["song"].get("singers") or [],
+                "lyrics_lines": st["lyrics"]["lines"]})
+    _replay_state(store, last, meta)
+    rest = sorted(hist.glob("*.sug"))
+    redos = sorted(redo.glob("*.sug"), key=lambda p: p.stat().st_mtime)
+    label = meta.get("label") or "被撤销的修改"
+    store.update(lambda s: s["timing"].update(undo=len(rest),
+                                              undo_label=(read_json(rest[-1].with_suffix(".json")) or {}).get("label") if rest else None,
+                                              redo=len(redos),
+                                              redo_label=(read_json(redos[-1].with_suffix(".json")) or {}).get("label") if redos else None))
+    return label
 
 
 def _ui_singers(store: JobStore, payload: dict) -> list[str]:
@@ -2110,7 +2179,7 @@ def cmd_ui_action(args) -> int:
             from . import sugbridge
 
             ops = payload.get("ops", [])
-            _snapshot(store, "歌词 / 注音修改" if any(o.get("op") in ("set_text", "set_ruby") for o in ops)
+            _snapshot(store, "歌词 / 注音修改" if any(o.get("op") in ("set_text", "set_ruby", "set_word_ruby", "set_word_links") for o in ops)
                       else "平滑走字" if any(o.get("op") == "smooth" for o in ops) else "时间微调")
             project = sugbridge.load_project(store.dir / "timing" / "project.sug")
             log = sugbridge.apply_edits(project, _resolve_auto_ops(store, project, ops))
@@ -2125,6 +2194,9 @@ def cmd_ui_action(args) -> int:
         elif kind == "undo":
             label = _undo(store)
             store.log(f"已撤销：{label}" if label else "没有可撤销的修改")
+        elif kind == "redo":
+            label = _redo(store)
+            store.log(f"已重做：{label}" if label else "没有可重做的修改")
         elif kind == "preview_styles":
             from . import render
 
@@ -2276,6 +2348,7 @@ DISPATCH = {
     "singers": cmd_singers,
     "style": cmd_style,
     "qa": cmd_qa,
+    "wavecheck": cmd_wavecheck,
     "frame": cmd_frame,
     "export": cmd_export,
     "hires": cmd_hires,
