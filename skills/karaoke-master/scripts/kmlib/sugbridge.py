@@ -815,7 +815,9 @@ def apply_edits(project, edits: list[dict]) -> list[str]:
     set_word_links {line, chars: [first, last]} (0-based inclusive: make that run one word /
     ruby group — merge; call per part to split) · set_word_ruby {line, chars: [first, last],
     reading} (rewrite that word's reading, "" clears the furigana; timestamps and check
-    counts are left untouched)
+    counts are left untouched) · word_level {line|lines|from-to?, } (western text: make every
+    whitespace-delimited word one group with a single checkpoint on the word's first character —
+    the review page then edits whole words instead of single letters)
     """
     log = []
     sentences = project.sentences
@@ -885,6 +887,67 @@ def apply_edits(project, edits: list[dict]) -> list[str]:
             if old > 1:  # 0 is the no-mora form — only clearCPs goes there
                 ch.set_check_count(old - 1, force=True, ruby_split_mode="direct")
                 log.append(f"第 {int(ed['line']) + 1} 行第 {int(ed['char']) + 1} 字节奏点 {old} → {old - 1}")
+        elif op == "word_level":
+            # 西洋语按「单词」成组：一个词 = 一段非空白字（连同紧随其后的空白）＝ 一个检查点。
+            # 词首字保留自己的点亮时刻，词内其余字不再单独点亮 —— 于是复核页的
+            # 词轨 / 字块轨都是「一词一块」，可以整词拖；引擎按组几何连续擦除，
+            # 而不是逐字母跳节拍（英文一行十几二十个字母节拍根本没法微调）。
+            # lines / line / from 都可指定范围，缺省 = 全片。
+            targets = _line_list(ed, len(sentences)) if ("line" in ed or "lines" in ed or "from" in ed) \
+                else list(range(len(sentences)))
+            n_word = n_char = 0
+            for li in targets:
+                chars = sentences[li].characters
+                groups, i, n = [], 0, len(chars)
+                while i < n:
+                    if not (chars[i].char or "").strip():
+                        i += 1
+                        continue
+                    j = i
+                    while j + 1 < n and (chars[j + 1].char or "").strip():
+                        j += 1
+                    # 词后的空白并入同一个词，这样空格不会自成一块
+                    b = j + 1 if j + 1 < n and not (chars[j + 1].char or "").strip() else j
+                    groups.append((i, b))
+                    i = b + 1
+                for a, b in groups:
+                    if not chars[a].timestamps:
+                        continue  # 未打轴的行原样保留
+                    for k in range(a, b):
+                        chars[k].linked_to_next = True
+                    chars[b].linked_to_next = False
+                    if chars[a].check_count != 1:
+                        chars[a].set_check_count(1, force=True, ruby_split_mode="direct")
+                    chars[a].timestamps = chars[a].timestamps[:1]
+                    for k in range(a + 1, b + 1):
+                        if chars[k].check_count:
+                            chars[k].set_check_count(0, force=True, ruby_split_mode="direct")
+                        chars[k].timestamps = []
+                    n_word += 1
+                    n_char += b - a
+                # 行尾那个字必须留一个检查点（= 行尾释放时刻）：复核页的行尾手柄
+                # 靠「字有节拍 → c.e 才读得到 sentence_end_ts」才能拖动拉长 / 缩短。
+                # 但**不能**把它设在 sentence_end_ts 上 —— 那样这个字的窗口宽度为 0，
+                # 走字擦到它就变成最后一帧瞬间变色。按词内字数分成等宽格子，让它
+                # 只吃最后一格，擦除前沿才能一路扫过去。
+                tail_i = next((i for i in range(len(chars) - 1, -1, -1) if chars[i].is_sentence_end), None)
+                if tail_i is not None and chars[tail_i].sentence_end_ts is not None:
+                    tch = chars[tail_i]
+                    if tch.check_count != 1:
+                        tch.set_check_count(1, force=True, ruby_split_mode="direct")
+                    se = int(tch.sentence_end_ts)
+                    w0 = tail_i
+                    while w0 > 0 and chars[w0 - 1].linked_to_next:
+                        w0 -= 1
+                    span = (se - int(chars[w0].timestamps[0])) if chars[w0].timestamps else 0
+                    cnt = sum(1 for c in chars[w0:tail_i + 1] if (c.char or "").strip())
+                    if span > 0 and cnt > 1:
+                        tch.timestamps = [max(int(chars[w0].timestamps[0]) + 1,
+                                              int(round(se - span / cnt)))]
+                    else:
+                        tch.timestamps = [se]
+                    tch.linked_to_next = False
+            log.append(f"{n_word} 个词按单词成组（合并 {n_char} 个字节点拍）")
         elif op == "set_word_links":
             # 注音↔歌词对应关系：把字区间 [a..b] 定义为一个词（连词链）。
             # 只动 linked_to_next —— 读音仍挂在各字自己的 ruby 上（词读音 =

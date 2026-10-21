@@ -490,6 +490,13 @@ is busy enough) and adapt it to the song.
      delete it from the library so sibling projects never import it. In-game dialogue subtitles
      of a visual novel are part of the show; keep those shots unless the user objects, but prefer
      them last (`avoid`).
+   - *Which source is this shot from?* When a background was assembled earlier (or by hand) and the
+     plan is gone, recover the mapping instead of guessing: pull the montage frame and match it
+     against each candidate source on 96×54 gray thumbnails — coarse 6 fps scan, then refine
+     ±0.4 s at 30 fps by mean absolute difference (a true match is < 2, a wrong one > 20). The same
+     distance answers "*is* this source frame already used?" — search it over a 2 fps grid of the
+     whole montage; the best MAD under ~10 means it is. Cheaper and far more reliable than eyeballing
+     contact sheets when you need a specific answer.
 5. **Design and plan**: `KM mv <job> --kind montage --preset game_montage`, then a spec of your own
    (theme / notes in Chinese). Then **lay out the shot order yourself**: `KM mv-clips <job> --list`
    prints every pool entry (id, source, `t_in`, duration, motion, score, tags) — order the ids by
@@ -512,6 +519,13 @@ is busy enough) and adapt it to the song.
    (a ballad at ~78), `bars: 1` gives ~3 s shots; `bars: 2` suits ~110–130 BPM.
 6. Check `KM mv <job> --stills` (and the karaoke `frame`s) before exporting. The background video is
    rendered once at export (clips decoded with ffmpeg while drawing, one process).
+   **切点别落在下一镜的黑场淡入上**: official trailers often open a shot with a fade from black
+   (and end the previous one fading out), so a cut that lands on that head shows a brief black
+   flash — very visible right after a hard cut. Inspect each hand-tuned cut point with
+   `ffmpeg … -vf "scale=64:36,format=gray,showinfo"` (prints `mean` and `iskey` per frame;
+   `blackdetect=d=0.05:pix_th=0.12` lists real black runs) and move the cut past the fade, dropping
+   the incoming shot's head instead of fading. Frame-exact way to re-cut an already rendered
+   background: segment-editing.md §6.
 7. **Credits**: `KM mv-clips <job> --credits` lists every source if you need a record.
 8. **Low-quality footage → AI enhance (optional)**: sources below 1080p or 30 fps (VR eye-mirror
    recordings are often 720×720@24) look soft after the cover-crop to 16:9. `KM mv-clips <job>
@@ -545,6 +559,15 @@ is busy enough) and adapt it to the song.
      with the word-level lyrics filling gaps — the same code as `realign --english`, in seconds.
      Line ends that run < 0.3 s into the next line are trimmed; stale mid-line pauses are dropped.
      `--aligner` forces the aligner anyway. It prints `mode`, `lyrics_offset`, `lyrics_agree`.
+   - **拉丁字母的走字粒度**: an English line ends up with one block per **letter** — accurate, but
+     unusable in the page's 字块轨 (twenty blocks and dots per line; nothing can be grabbed) and the
+     wipe reads as a letter-by-letter stutter. For a song the user will hand-tune, run
+     `edit` `[{"op":"word_level"}]` once the axis is roughly right: every whitespace-delimited word
+     becomes one group with a single checkpoint on its first character, so the page edits whole
+     words and each word wipes continuously. It folds the per-letter times into the word's first
+     character — say so before applying it to an axis that was already nudged letter by letter.
+     Fine-grained repair of one word is still possible afterwards (`set_word_links` to split,
+     `set_char` to move that word).
 2. **Review with your own judgement** — `KM qa <job>` lists every line with flags. Fix, then re-run
    `qa`; stop after ~3 rounds and report what is left:
    - "人声能量很低，疑似错位" / "与语音识别位置相差" → `KM realign <job> --lines N[-M]` (auto
@@ -554,6 +577,15 @@ is busy enough) and adapt it to the song.
      (release at the last voiced moment), or realign with a tighter window. A long held **final**
      note is normal.
    - "语速过快" (squeezed) / "与下一行重叠" → realign that line together with its neighbour.
+   - **「整体走字偏慢 / 偏快」先量再改**: measure the per-line offset before shifting anything —
+     take the 20 ms RMS envelope of the vocal stem and, for each line start, the nearest rising
+     edge within ±0.25 s; look at the **median** of those offsets. |median| within ~0.05 s means the
+     axis is already on the singing and a `shift_all` will only make it worse: the real cause is
+     usually elsewhere (missing trailing timestamps per line → see recipes.md「行尾未点亮的字」,
+     or a wipe that finishes early). Only a median clearly away from 0 (or a handful of lines that
+     disagree with their neighbours) justifies per-line `shift_lines` — and never let a bulk op
+     rewrite character timestamps line by line without re-checking that every line still ends with
+     a timed character.
    - "读音待确认"（读音 QA：注音与 ASR 在该词时间窗实际听到的发音不一致）→ 逐条核对，**以音源
      实际演唱为准**——当て字 / 原唱与翻唱读法不同很常见（实例：違う→たがう、瞬間（とき）、
      理由（わけ）；UtaTen 的注音可能来自翻唱版）。确认错了用 `edit` `set_ruby` 改后
@@ -625,6 +657,18 @@ loop and handle `prompt`s:
   `set_word_ruby` rewrites readings only, `set_word_links` flips word links only.
 - Timing: "第 12 行晚了 0.2 秒" → `edit` `[{"op":"shift_lines","lines":[11],"ms":-200}]`;
   "整体提前 0.1 秒" → `shift_all`; "这句" uses `active_line` / `t` from the payload.
+- **行尾手柄拖不动 / 只能把行首提前、行尾拉不出去**: the page's right handle (`edge-r`) needs the
+  line's `is_sentence_end` character to **own a checkpoint** — that is how the view reads
+  `sentence_end_ts` and how the drag writes it back. A character with no checkpoints gets its `c.e`
+  recomputed to "the previous character's end", so the drag is undone on the next frame. So any bulk
+  operation that clears checkpoints (`word_level`, `set_check_count 0`, a home-grown script) must
+  leave one checkpoint on that character.
+  **But do not put it on `sentence_end_ts`**: that gives the glyph a zero-width window, and the
+  last letter then flips colour in a single frame (「每句最后一个字母是瞬间变色」) while the rest of
+  the line sweeps. Give it **one character-cell before the release** — `se − (se − word_start) /
+  chars_in_last_word` — so the sweep runs through the final glyph and still ends at the release.
+  Retrofit an existing project with `edit` `[{"op":"set_char","line":i,"char":last,"cp":0,"t":…}]`
+  for every line.
 - Readings: `edit` `set_ruby` then `realign --lines N`. **The page can do text and ruby edits
   itself**: the ✎ button on each line of the stage-3 table (or the toolbar's ✎ 歌词/注音 / double-click
   a line bar) opens an editor with the lyric-text box, a per-word list (one reading box per word;
@@ -758,5 +802,18 @@ with the skill venv and loads the exported project.
   ranges through yt-dlp's own session for that reason (a 403 mid-download re-extracts a fresh URL;
   "Sign in to confirm you're not a bot" moves on to the next player client). If a source still
   fails, re-run that one `--add` later — finished sections are kept and skipped.
+  Ad-hoc `yt-dlp --download-sections` (outside `mv-clips`) has the *same* problem from the other
+  side: the section is cut with **ffmpeg**, which does not inherit yt-dlp's proxy and dies with
+  `Error number -138` / an empty output. Drop `--download-sections` and `--force-keyframes-at-cuts`
+  and pull one video-only format whole (`-f 299` = mp4 1080p60, `-f 137` = mp4 1080p30), then trim
+  locally.
+- **Export overwrites the deliverables in place** (`<name>.mp4`, `(on vocal)`, `(off vocal)` are
+  written to the same paths, no temp + rename): killing a render halfway leaves a truncated mp4
+  where a good one used to be. So (a) never start a full re-render before confirming *which*
+  version the user wants, (b) let an already-running one finish rather than aborting it, and (c)
+  don't run two exports at once — two `hevc_qsv` jobs with 4 workers each slow each other down by
+  ~40 % and gain nothing. Several variants (a merged-lyrics cut, an alternate background) belong in
+  **separate project folders** with their own `options.output_dir`, not in repeated re-exports of
+  one job.
 - Command output must stay JSON: `km.py` drops QFluentWidgets' advert from stdout.
 - Logs: `<job>/logs/events.log`, page-triggered actions in `<job>/logs/ui_actions.log`.

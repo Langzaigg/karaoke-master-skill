@@ -21,6 +21,7 @@ milliseconds (`ms`). Several ops can go in one list; checkpoints are kept monoto
 | `set_pause` | `line, char, t` (`t: "auto"` = last voiced moment from the vocal stem; `t: null` removes) | breath / release after a syllable inside the line |
 | `set_word_links` | `line`, `chars: [first, last]` (0-based inclusive) | make that run one word / ruby group — merge with one call, split by calling once per part; only the links flip (timestamps and readings untouched) |
 | `set_word_ruby` | `line`, `chars: [first, last]`, `reading` (`""` clears) | rewrite a word's reading (split across its characters with the engine dictionary, `^` fills short check counts); check counts / timestamps are left untouched |
+| `word_level` | `line` / `lines` / `from`+`to` (omitted = whole song) | Latin-script text: make every whitespace-delimited word **one group with a single checkpoint on its first character** — the review page then edits whole words instead of single letters, and each word wipes as a unit. Drops the per-letter times inside each word (merged into the word's first character); the line's last character keeps one checkpoint **one character-cell before the release** (not *at* it — a checkpoint equal to `sentence_end_ts` gives that glyph a zero-width window, and the final letter turns in a single frame instead of wiping) |
 | `smooth` | optional `lines`, `strength` (0.5), `max_ms` (80) | 平滑走字: even wipe speed inside phrases |
 | `split_line` | `line`, `char` (first character of the new line, 0-based) | a timed line wider than the frame (qa 「超出画面宽度」); timing kept, stage-1 line split too |
 | `set_singer` | `lines`, `singer` (SUG singer id or name from `timing/timed.json → singers`), optional `chars: [first, last]` (0-based, inclusive) | duet re-assignment after timing; part of a line (a trio entering mid-line) |
@@ -43,6 +44,9 @@ sung at the playhead) — use them for "这句 / 这里 / 刚才那句".
 | 英文行没有时间戳（识别失败 / Ooh Woo 语气词） | measure the constant offset of the synced lyric (`timed start − t` over the timed lines, median), then `edit` `[{"op":"set_line_span","line":i,"start":t+off,"end":next_t+off-0.15}]` — the line is distributed evenly; report it as an anchor, not an alignment |
 | 素材分辨率 / 帧率低（720×720@24 的 VR 单眼录像等） | `mv-clips JOB --enhance --only-used`（RIFE 补帧 ×2 + Real-ESRGAN 超分 ×2，串行、可续跑；全程长录像别跑，太贵） |
 | 英文行太长 | before timing: `lines --split-long 17` (Latin letters count half; splits at a comma near the middle) + Latin font override; after timing: `edit` `split_line` at the comma |
+| 英文一行二三十个字块，每个字母一块根本拖不动 | `edit` `[{"op":"word_level"}]`（整首）或带 `lines` 只改几行：每个单词成一个组、只在词首字留一个检查点，字块轨 / 词轨都变成「一词一块」，走字也变成整词连续擦过。**词内各字母原有的独立时间会被合并到词首字**——手工逐字母调过就先说明代价再动 |
+| 走字在每行末尾停住，最后几个字一起蹦出来 | 反解来的轴（卡拉OK 视频 / 字幕文件）常常缺行尾字的时间戳 → 见下面「行尾未点亮的字」 |
+| 一句歌词被拆成两行、两行之间几乎没有空隙 | 见下面「合并被拆开的短句」（合并后要确认没超画面宽度） |
 | 用游戏实况 / PV 卡点剪辑做背景 | `mv-clips --search` → `--add URL --sections a-b,…` → `--sheet` (look) → `--exclude` → `mv --kind montage --preset game_montage` |
 | 长镜头 / 官方 PV 整段拼成背景（不剪碎） | `oped <job> --add URL\|路径 [--section A-B] [--speed X]` → `--list`（看对齐与空隙）→ `--render`，再 `{"background":{"type":"oped"}}` |
 | 背景上要有频谱可视化 | `{"background":{"visualize":true}}` —— 三种模式通用；叠加方式 `visualize_mode`: `auto` / `overlay` / `dim` / `blur`（视频 / OPED 背景），混剪 / 可视化设计则用 `visualize:false` 去掉设计里的频谱层 |
@@ -62,6 +66,50 @@ sung at the playhead) — use them for "这句 / 这里 / 刚才那句".
 | 按这个字幕 / 歌割り分歌手 | `singers JOB --from parts.ass` (or the パート分け URL) → read `need_map` → re-run with `--map "#ff2125=A" --map "#000000=和声" --map "#ffcc00=-"` |
 | 合唱部分用拼色 / 只分三种颜色 | `set --song` with singers `[{"name":"A","color":"#FF8A1E"},{"name":"B","color":"#A04BFF"},{"name":"和声","color":"#CF6A8E","colors":["#FF8A1E","#A04BFF"]}]`, then `singers … --map` members-together keys to 和声 |
 | 投屏看着字幕慢半拍 | `KM export <job> --cast-delay 300 …` (picture leads by 300 ms; default 200) |
+
+## 行尾未点亮的字 (trailing characters without timestamps)
+
+反解来的时间轴（从卡拉OK 视频的擦除进度、或某些 LRC / 字幕源导入）经常只覆盖到行中段：一行的
+最后 2–6 个字的 `timestamps` 是空的。引擎对没有时间戳的字只能「跟着前一个字亮」或「到行尾才亮」，
+看起来就是**走字提前停住、最后几个字一坨蹦出来**——很容易被误判成「轴整体偏慢」。
+
+- 自查：`timing/project.sug` 里 `characters[].timestamps == []` 的字占比，正常应为 0。
+- 补齐：取最后一个有点亮时刻的字 `t0` 与行尾 `T`、空字数 `k`，
+  `cell = (T - t0) / (k + 1)`，第 m 个空字 = `t0 + cell * m`。用 `k+1` 而不是 `k`，最后一个字
+  才留得住一格余量、不会正好压在行尾。补完 `KM qa` 复核。
+- 补完 `qa` 里英文行的「语速过快」会变多，那是**口径变化**（之前压根没把这些字算进去），不是
+  质量退化：拉丁字母 11–14 字/秒 ≈ 3–4 音节/秒，属正常演唱。
+
+## 合并被拆开的短句 (merging lyric fragments)
+
+有些歌词源把一句话拆成两行甚至三行，行间几乎没有空隙——显示上就是每 1–2 秒跳一次行。
+合并判据，三条都要满足：
+
+1. **间隔无缝**：`gap = next.start − line.end` ≤ ~0.2 s（用 `timing/timed.json` 逐行算）。
+2. **合并后不超画面宽度**：先量再并。`render/web_layout.json` 的 `lines[i].box[2]` 是引擎算出的
+   行宽（含字距），两行相加 + 一个空格 ≈ 合并后宽度；超过画面宽 `w` 就不能并。并完再刷新一次
+   布局看 `overflow` 复核。
+3. **时长合理**：合并后的行不该明显长于全片其他行——一行挂太久观感更差。
+
+实现没有现成的 merge op，写脚本跑在**派生工程**里（别动用户正在调的原工程）：
+
+```python
+merged = build_project([{"text": A_text + " " + B_text, "ruby": None}]).sentences[0]
+for k in range(len(A.characters)):                 # A 的字按位搬时间
+    _copy_char_timing(merged.characters[k], A.characters[k])
+for k in range(len(B.characters)):                 # 中间那格空格留空，B 接在后面
+    _copy_char_timing(merged.characters[len(A.characters) + 1 + k], B.characters[k])
+for ch in merged.characters[:-1]:                  # 只留行尾那个字做句尾
+    ch.is_sentence_end = False
+    ch.sentence_end_ts = None
+project.sentences[ia] = merged
+del project.sentences[ib]
+```
+
+**合并对从后往前处理**（否则行号错位）；建完对新行再跑一次 `word_level` 重建词组，然后
+`save_project` + 刷新视图。每个词的时刻合并前后完全一致，所以轴不用重打。
+`build_project` 出来的字符数必须正好等于「A 的字数 + 1 + B 的字数」（A 尾部 / B 头部的空白先
+剥掉，再把两段的首字逐字比对一遍）——对不上就说明文本被规范化过，直接报错退出，别硬写。
 
 ## Style patch (`KM style <job> @patch.json`)
 

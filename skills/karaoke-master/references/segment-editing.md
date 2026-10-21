@@ -138,3 +138,34 @@ The output is a normal video file again — nothing downstream knows about the v
   and end.
 - Records: keep the producing script + plan with the job; set `--label` / `--credit` on each oped
   segment so what was built (and from what source) stays recorded.
+
+## 6. 改一个剪辑点 — frame-exact splice of an already rendered background
+
+背景已经烘好、用户只想挪一个切点（「19 秒那个切点推后一点」「切过去闪了一下黑」）时，不要重剪
+整段，按帧号拼接：
+
+- **先定帧号**：`-vf "scale=64:36,format=gray,showinfo"` 逐帧打 `mean` / `iskey`，切点是
+  `iskey:1` 那帧；淡入 / 淡出看 `mean` 的单调升降段（不是真黑，`blackdetect` 抓不到）；
+  `blackdetect=d=0.05:pix_th=0.12` 只用来列真黑场。
+- **换掉哪一段**：切点推后 = 前一个镜头的源再往后放几帧填住空档，后一个镜头的头部丢掉同样
+  帧数**（后一镜内容在时间轴上的位置完全不变，只是开头被跳过）**。前者要用**前一镜自己的源**
+  续帧，别从别处找镜头，否则等于新增一个切点。
+- **滤波图**（帧数必须严格不变，否则字幕轴会漂）：
+
+```
+[0:v]split=2[b0][b1];
+[b0]trim=end_frame=<A>,setpts=PTS-STARTPTS,format=yuv420p,setsar=1[a];
+[b1]trim=start_frame=<B>,setpts=PTS-STARTPTS,format=yuv420p,setsar=1[c];
+[1:v]fps=<fps>,trim=start=<源起点>:end=<源终点>,setpts=PTS-STARTPTS,
+     scale=<W>:<H>,setsar=1,format=yuv420p[b];
+[a][b][c]concat=n=3:v=1:a=0[v]
+```
+
+  输出加 `-frames:v <总帧数>` 兜底，编完 `ffprobe nb_frames` 必须等于原值。
+- **冻结溶解**（切点处要做个柔化而不是硬切）：两侧各取 1 帧 → `loop=loop=N-1:size=1:start=0`
+  各铺成 N 帧 → `blend=all_expr='A*(1-min(T/D\,1))+B*(min(T/D\,1))'`；N 帧正好等于要填的
+  空档，别多用。
+- **校验**：新文件抽切点前后各 1 帧看画面，并对切点前后 1 秒打一次 `mean`，确认黑降段消失、
+  切点帧号正确；再对成片同一个时间点抽查一次（渲染过一遍后才是真的）。
+- 派生工程 / 双版本时，**同一个背景文件要同步替换两处**（各自 `media/` 下都有副本），并核对
+  两边 md5 一致 —— 否则两个版本会出现不同的背景。
