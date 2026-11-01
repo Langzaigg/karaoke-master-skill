@@ -659,8 +659,10 @@ loop and handle `prompt`s:
   Tool row: ±节奏点 · 换气点 · 均分 · 试听字 · ✎ 歌词/注音; hover any element to see what it does.
   Everything goes through `edit_timing` ops (`set_char` / `shift_chars` / `add_checkpoint` /
   `remove_checkpoint` / `set_pause` / `set_line_end` / `set_word_links` / `set_word_ruby`),
-  debounced in batches, each batch one undo step. Word-level ops never touch timestamps:
-  `set_word_ruby` rewrites readings only, `set_word_links` flips word links only.
+  debounced in batches, each batch one undo step. `set_word_ruby` rewrites readings only;
+  `set_word_links` flips word links and — when the flip creates a new word inside a line that
+  `word_level` already collapsed — gives that word's first character an interpolated checkpoint
+  (without one the wipe runs straight through the split, so the user's ✂ appears to do nothing).
 - Timing: "第 12 行晚了 0.2 秒" → `edit` `[{"op":"shift_lines","lines":[11],"ms":-200}]`;
   "整体提前 0.1 秒" → `shift_all`; "这句" uses `active_line` / `t` from the payload.
 - **行尾手柄拖不动 / 只能把行首提前、行尾拉不出去**: the page's right handle (`edge-r`) needs the

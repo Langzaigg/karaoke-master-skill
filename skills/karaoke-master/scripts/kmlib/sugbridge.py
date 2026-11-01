@@ -951,7 +951,7 @@ def apply_edits(project, edits: list[dict]) -> list[str]:
         elif op == "set_word_links":
             # 注音↔歌词对应关系：把字区间 [a..b] 定义为一个词（连词链）。
             # 只动 linked_to_next —— 读音仍挂在各字自己的 ruby 上（词读音 =
-            # 组内读音相接），时间戳不受影响；合并 / 拆分都是本 op。
+            # 组内读音相接），已有时间戳不受影响；合并 / 拆分都是本 op。
             li = int(ed["line"])
             a, b = int(ed["chars"][0]), int(ed["chars"][1])
             chars = sentences[li].characters
@@ -960,7 +960,11 @@ def apply_edits(project, edits: list[dict]) -> list[str]:
             for i in range(a, b):
                 chars[i].linked_to_next = True
             chars[b].linked_to_next = False
-            log.append(f"第 {li + 1} 行第 {a + 1}–{b + 1} 字并为一个词")
+            # 拆分时新词首字通常是 word_level 清空过的（无检查点）——不补一个的话
+            # 走字会一路扫过词边界，看起来像“没切开”
+            added = _word_head_cp(chars, b)
+            log.append(f"第 {li + 1} 行第 {a + 1}–{b + 1} 字并为一个词"
+                       + (f"（新词首字补检查点 {added / 1000:.3f} 秒）" if added is not None else ""))
         elif op == "set_word_ruby":
             # 词级读音编辑：把 [a..b] 的注音整体改写为 reading（空 = 清除注音）。
             # 读音按字切分（字典 → 均分，与 Utaten 导入同口径、经
@@ -1200,6 +1204,59 @@ def smooth_wipe(sentences, indices, strength: float = 0.5, max_ms: int = 80, pas
                     chars[ci].timestamps[j] = int(round(v))
                     moved += 1
     return moved
+
+
+def _word_head_cp(chars: list, end_index: int) -> int | None:
+    """Give the word that starts right after ``end_index`` its own checkpoint.
+
+    Splitting a word inside an already word-level line (``word_level``) leaves the new
+    word's first character with ``check_count == 0`` and no timestamps, so the wipe
+    simply runs on through the boundary — the split looks like it never happened.
+    Interpolate one checkpoint from the neighbouring timed characters so the new word
+    really lights up on its own (and can be dragged afterwards).
+
+    Returns the inserted time in ms, or ``None`` when nothing had to be added.
+    """
+    n = len(chars)
+    s = end_index + 1
+    while s < n and not (chars[s].char or "").strip():
+        s += 1
+    if s >= n:
+        return None
+    head = chars[s]
+    if head.check_count and head.timestamps:
+        return None
+
+    prev_i, prev_t = -1, None
+    for p in range(s - 1, -1, -1):
+        ts = [t for t in chars[p].timestamps if t is not None]
+        if ts:
+            prev_i, prev_t = p, int(ts[-1])
+            break
+    next_i, next_t = n, None
+    for q in range(s + 1, n):
+        ts = [t for t in chars[q].timestamps if t is not None]
+        if ts:
+            next_i, next_t = q, int(ts[0])
+            break
+    if prev_t is None and next_t is None:
+        return None
+    if prev_t is not None and next_t is not None:
+        span = max(1, next_i - prev_i)
+        t = int(prev_t + (next_t - prev_t) * (s - prev_i) / span)
+        t = max(prev_t + 1, min(next_t - 1, t))
+    elif prev_t is not None:
+        t = prev_t + 120 * (s - prev_i)
+    else:
+        t = max(0, int(next_t) - 120 * (next_i - s))
+
+    if head.check_count != 1:
+        head.set_check_count(1, force=True, ruby_split_mode="direct")
+    if head.timestamps:
+        head.timestamps[0] = t
+    else:
+        head.add_timestamp(t, 0)
+    return t
 
 
 def _line_list(ed: dict, n: int) -> list[int]:
