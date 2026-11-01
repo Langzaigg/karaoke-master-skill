@@ -559,12 +559,18 @@ is busy enough) and adapt it to the song.
      with the word-level lyrics filling gaps — the same code as `realign --english`, in seconds.
      Line ends that run < 0.3 s into the next line are trimmed; stale mid-line pauses are dropped.
      `--aligner` forces the aligner anyway. It prints `mode`, `lyrics_offset`, `lyrics_agree`.
-   - **拉丁字母的走字粒度**: an English line ends up with one block per **letter** — accurate, but
-     unusable in the page's 字块轨 (twenty blocks and dots per line; nothing can be grabbed) and the
-     wipe reads as a letter-by-letter stutter. For a song the user will hand-tune, run
-     `edit` `[{"op":"word_level"}]` once the axis is roughly right: every whitespace-delimited word
-     becomes one group with a single checkpoint on its first character, so the page edits whole
-     words and each word wipes continuously. It folds the per-letter times into the word's first
+   - **拉丁字母的走字粒度 —— 默认「一个单词一个时间点」**: an English line ends up with one block per
+     **letter** — accurate, but unusable in the page's 字块轨 (twenty blocks and dots per line;
+     nothing can be grabbed) and the wipe reads as a letter-by-letter stutter. Unless the user asks
+     for per-letter timing, run `edit` `[{"op":"word_level"}]` on every western-text song once the
+     axis is roughly right: every whitespace-delimited word becomes one group with a single
+     checkpoint on its first character, so the page edits whole words and each word wipes
+     continuously. **The review granularity is the point** — one block per word is what a human can
+     still correct line by line; per-syllable or per-letter blocks make proof-reading fiddly and add
+     isolated single-glyph blocks that nobody can drag. Split a **long word** (roughly ≥ 10 letters
+     held over a long note) only when the wipe visibly lags behind the singing, and then at most
+     1–2 checkpoints inside it (e.g. `Entertain` | `ment`) via `set_word_links` + `set_char`; never
+     fragment a line into syllables. `word_level` folds the per-letter times into the word's first
      character — say so before applying it to an axis that was already nudged letter by letter.
      Fine-grained repair of one word is still possible afterwards (`set_word_links` to split,
      `set_char` to move that word).
