@@ -1658,6 +1658,55 @@ def set_background(store: JobStore, background: dict) -> dict:
     return bg
 
 
+def _ncm_ready(paths: list[str] | None, *, log=None) -> list[str]:
+    """把参数里的 .ncm 就地解密成无损文件，其余原样返回。"""
+    from pathlib import Path as _Path
+
+    from . import ncm
+
+    out: list[str] = []
+    for p in paths or []:
+        if not p:
+            continue
+        if ncm.is_ncm(p):
+            out.append(str(ncm.ensure_audio(_Path(p), log=log)))
+        else:
+            out.append(str(p))
+    return out
+
+
+def cmd_ncm(args) -> int:
+    """ncm → flac/mp3（无损音源），不依赖任务，可以单独跑。"""
+    from pathlib import Path as _Path
+
+    from . import ncm
+
+    results = []
+    for src in args.files:
+        p = _Path(str(src).strip().strip('"'))
+        if not p.is_file():
+            results.append({"input": str(p), "error": "文件不存在"})
+            continue
+        if not ncm.is_ncm(p):
+            results.append({"input": str(p), "error": "不是 .ncm 文件"})
+            continue
+        try:
+            meta = ncm.read_meta(p)
+            out = ncm.dump(p, args.out, overwrite=args.overwrite)
+        except Exception as exc:  # 损坏/非标准 ncm 不该让整批失败
+            results.append({"input": str(p), "error": str(exc)})
+            continue
+        results.append({
+            "input": str(p), "output": str(out),
+            "format": str(meta.get("format") or "").upper(),
+            "title": meta.get("musicName"), "album": meta.get("album"),
+            "bitrate": meta.get("bitrate"), "duration_ms": meta.get("duration"),
+            "size_mb": round(out.stat().st_size / 1e6, 1),
+        })
+    _p({"converted": results})
+    return 0 if all("error" not in r for r in results) else 1
+
+
 def set_hires_source(store: JobStore, on: str | None, offs: list[str] | None, *, align: bool = True) -> dict:
     """Register (or clear) the stage-1 Hi-Res source; stage 2 then separates / aligns on it."""
     from . import tracks
@@ -1677,6 +1726,9 @@ def set_hires_source(store: JobStore, on: str | None, offs: list[str] | None, *,
         store.update(clear)
         store.log("已取消 Hi-Res 音源，打轴改回使用素材音频")
         return {"on": None, "offs": [], "notes": ["已取消 Hi-Res 音源"]}
+    # .ncm（网易云加密容器）先就地解密成 flac/mp3，后面的对齐与分离照常
+    on = (_ncm_ready([on], log=store.log) or [None])[0] if on else None
+    offs = _ncm_ready(offs, log=store.log)
     store.set_status("正在对齐 Hi-Res 音源", "working")
     res = tracks.register_hires(store, on, offs, align=align)
     store.set_status("Hi-Res 音源已登记：打轴将使用它分离人声" if res.get("on") else "Hi-Res 音源未能登记", None)
@@ -1897,7 +1949,9 @@ def cmd_hires(args) -> int:
 
     store = JobStore(args.job)
     try:
-        outs = hires.cmd_hires(store, on=args.on, offs=args.off, video=args.video, align=not args.no_align)
+        on = (_ncm_ready([args.on], log=store.log) or [None])[0] if args.on else None
+        offs = _ncm_ready(args.off, log=store.log) if args.off else None
+        outs = hires.cmd_hires(store, on=on, offs=offs, video=args.video, align=not args.no_align)
     except BaseException as exc:
         from . import render
 
@@ -2384,6 +2438,7 @@ DISPATCH = {
     "frame": cmd_frame,
     "export": cmd_export,
     "hires": cmd_hires,
+    "ncm": cmd_ncm,
     "open-app": cmd_open_app,
     "ui-action": cmd_ui_action,
 }

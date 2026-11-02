@@ -330,6 +330,11 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("t", type=float)
     p.add_argument("--out")
 
+    p = sub.add_parser("ncm", help="解密网易云 .ncm 无损音源（转 flac/mp3）")
+    p.add_argument("files", nargs="+", help="一个或多个 .ncm 文件")
+    p.add_argument("--out", help="输出目录（缺省：与 ncm 同目录）")
+    p.add_argument("--overwrite", action="store_true", help="已存在同名输出时重新解密")
+
     p = sub.add_parser("export", help="导出工程 / 成品")
     p.add_argument("job")
     p.add_argument("--kinds", default="sug,yurika,mp4,onoff", help="sug,yurika,lrc,mp4,onoff,mv,hires")

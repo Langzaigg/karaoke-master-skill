@@ -155,6 +155,15 @@ Run these in this order; start the slow one first.
    The page's output card has the same fields (changing them re-registers; the server handles it).
    `--clear` reverts to the media audio. For audio-only jobs a lossless input file is already used
    as timing audio automatically.
+
+   **NetEase Cloud Music `.ncm` files are accepted directly** (the player's encrypted FLAC/MP3
+   container — what "下载到本地" gives you). `KM hires-source --on foo.ncm` decrypts it in place
+   first, and `KM hires --on foo.ncm` does the same. To batch-convert the whole download folder:
+   `KM ncm "<a.ncm>" "<b.ncm>" … [--out DIR] [--overwrite]`. AES-128 decryption is implemented in
+   `kmlib/ncm.py` (pure Python — the runtime ships no crypto package), and the audio XOR is
+   vectorised with numpy: a 116 MB lossless file converts in ~3 s. Output goes next to the source
+   as `<name>.flac` unless `--out` says otherwise; the command prints title / album / bitrate /
+   duration so the right file can be matched to the job before registering it.
 1. **Analysis (background, 3–6 min on CPU):** `KM analyze <job>` — vocal separation (SUG's
    UVR-MDX-NET-Inst_HQ_3 model, ONNX) + faster-whisper ASR on
    the vocal stem of the timing audio. Progress shows on the page. ASR runs in `song.language`
@@ -777,7 +786,8 @@ with the skill venv and loads the exported project.
 | `lyrics-search JOB --query Q [--utaten-query Q]` · `lyrics-use JOB ID\|file [--ruby-from ID] [--split-long N]` | lyrics (a `.lrc` file → candidate `user-lrc`; `has_verbatim` = word-level) |
 | `lines JOB [--list] [--split N:pos] [--merge N] [--dup N] [--delete N] [--include R] [--exclude R] [--singer R=id] [--ruby N:a-b=かな] [--reannotate] [--fix-char N:pos=X] [--split-long N]` | stage-1 line ops; `--list` 显示内联注音 `{漢字||かんじ}`（打轴前逐行核对读音） |
 | `match JOB [--apply] [--ref ID]` | locate lines via ASR + synced reference |
-| `hires-source JOB [--on F] [--off F …] [--no-align] [--clear]` | stage-1 lossless source → timing audio |
+| `hires-source JOB [--on F] [--off F …] [--no-align] [--clear]` | stage-1 lossless source → timing audio（`F` 可直接给 `.ncm`，会先就地解密） |
+| `ncm FILE … [--out DIR] [--overwrite]` | 解密网易云 `.ncm` → 同目录 FLAC/MP3；打印标题/专辑/码率/时长；不依赖 job |
 | `mv JOB [--kind mv\|montage] [--list-presets] [--preset ID] [--spec @f] [--show] [--stills] [--gallery] [--video] [--seconds N] [--overlay [@f]]` | 混剪 / 可视化 designer (alias `spectrum`)；`--overlay` 单独用 = 打印乐曲可视化叠加层，带 `@f` = 写入自定义图层 |
 | `mv-video JOB [--search Q] [--n N] [--info URL\|#k] [--use URL\|#k] [--local PATH] [--max-height H]` | MV background from YouTube / Bilibili or a local video, aligned to the song |
 | `oped JOB [--add PATH\|URL [--label L] [--credit C] [--section A-B] [--speed X]] … [--shift sN=SEC] [--remove sN] [--clear] [--list] [--render [--fade S] [--force]]` | OP/ED 拼接背景: each source waveform-aligned, stitched in add order with cross-fades, gaps freeze-filled; `--section` uses only part of a source, `--speed` slow-stretches it |
