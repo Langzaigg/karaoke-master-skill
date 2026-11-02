@@ -1721,11 +1721,17 @@ function renderStage3() {
   const bk = bgKind(bg.type || ((m.source && m.source.has_video) ? "source" : "mv"));
   const dk = bk === "montage" ? "montage" : bk === "mv" || !(m.source && m.source.has_video) ? "mv" : null;
   let src = m.player;
+  if (m.player_rev) src = `${src}?r=${m.player_rev}`;
   const dv = dk && ((m.designs || {})[dk] || {}).video;
   if (dv && bk !== "subs") src = dv;
   const poster = bk === "oped" && (m.oped || {}).still ? m.oped.still
     : dk && (m.design_still || {})[dk] ? (m.design_still || {})[dk] : m.thumb;
   if (vid.dataset.src !== src) { vid.dataset.src = src; vid.src = fileUrl(src); vid.poster = poster && bk !== "subs" ? fileUrl(poster) : ""; }
+  const srcBadge = $("#s3-src-badge");
+  if (srcBadge) {
+    srcBadge.hidden = !m.player_note;
+    if (m.player_note) srcBadge.textContent = (m.player_stale ? "预览媒体（更新中）· " : "预览 = 导出素材 · ") + m.player_note;
+  }
   vid.style.opacity = bk === "subs" ? 0 : 1;
   $("#s3-player").style.background = bk === "subs" ? (bg.color || "#000") : "";
   const ef = (j.previews || {}).engine_frame;

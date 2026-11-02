@@ -464,6 +464,20 @@ class Handler(BaseHTTPRequestHandler):
     def _job_payload(self) -> dict:
         store = self.store
         job = store.load()
+        # stage-3 preview must show/hear what the export will actually use
+        # (patched MV / Hi-Res audio), so hand the page the muxed preview file
+        try:
+            from . import media as _media
+
+            pv = _media.preview_media(store, job)
+            if pv:
+                job.setdefault("media", {})
+                job["media"]["player"] = pv["path"]
+                job["media"]["player_rev"] = pv["rev"]
+                job["media"]["player_note"] = pv["note"]
+                job["media"]["player_stale"] = pv["stale"]
+        except Exception as exc:  # never break the page for a preview problem
+            store.log(f"预览媒体生成失败：{exc}")
         drafts = {}
         drafts_dir = store.dir / "drafts"
         if drafts_dir.is_dir():

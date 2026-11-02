@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import subprocess
+import threading
 from pathlib import Path
 
 import numpy as np
@@ -144,6 +145,113 @@ def browser_proxy(src: str | Path, dst: str | Path, info: dict) -> Path:
     if res.returncode != 0:
         raise RuntimeError(f"生成浏览器预览视频失败：{res.stderr.strip()}")
     return dst
+
+
+_PREVIEW_LOCK = threading.Lock()
+_PREVIEW_BUSY: set[str] = set()
+
+
+def _sig(path: Path) -> list:
+    try:
+        st = Path(path).stat()
+        return [str(path), st.st_size, int(st.st_mtime)]
+    except OSError:
+        return [str(path), 0, 0]
+
+
+def effective_sources(store, job: dict) -> dict:
+    """Resolve what the exporter will actually render: background video + audio track."""
+    m = job.get("media") or {}
+    opts = job.get("options") or {}
+    bg = opts.get("background") or {}
+    kind = bg.get("type") or ("source" if (m.get("source") or {}).get("has_video") else "mv")
+    video = None
+    if kind in ("video", "oped", "montage") and bg.get("path"):
+        raw = str(bg["path"])
+        video = Path(raw) if Path(raw).is_absolute() else store.abs(raw)
+    if video is None or not Path(video).is_file():
+        src = (m.get("source") or {}).get("path")
+        video = Path(src) if src else None
+    hr = (m.get("hires") or {}).get("on")
+    audio = Path(hr) if hr and Path(hr).is_file() else (store.abs(m["audio"]) if m.get("audio") else None)
+    return {"video": Path(video) if video else None, "audio": Path(audio) if audio else None,
+            "background_kind": kind}
+
+
+def preview_media(store, job: dict) -> dict | None:
+    """Browser-playable file that shows *and sounds like* the finished export.
+
+    Stage-3 used to play the ingested source, so a replaced/patched MV (censor pass,
+    reframed 4:3, montage) or a Hi-Res audio track never showed up in the page. This
+    muxes the effective background video with the effective audio track into
+    ``media/preview_media.mp4`` and rebuilds it in a background thread whenever either
+    input changes, so ``/api/job`` never blocks on the transcode.
+    """
+    m = job.get("media") or {}
+    if not m.get("source"):
+        return None
+    eff = effective_sources(store, job)
+    video, audio = eff["video"], eff["audio"]
+    if not video or not audio:
+        return None
+    seg = (m.get("source") or {}).get("segment") or {}
+    start = float(seg.get("start") or 0.0)
+    dur = seg.get("end") or (m.get("source") or {}).get("duration") or 0.0
+    try:
+        dur = float(dur) - start
+    except (TypeError, ValueError):
+        dur = 0.0
+    if dur <= 0:
+        return None
+
+    out = store.path("media", "preview_media.mp4")
+    meta_path = store.path("media", "preview_media.json")
+    key = {"video": _sig(video), "audio": _sig(audio), "start": round(start, 3), "dur": round(dur, 3)}
+    cached = {}
+    if meta_path.is_file():
+        try:
+            cached = json.loads(meta_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            cached = {}
+    fresh = cached.get("key") == key and out.is_file() and out.stat().st_size > 0
+
+    if not fresh:
+        with _PREVIEW_LOCK:
+            if str(out) not in _PREVIEW_BUSY:
+                _PREVIEW_BUSY.add(str(out))
+
+                def build() -> None:
+                    tmp = out.with_suffix(".tmp.mp4")
+                    cmd = [ffmpeg_exe(), "-y", "-v", "error"]
+                    if start > 0:
+                        cmd += ["-ss", f"{start:.3f}"]
+                    cmd += ["-i", str(video), "-i", str(audio), "-map", "0:v:0", "-map", "1:a:0",
+                            "-t", f"{dur:.3f}", "-vf", "scale=-2:'min(720,ih)'",
+                            "-c:v", "libx264", "-preset", "veryfast", "-crf", "26",
+                            "-c:a", "aac", "-b:a", "160k", "-movflags", "+faststart", str(tmp)]
+                    try:
+                        res = run(cmd)
+                        if res.returncode == 0 and tmp.is_file():
+                            tmp.replace(out)
+                            meta_path.write_text(json.dumps({"key": key}, ensure_ascii=False),
+                                                 encoding="utf-8")
+                    finally:
+                        try:
+                            tmp.unlink()
+                        except OSError:
+                            pass
+                        with _PREVIEW_LOCK:
+                            _PREVIEW_BUSY.discard(str(out))
+
+                threading.Thread(target=build, name="km-preview-media", daemon=True).start()
+
+    if not out.is_file():
+        return None
+    note = "导出用音源" if (m.get("hires") or {}).get("on") else "工程音源"
+    if eff["background_kind"] in ("video", "oped", "montage"):
+        note += " + 修改后的 MV"
+    return {"path": store.rel(out), "rev": int(out.stat().st_mtime), "note": note,
+            "stale": not fresh}
 
 
 def load_mono(path: str | Path, sr: int = 16000) -> np.ndarray:

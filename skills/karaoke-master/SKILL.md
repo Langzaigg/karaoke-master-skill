@@ -653,6 +653,12 @@ per-line 「调句子」 / 「精调」 buttons and "⇤ 播放头", a singer ba
 「⬇ 一键导出」, plus a 「导出到」 folder picker). Those are handled by the server. You run the wait
 loop and handle `prompt`s:
 
+- **播放器的画面和声音 = 导出用的那一套**：`/api/job` 会返回 `media.player` = `media/preview_media.mp4`，
+  这是由**实际导出背景**（`options.background` 指向的改动版 MV，没改则用源片）和**实际音源**
+  （注册过 Hi-Res 就用 FLAC，否则 `media/audio.wav`）重新混出来的 720p 预览，输入一变就在后台线程里重建
+  （`player_stale: true` 表示还在重建，页面角标显示「更新中」）。所以换了背景/换了音源，页面跟着变，
+  **不需要另外渲一版预览**；用户说「预览里看不到改动」时先查 `options.background` 指对了没有。
+
 - **字符级细调** (word- and line-boundary scales + reading edits): a line's 「调句子」 / 「精调」
   buttons zoom the timeline into that line — four lanes:
   上下文轨 (drag the `▲上行收尾` / `▼下行起唱` marks = the previous line's release / the next
