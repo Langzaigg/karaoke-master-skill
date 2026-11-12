@@ -56,7 +56,16 @@ def _escape_block_text(text: str) -> str:
 def line_to_utaten(text: str, ruby: Iterable[Iterable[Any]] | None) -> str:
     """``text`` + ``[[start, end, reading], ...]`` (inclusive char ranges) →
     UtaTen ruby markup ``{漢字||かんじ}``."""
-    spans = sorted(((int(a), int(b), str(r)) for a, b, r in (ruby or []) if str(r).strip()), key=lambda x: x[0])
+    spans = []
+    for item in ruby or []:
+        parts = list(item)
+        if len(parts) < 3:
+            continue
+        a, b, reading = parts[0], parts[1], parts[2]
+        if not str(reading).strip():
+            continue
+        spans.append((int(a), int(b), str(reading)))
+    spans.sort(key=lambda x: x[0])
     out: list[str] = []
     pos = 0
     for start, end, reading in spans:
